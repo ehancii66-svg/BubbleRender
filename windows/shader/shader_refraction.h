@@ -37,9 +37,14 @@ const char* refractionFragmentShader = R"(#version 330 core
 uniform float uFresnelPower;
 uniform float uShininess;
 uniform float uDiffuseness;
+uniform float uRefractionStrength;
+uniform float uEdgeDistortionBoost;
+uniform float uMaxOffsetRatio;
 uniform vec3 uLight;
 
 uniform vec2 uWinResolution;
+uniform vec2 uFBOSize;
+uniform float uSpherePixelRadius;
 uniform sampler2D uBackgroundTexture;
 
 in vec3 vEyeVector;
@@ -67,12 +72,30 @@ float specular(vec3 light, vec3 eye, vec3 normal, float shininess, float diffuse
 void main() {
     float iorRatio = 1.0/1.33;
 
-    vec2 uv = gl_FragCoord.xy / uWinResolution.xy;
     vec3 normal = normalize(vWorldNormal);
     vec3 eye = vEyeVector;
 
     vec3 refractVec = mat3(vView) * refract(eye, normal, iorRatio);
-    vec3 color = texture(uBackgroundTexture, uv + refractVec.xy).rgb;
+
+    // Edge factor: 0 at center, 1 at silhouette
+    float edge = 1.0 - abs(dot(eye, normal));
+    float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edge, 1.5));
+
+    vec2 offsetPixels = refractVec.xy * uRefractionStrength * uSpherePixelRadius * edgeBoost;
+
+    // Clamp to a ratio of sphere radius to prevent sampling beyond FBO margin
+    float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
+    offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
+
+    // Map screen pixel to FBO pixel (FBO is larger, content is centered)
+    vec2 screenPixel = gl_FragCoord.xy;
+    vec2 pad = (uFBOSize - uWinResolution) * 0.5;
+    vec2 fboPixel = screenPixel + pad;
+
+    vec2 samplePixel = clamp(fboPixel + offsetPixels, vec2(0.0), uFBOSize);
+    vec2 sampleUV = samplePixel / uFBOSize;
+
+    vec3 color = texture(uBackgroundTexture, sampleUV).rgb;
 
     float specularLight = specular(uLight, eye, normal, uShininess, uDiffuseness);
     color += specularLight;

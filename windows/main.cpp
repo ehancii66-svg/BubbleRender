@@ -33,9 +33,12 @@ static float g_CameraDistance = 7.0f;
 static float g_CurrentAngleX  = 0.0f;   // pitch
 static float g_CurrentAngleY  = 0.0f;   // yaw
 
-static float g_FresnelPower  = 8.0f;
-static float g_Shininess     = 15.0f;
-static float g_Diffuseness   = 0.2f;
+static float g_FresnelPower         = 8.0f;
+static float g_Shininess            = 15.0f;
+static float g_Diffuseness          = 0.2f;
+static float g_RefractionStrength   = 4.0f;
+static float g_EdgeDistortionBoost  = 2.2f;
+static float g_MaxOffsetRatio       = 1.5f;
 static glm::vec3 g_Light     = glm::vec3(-1.0f, 1.0f, 1.0f);
 
 static Camera g_Camera;
@@ -56,6 +59,10 @@ static GLuint g_BackgroundFBO     = 0;
 static GLuint g_BackFaceFBO       = 0;
 static GLuint g_DepthRB           = 0;
 static GLuint g_CubemapTexture    = 0;
+
+static constexpr float kFBOOverscan = 1.3f;
+static int g_FBOWidth  = 0;
+static int g_FBOHeight = 0;
 
 // ============================================================
 // Mouse state
@@ -104,18 +111,27 @@ static GLuint LoadCubemapTexture(const std::vector<std::string>& faceFiles)
 // ============================================================
 static void InitFBO(int w, int h)
 {
+    // Overscan: FBO is larger than screen to provide margin for refraction offsets
+    g_FBOWidth  = static_cast<int>(w * kFBOOverscan);
+    g_FBOHeight = static_cast<int>(h * kFBOOverscan);
+    int fboW = g_FBOWidth;
+    int fboH = g_FBOHeight;
+
+    float borderColor[] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
     glGenRenderbuffers(1, &g_DepthRB);
     glBindRenderbuffer(GL_RENDERBUFFER, g_DepthRB);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fboW, fboH);
 
     // -------- backgroundFBO --------
     glGenTextures(1, &g_BackgroundTexture);
     glBindTexture(GL_TEXTURE_2D, g_BackgroundTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
 
     glGenFramebuffers(1, &g_BackgroundFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackgroundFBO);
@@ -128,11 +144,12 @@ static void InitFBO(int w, int h)
     // -------- backFaceFBO --------
     glGenTextures(1, &g_BackFaceTexture);
     glBindTexture(GL_TEXTURE_2D, g_BackFaceTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
 
     glGenFramebuffers(1, &g_BackFaceFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackFaceFBO);
@@ -181,6 +198,13 @@ static void RenderFrame()
     glm::mat4 proj  = g_Camera.getProjectionMatrix();
 
     auto SetRefractUniforms = [&]() {
+        // Compute sphere's screen-space pixel radius for refraction offset scaling
+        float dist = glm::length(g_Camera.getPosition());
+        float fovVert = glm::radians(g_Camera.getFov());
+        float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
+        float angularRadius = atanf(1.5f / dist);
+        float spherePixelRadius = angularRadius * pixelsPerRadian;
+
         g_RefractionShader->Use();
         g_RefractionShader->SetMat4("uModel", model);
         g_RefractionShader->SetMat4("uView", view);
@@ -189,8 +213,13 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         g_RefractionShader->SetFloat("uShininess", g_Shininess);
         g_RefractionShader->SetFloat("uDiffuseness", g_Diffuseness);
+        g_RefractionShader->SetFloat("uRefractionStrength", g_RefractionStrength);
+        g_RefractionShader->SetFloat("uEdgeDistortionBoost", g_EdgeDistortionBoost);
+        g_RefractionShader->SetFloat("uMaxOffsetRatio", g_MaxOffsetRatio);
+        g_RefractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
         g_RefractionShader->SetVec3("uLight", g_Light);
         g_RefractionShader->SetVec2("uWinResolution", glm::vec2((float)w, (float)h));
+        g_RefractionShader->SetVec2("uFBOSize", glm::vec2((float)g_FBOWidth, (float)g_FBOHeight));
     };
 
     auto SetBackgroundUniforms = [&]() {
@@ -217,9 +246,12 @@ static void RenderFrame()
         g_SkyboxModel->Draw(*g_SkyboxShader);
     };
 
-    // ========== Pass 1: Render background to backgroundFBO ==========
+    int fboW = g_FBOWidth;
+    int fboH = g_FBOHeight;
+
+    // ========== Pass 1: Render background to backgroundFBO (overscanned) ==========
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackgroundFBO);
-    glViewport(0, 0, w, h);
+    glViewport(0, 0, fboW, fboH);
     glEnable(GL_DEPTH_TEST);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -227,7 +259,7 @@ static void RenderFrame()
     glCullFace(GL_BACK);
 
     glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_FALSE);      //not write to depth buffer, set the sky to infinite depth
+    glDepthMask(GL_FALSE);
     DrawSkybox();
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
@@ -236,7 +268,7 @@ static void RenderFrame()
 
     // ========== Pass 2: Render refraction sphere back faces to backFaceFBO ==========
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackFaceFBO);
-    glViewport(0, 0, w, h);
+    glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glCullFace(GL_FRONT);
@@ -319,7 +351,7 @@ static void CursorPosCallback(GLFWwindow* window, double xpos, double ypos)
 static void ScrollCallback(GLFWwindow* window, double xoffset, double yoffset)
 {
     g_CameraDistance -= (float)yoffset * 0.5f;
-    g_CameraDistance = glm::clamp(g_CameraDistance, 2.0f, 20.0f);
+    g_CameraDistance = glm::clamp(g_CameraDistance, 3.5f, 20.0f);
 }
 
 static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -352,6 +384,30 @@ static void KeyCallback(GLFWwindow* window, int key, int scancode, int action, i
     case GLFW_KEY_B:
         g_Shininess = std::min(64.0f, g_Shininess + step);
         std::cout << "Shininess: " << g_Shininess << std::endl;
+        break;
+    case GLFW_KEY_Y:
+        g_RefractionStrength = std::max(0.0f, g_RefractionStrength - 0.1f);
+        std::cout << "RefractionStrength: " << g_RefractionStrength << std::endl;
+        break;
+    case GLFW_KEY_H:
+        g_RefractionStrength = std::min(7.0f, g_RefractionStrength + 0.1f);
+        std::cout << "RefractionStrength: " << g_RefractionStrength << std::endl;
+        break;
+    case GLFW_KEY_U:
+        g_EdgeDistortionBoost = std::max(1.0f, g_EdgeDistortionBoost - 0.1f);
+        std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
+        break;
+    case GLFW_KEY_J:
+        g_EdgeDistortionBoost = std::min(5.0f, g_EdgeDistortionBoost + 0.1f);
+        std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
+        break;
+    case GLFW_KEY_I:
+        g_MaxOffsetRatio = std::max(0.1f, g_MaxOffsetRatio - 0.05f);
+        std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
+        break;
+    case GLFW_KEY_K:
+        g_MaxOffsetRatio = std::min(2.0f, g_MaxOffsetRatio + 0.05f);
+        std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
         break;
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -502,6 +558,9 @@ int main()
     std::cout << "R/T : Fresnel power -/+" << std::endl;
     std::cout << "F/G : Diffuseness -/+" << std::endl;
     std::cout << "V/B : Shininess -/+" << std::endl;
+    std::cout << "Y/H : Refraction strength -/+" << std::endl;
+    std::cout << "U/J : Edge distortion boost -/+" << std::endl;
+    std::cout << "I/K : Max offset ratio -/+" << std::endl;
     std::cout << "ESC : Quit" << std::endl;
     std::cout << "================" << std::endl;
 
