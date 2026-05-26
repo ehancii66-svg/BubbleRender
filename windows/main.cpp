@@ -227,7 +227,7 @@ static void RenderFrame()
     glCullFace(GL_BACK);
 
     glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_FALSE);
+    glDepthMask(GL_FALSE);      //not write to depth buffer, set the sky to infinite depth
     DrawSkybox();
     glDepthMask(GL_TRUE);
     glDepthFunc(GL_LESS);
