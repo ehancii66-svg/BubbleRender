@@ -2,7 +2,7 @@
     "cmake.sourceDirectory": "${workspaceFolder}/windows",
     "cmake.buildDirectory": "${workspaceFolder}/windows/build",
     "cmake.configureArgs": [
-        "-DCMAKE_TOOLCHAIN_FILE=C:/dev/vcpkg/scripts/buildsystems/vcpkg.cmake"
+        "-DCMAKE_TOOLCHAIN_FILE=${workspaceFolder}/vcpkg/scripts/buildsystems/vcpkg.cmake"
     ],
     "cmake.generator": "Visual Studio 17 2022",
     "cmake.parallelJobs": 8
