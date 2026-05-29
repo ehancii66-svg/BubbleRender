@@ -39,13 +39,13 @@ vcpkg/
 
 本机已确认可用：
 
-| 工具 | 状态 |
-|------|------|
-| Visual Studio 2022 Community | 已安装 |
-| MSVC x64 编译器 | 已由 vcpkg 和 CMake 检测到 |
-| Git | 已安装 |
-| CMake | 已安装 |
-| vcpkg | 已克隆并 bootstrap |
+| 工具                         | 状态                       |
+| ---------------------------- | -------------------------- |
+| Visual Studio 2022 Community | 已安装                     |
+| MSVC x64 编译器              | 已由 vcpkg 和 CMake 检测到 |
+| Git                          | 已安装                     |
+| CMake                        | 已安装                     |
+| vcpkg                        | 已克隆并 bootstrap         |
 
 Windows 11 64 位环境下，VS Code CMake Kit 应选择：
 
