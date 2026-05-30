@@ -18,6 +18,7 @@ uniform vec3 uCameraPos;
 
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
+out vec3 vWorldPos;
 out vec2 vUV;
 out mat4 vView;
 out mat4 vProj;
@@ -27,6 +28,7 @@ void main() {
     gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
     vEyeVector = normalize(worldPos.xyz - uCameraPos);
     vWorldNormal = normalize(uModel * vec4(aNormal, 0.0)).xyz;
+    vWorldPos = worldPos.xyz;
     vUV = aTexCoord;
     vView = uView;
     vProj = uProj;
@@ -57,6 +59,7 @@ uniform float uTime;            // time for animation
 
 in vec3 vEyeVector;
 in vec3 vWorldNormal;
+in vec3 vWorldPos;
 in vec2 vUV;
 in mat4 vView;
 in mat4 vProj;
@@ -117,6 +120,81 @@ vec3 kim2012Iridescence(float NdotV, float thickness) {
     float r = thinFilmReflectance(NdotV, thickness, 615.0);
     float g = thinFilmReflectance(NdotV, thickness, 535.0);
     float b = thinFilmReflectance(NdotV, thickness, 465.0);
+    return vec3(r, g, b);
+}
+
+vec2 complexMul(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+vec2 complexDiv(vec2 a, vec2 b) {
+    float d = max(dot(b, b), 1e-6);
+    return vec2(a.x * b.x + a.y * b.y, a.y * b.x - a.x * b.y) / d;
+}
+
+float fresnelAmplitudeS(float etaA, float etaB, float cosA, float cosB) {
+    return (etaA * cosA - etaB * cosB) / (etaA * cosA + etaB * cosB);
+}
+
+float fresnelAmplitudeP(float etaA, float etaB, float cosA, float cosB) {
+    return (etaB * cosA - etaA * cosB) / (etaB * cosA + etaA * cosB);
+}
+
+float transmissionAmplitudeS(float etaA, float etaB, float cosA, float cosB) {
+    return (2.0 * etaA * cosA) / (etaA * cosA + etaB * cosB);
+}
+
+float transmissionAmplitudeP(float etaA, float etaB, float cosA, float cosB) {
+    return (2.0 * etaA * cosA) / (etaB * cosA + etaA * cosB);
+}
+
+float airyPolarizedReflectance(float cosTheta, float thickness, float wavelength, bool parallel) {
+    float eta1 = 1.0;   // air
+    float eta2 = 1.33;  // soap film
+    float eta3 = 1.0;   // air inside the bubble
+
+    float sin1Sq = max(0.0, 1.0 - cosTheta * cosTheta);
+    float sin2 = sqrt(sin1Sq) * eta1 / eta2;
+    float cos2 = sqrt(max(0.0, 1.0 - sin2 * sin2));
+    float cos3 = cosTheta;
+
+    float r12 = parallel
+        ? fresnelAmplitudeP(eta1, eta2, cosTheta, cos2)
+        : fresnelAmplitudeS(eta1, eta2, cosTheta, cos2);
+    float r21 = parallel
+        ? fresnelAmplitudeP(eta2, eta1, cos2, cosTheta)
+        : fresnelAmplitudeS(eta2, eta1, cos2, cosTheta);
+    float r23 = parallel
+        ? fresnelAmplitudeP(eta2, eta3, cos2, cos3)
+        : fresnelAmplitudeS(eta2, eta3, cos2, cos3);
+
+    float t12 = parallel
+        ? transmissionAmplitudeP(eta1, eta2, cosTheta, cos2)
+        : transmissionAmplitudeS(eta1, eta2, cosTheta, cos2);
+    float t21 = parallel
+        ? transmissionAmplitudeP(eta2, eta1, cos2, cosTheta)
+        : transmissionAmplitudeS(eta2, eta1, cos2, cosTheta);
+
+    float phase = (4.0 * 3.14159265 * eta2 * thickness * cos2) / wavelength;
+    vec2 phaseShift = vec2(cos(phase), sin(phase));
+    vec2 numerator = complexMul(vec2(t12 * r23 * t21, 0.0), phaseShift);
+    vec2 denominator = vec2(1.0, 0.0) - complexMul(vec2(r21 * r23, 0.0), phaseShift);
+    vec2 amplitude = vec2(r12, 0.0) + complexDiv(numerator, denominator);
+    return clamp(dot(amplitude, amplitude), 0.0, 1.0);
+}
+
+// Belcour2017-style Airy reflectance: sum all internal reflection orders
+// for an air-soap-air thin film. Used to tint environment reflection.
+float airyThinFilmReflectance(float cosTheta, float thickness, float wavelength) {
+    float rs = airyPolarizedReflectance(cosTheta, thickness, wavelength, false);
+    float rp = airyPolarizedReflectance(cosTheta, thickness, wavelength, true);
+    return 0.5 * (rs + rp);
+}
+
+vec3 belcourAiryIridescence(float NdotV, float thickness) {
+    float r = airyThinFilmReflectance(NdotV, thickness, 615.0);
+    float g = airyThinFilmReflectance(NdotV, thickness, 535.0);
+    float b = airyThinFilmReflectance(NdotV, thickness, 465.0);
     return vec3(r, g, b);
 }
 
@@ -188,6 +266,22 @@ float snoise(vec3 v) {
     return 42.0 * dot(m * m, vec4(dot(p0, x0), dot(p1, x1), dot(p2, x2), dot(p3, x3)));
 }
 
+float filmNoise(vec3 p) {
+    float n = 0.0;
+    float amp = 0.5;
+    n += amp * snoise(p);
+    p = p * 2.03 + vec3(13.1, 7.7, 5.3);
+    amp *= 0.5;
+    n += amp * snoise(p);
+    p = p * 2.07 + vec3(3.9, 17.2, 11.5);
+    amp *= 0.5;
+    n += amp * snoise(p);
+    p = p * 2.11 + vec3(19.4, 2.6, 23.8);
+    amp *= 0.5;
+    n += amp * snoise(p);
+    return n * 0.53 + 0.5;
+}
+
 // ============================================================
 // Fresnel reflection term (Kim2012 Eq 9 approximation)
 // ============================================================
@@ -224,9 +318,25 @@ void main() {
 
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
-    float noiseVal = snoise(vec3(vUV * 5.0, uTime * 0.6)) * 0.5 + 0.5;
-    float dynamicThickness = uThickness + (noiseVal - 0.5) * uThicknessVar;
+    vec3 filmDir = normalize(vWorldNormal);
+    float flowSpeed = 1.25;
+    vec3 slowFlow = vec3(uTime * 0.09, -uTime * 0.17, uTime * 0.07) * flowSpeed;
+    vec3 warp = vec3(
+        snoise(filmDir * 1.15 + slowFlow),
+        snoise(filmDir * 1.25 + slowFlow.yzx + vec3(4.1, 1.3, 2.7)),
+        snoise(filmDir * 1.05 + slowFlow.zxy + vec3(8.2, 5.4, 0.9))
+    ) * 0.12;
+    float broadNoise = filmNoise(filmDir * 2.0 + warp + slowFlow);
+    float flowNoise = filmNoise(filmDir * 3.4 + warp * 0.7 + slowFlow.yzx * 0.8);
+    float fineNoise = filmNoise(filmDir * 7.0 + slowFlow.zxy * 0.45);
+    float drainage = smoothstep(-0.85, 0.85, -filmDir.y);
+    float thicknessPattern = (broadNoise - 0.5) * 0.52
+        + (flowNoise - 0.5) * 0.30
+        + (fineNoise - 0.5) * 0.06
+        + (drainage - 0.5) * 0.42;
+    float dynamicThickness = uThickness + thicknessPattern * uThicknessVar;
     vec3 filmReflectance = kim2012Iridescence(NdotV, dynamicThickness);
+    vec3 airyReflectance = belcourAiryIridescence(NdotV, dynamicThickness);
 
     // ---- 2. Refraction (screen-space FBO distortion) ----
     // Use eye (camera->surface) as incident direction for refraction
@@ -273,7 +383,7 @@ void main() {
     // reflectance, so iridescence behaves like colored reflected light.
     vec3 reflectDir = normalize(reflect(eye, normal));
     vec3 envColor = texture(uEnvironmentMap, reflectDir).rgb;
-    vec3 filmReflectionTint = filmReflectance * (1.0 + fresnelTerm * 2.4);
+    vec3 filmReflectionTint = airyReflectance * (1.0 + fresnelTerm * 2.4);
     filmReflectionTint = filmReflectionTint / (1.0 + filmReflectionTint);
     float envReflectionWeight = uEnvironmentReflectionStrength
         * surfaceColorScale

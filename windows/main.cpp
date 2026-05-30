@@ -67,7 +67,7 @@ static int g_FBOHeight = 0;
 
 // Kim2012 iridescence parameters
 static float g_Thickness = 350.0f;    // 皂膜厚度 (nm)
-static float g_ThicknessVar = 250.0f; // 厚度扰动幅度 (nm)
+static float g_ThicknessVar = 160.0f; // 厚度扰动幅度 (nm)
 static double g_Time = 0.0;           // 时间
 
 // ============================================================
@@ -635,7 +635,7 @@ int main()
     // -------- Models --------
     g_SkyboxModel = Model::CreateSkyboxCube();
 
-    g_RefractModel = Model::CreateSphere(1.5f, 64, 32, true);
+    g_RefractModel = Model::CreateSphere(1.5f, 128, 64, true);
 
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
