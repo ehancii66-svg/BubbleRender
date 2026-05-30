@@ -36,9 +36,10 @@ static float g_CurrentAngleY = 0.0f; // yaw
 static float g_FresnelPower = 8.0f;
 static float g_Shininess = 15.0f;
 static float g_Diffuseness = 0.2f;
-static float g_RefractionStrength = 4.0f;
-static float g_EdgeDistortionBoost = 2.2f;
-static float g_MaxOffsetRatio = 1.5f;
+static float g_RefractionStrength = 1.4f;
+static float g_EdgeDistortionBoost = 1.7f;
+static float g_MaxOffsetRatio = 0.7f;
+static float g_EnvironmentReflectionStrength = 0.65f;
 static glm::vec3 g_Light = glm::vec3(-1.0f, 1.0f, 1.0f);
 
 static Camera g_Camera;
@@ -211,7 +212,7 @@ static void RenderFrame()
     glm::mat4 view = g_Camera.getViewMatrix();
     glm::mat4 proj = g_Camera.getProjectionMatrix();
 
-    auto SetRefractUniforms = [&]()
+    auto SetRefractUniforms = [&](bool isBackFace)
     {
         // Compute sphere's screen-space pixel radius for refraction offset scaling
         float dist = glm::length(g_Camera.getPosition());
@@ -231,7 +232,11 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uRefractionStrength", g_RefractionStrength);
         g_RefractionShader->SetFloat("uEdgeDistortionBoost", g_EdgeDistortionBoost);
         g_RefractionShader->SetFloat("uMaxOffsetRatio", g_MaxOffsetRatio);
+        g_RefractionShader->SetFloat("uEnvironmentReflectionStrength", g_EnvironmentReflectionStrength);
         g_RefractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
+        g_RefractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
+        g_RefractionShader->SetInt("uBackgroundTexture", 0);
+        g_RefractionShader->SetInt("uEnvironmentMap", 1);
         g_RefractionShader->SetVec3("uLight", g_Light);
         g_RefractionShader->SetVec2("uWinResolution", glm::vec2((float)w, (float)h));
         g_RefractionShader->SetVec2("uFBOSize", glm::vec2((float)g_FBOWidth, (float)g_FBOHeight));
@@ -294,10 +299,11 @@ static void RenderFrame()
 
     glCullFace(GL_FRONT);
 
-    SetRefractUniforms();
+    SetRefractUniforms(true);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_BackgroundTexture);
-    glUniform1i(glGetUniformLocation(g_RefractionShader->m_id, "uBackgroundTexture"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
     g_RefractModel->Draw(*g_RefractionShader);
 
     // ========== Pass 3: Render to screen ==========
@@ -316,10 +322,11 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
-    SetRefractUniforms();
+    SetRefractUniforms(false);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, g_BackFaceTexture);
-    glUniform1i(glGetUniformLocation(g_RefractionShader->m_id, "uBackgroundTexture"), 0);
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
     g_RefractModel->Draw(*g_RefractionShader);
 }
 
@@ -421,7 +428,7 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         std::cout << "RefractionStrength: " << g_RefractionStrength << std::endl;
         break;
     case GLFW_KEY_H:
-        g_RefractionStrength = std::min(7.0f, g_RefractionStrength + 0.1f);
+        g_RefractionStrength = std::min(4.0f, g_RefractionStrength + 0.1f);
         std::cout << "RefractionStrength: " << g_RefractionStrength << std::endl;
         break;
     case GLFW_KEY_U:
@@ -429,7 +436,7 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
         break;
     case GLFW_KEY_J:
-        g_EdgeDistortionBoost = std::min(5.0f, g_EdgeDistortionBoost + 0.1f);
+        g_EdgeDistortionBoost = std::min(3.0f, g_EdgeDistortionBoost + 0.1f);
         std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
         break;
     case GLFW_KEY_I:
@@ -437,8 +444,16 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
         break;
     case GLFW_KEY_K:
-        g_MaxOffsetRatio = std::min(2.0f, g_MaxOffsetRatio + 0.05f);
+        g_MaxOffsetRatio = std::min(1.2f, g_MaxOffsetRatio + 0.05f);
         std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
+        break;
+    case GLFW_KEY_O:
+        g_EnvironmentReflectionStrength = std::max(0.0f, g_EnvironmentReflectionStrength - 0.05f);
+        std::cout << "EnvironmentReflectionStrength: " << g_EnvironmentReflectionStrength << std::endl;
+        break;
+    case GLFW_KEY_P:
+        g_EnvironmentReflectionStrength = std::min(1.5f, g_EnvironmentReflectionStrength + 0.05f);
+        std::cout << "EnvironmentReflectionStrength: " << g_EnvironmentReflectionStrength << std::endl;
         break;
     case GLFW_KEY_N:
         g_Thickness = std::max(100.0f, g_Thickness - 20.0f);
@@ -661,6 +676,7 @@ int main()
     std::cout << "Y/H : Refraction strength -/+" << std::endl;
     std::cout << "U/J : Edge distortion boost -/+" << std::endl;
     std::cout << "I/K : Max offset ratio -/+" << std::endl;
+    std::cout << "O/P : Environment reflection -/+" << std::endl;
     std::cout << "N/M : Film thickness -/+ (nm)" << std::endl;
     std::cout << "1/2 : Thickness variation -/+" << std::endl;
     std::cout << "ESC : Quit" << std::endl;

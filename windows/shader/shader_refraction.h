@@ -46,7 +46,10 @@ uniform vec3 uLight;
 uniform vec2 uWinResolution;
 uniform vec2 uFBOSize;
 uniform float uSpherePixelRadius;
+uniform int uIsBackFace;
 uniform sampler2D uBackgroundTexture;
+uniform samplerCube uEnvironmentMap;
+uniform float uEnvironmentReflectionStrength;
 
 uniform float uThickness;       // film thickness d (nm)
 uniform float uThicknessVar;    // thickness variation amplitude (nm)
@@ -212,6 +215,10 @@ void main() {
     float iorRatio = 1.0 / 1.33;
 
     vec3 normal = normalize(vWorldNormal);
+    if (uIsBackFace == 1) {
+        normal = -normal;
+    }
+
     vec3 eye = vEyeVector;
     float NdotV = abs(dot(eye, normal));
 
@@ -226,7 +233,8 @@ void main() {
     vec3 refractVec = mat3(vView) * refract(eye, normal, iorRatio);
     float edge = 1.0 - NdotV;
     float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edge, 1.5));
-    vec2 offsetPixels = refractVec.xy * uRefractionStrength * uSpherePixelRadius * edgeBoost;
+    float surfaceRefractionScale = (uIsBackFace == 1) ? 0.35 : 1.0;
+    vec2 offsetPixels = refractVec.xy * uRefractionStrength * surfaceRefractionScale * uSpherePixelRadius * edgeBoost;
     float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
     offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
     vec2 screenPixel = gl_FragCoord.xy;
@@ -241,31 +249,43 @@ void main() {
     // Transmitted light = 1 - R_lambda (complementary colors).
     // Reflected light creates visible iridescence; transmitted light shows background.
 
-    // Moderate boost: raw reflectance values are 0.01-0.8, need ~2-3x for visibility
-    vec3 iridescence = filmReflectance * 2.5;
+    // Moderate boost: raw reflectance values are 0.01-0.8, need extra visibility.
+    float surfaceColorScale = (uIsBackFace == 1) ? 0.18 : 1.0;
+    vec3 iridescence = filmReflectance * 1.55 * surfaceColorScale;
 
     // Fresnel edge factor: 0 at center, 1 at silhouette
     float fresnelTerm = pow(1.0 - NdotV, uFresnelPower);
 
     // Iridescence gets stronger at glancing angles (Fresnel enhancement)
-    iridescence *= (1.0 + fresnelTerm * 3.0);
+    iridescence *= (1.0 + fresnelTerm * 1.8);
 
     // Soft clamp to prevent neon colors at edges: x/(1+x) maps [0,inf) to [0,1)
     iridescence = iridescence / (1.0 + iridescence);
 
-    // Transparency: bubble is mostly clear, slightly less at edges
-    // Center: ~90% transparent. Edge: ~50% transparent due to Fresnel reflection.
-    float transparency = 1.0 - fresnelTerm * 0.5;
+    // A soap film is much thinner than a glass sphere: keep the center nearly clear
+    // and let the silhouette carry most of the visible surface response.
+    float transparency = mix(0.97, 0.78, fresnelTerm);
 
-    // Transmitted background + reflected iridescence
+    // Transmitted background + local thin-film color.
     vec3 color = bgColor * transparency + iridescence;
+
+    // Environment reflection: the cubemap reflection is tinted by thin-film
+    // reflectance, so iridescence behaves like colored reflected light.
+    vec3 reflectDir = normalize(reflect(eye, normal));
+    vec3 envColor = texture(uEnvironmentMap, reflectDir).rgb;
+    vec3 filmReflectionTint = filmReflectance * (1.0 + fresnelTerm * 2.4);
+    filmReflectionTint = filmReflectionTint / (1.0 + filmReflectionTint);
+    float envReflectionWeight = uEnvironmentReflectionStrength
+        * surfaceColorScale
+        * mix(0.06, 0.55, fresnelTerm);
+    color += envColor * filmReflectionTint * envReflectionWeight;
 
     // Specular highlight (bright spot from light source)
     float specularLight = specular(uLight, eye, normal, uShininess, uDiffuseness);
-    color += specularLight * 0.5;
+    color += specularLight * 0.35 * surfaceColorScale;
 
     // Fresnel white edge glow (environment reflection at grazing angles)
-    color = mix(color, vec3(1.0), fresnelTerm * 0.15);
+    color = mix(color, vec3(1.0), fresnelTerm * 0.06 * surfaceColorScale);
 
     FragColor = vec4(color, 1.0);
 }
