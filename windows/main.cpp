@@ -29,7 +29,7 @@
 static int g_WindowWidth = 1280;
 static int g_WindowHeight = 720;
 
-static float g_CameraDistance = 7.0f;
+static float g_CameraDistance = 3.5f;
 static float g_CurrentAngleX = 0.0f; // pitch
 static float g_CurrentAngleY = 0.0f; // yaw
 

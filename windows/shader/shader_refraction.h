@@ -319,8 +319,8 @@ void main() {
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
     vec3 filmDir = normalize(vWorldNormal);
-    float flowSpeed = 1.25;
-    vec3 slowFlow = vec3(uTime * 0.09, -uTime * 0.17, uTime * 0.07) * flowSpeed;
+    float flowSpeed = 1.45;
+    vec3 slowFlow = vec3(uTime * 0.10, -uTime * 0.20, uTime * 0.08) * flowSpeed;
     vec3 warp = vec3(
         snoise(filmDir * 1.15 + slowFlow),
         snoise(filmDir * 1.25 + slowFlow.yzx + vec3(4.1, 1.3, 2.7)),
@@ -328,12 +328,12 @@ void main() {
     ) * 0.12;
     float broadNoise = filmNoise(filmDir * 2.0 + warp + slowFlow);
     float flowNoise = filmNoise(filmDir * 3.4 + warp * 0.7 + slowFlow.yzx * 0.8);
-    float fineNoise = filmNoise(filmDir * 7.0 + slowFlow.zxy * 0.45);
+    float fineNoise = filmNoise(filmDir * 6.2 + slowFlow.zxy * 0.38);
     float drainage = smoothstep(-0.85, 0.85, -filmDir.y);
     float thicknessPattern = (broadNoise - 0.5) * 0.52
         + (flowNoise - 0.5) * 0.30
-        + (fineNoise - 0.5) * 0.06
-        + (drainage - 0.5) * 0.42;
+        + (fineNoise - 0.5) * 0.04
+        + (drainage - 0.5) * 0.46;
     float dynamicThickness = uThickness + thicknessPattern * uThicknessVar;
     vec3 filmReflectance = kim2012Iridescence(NdotV, dynamicThickness);
     vec3 airyReflectance = belcourAiryIridescence(NdotV, dynamicThickness);
