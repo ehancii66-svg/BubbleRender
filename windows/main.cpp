@@ -42,7 +42,10 @@ static float g_MaxOffsetRatio = 0.7f;
 static float g_EnvironmentReflectionStrength = 0.65f;
 static glm::vec3 g_Light = glm::vec3(-1.0f, 1.0f, 1.0f);
 static int g_IridescenceMode = 2; // 0 = Kim2012, 1 = spectral LUT, 2 = Belcour Airy
-static glm::vec3 g_BubbleScale = glm::vec3(1.0f, 1.035f, 0.985f);
+static glm::vec3 g_BaseBubbleScale = glm::vec3(1.0f, 1.035f, 0.985f);
+static float g_BubbleFloatAmp = 0.08f;
+static float g_BubbleDriftAmp = 0.04f;
+static float g_BubbleWobbleAmp = 0.012f;
 
 static Camera g_Camera;
 
@@ -242,7 +245,17 @@ static void RenderFrame()
 
     UpdateCamera();
 
-    glm::mat4 model = glm::scale(glm::mat4(1.0f), g_BubbleScale);
+    float t = static_cast<float>(g_Time);
+    glm::vec3 bubbleOffset = glm::vec3(
+        sinf(t * 0.37f + 1.2f) * g_BubbleDriftAmp,
+        sinf(t * 0.70f) * g_BubbleFloatAmp,
+        cosf(t * 0.31f + 0.6f) * g_BubbleDriftAmp * 0.75f);
+    glm::vec3 bubbleScale = g_BaseBubbleScale + glm::vec3(
+        sinf(t * 0.45f) * g_BubbleWobbleAmp,
+        sinf(t * 0.38f + 2.1f) * g_BubbleWobbleAmp,
+        sinf(t * 0.52f + 4.0f) * g_BubbleWobbleAmp);
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), bubbleOffset);
+    model = glm::scale(model, bubbleScale);
     glm::mat4 view = g_Camera.getViewMatrix();
     glm::mat4 proj = g_Camera.getProjectionMatrix();
 
@@ -252,7 +265,7 @@ static void RenderFrame()
         float dist = glm::length(g_Camera.getPosition());
         float fovVert = glm::radians(g_Camera.getFov());
         float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
-        float bubbleRadius = 1.5f * std::max(g_BubbleScale.x, std::max(g_BubbleScale.y, g_BubbleScale.z));
+        float bubbleRadius = 1.5f * std::max(bubbleScale.x, std::max(bubbleScale.y, bubbleScale.z));
         float angularRadius = atanf(bubbleRadius / dist);
         float spherePixelRadius = angularRadius * pixelsPerRadian;
 
