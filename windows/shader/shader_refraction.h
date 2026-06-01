@@ -27,7 +27,7 @@ void main() {
     vec4 worldPos = uModel * vec4(aPos, 1.0);
     gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
     vEyeVector = normalize(worldPos.xyz - uCameraPos);
-    vWorldNormal = normalize(uModel * vec4(aNormal, 0.0)).xyz;
+    vWorldNormal = normalize(transpose(inverse(mat3(uModel))) * aNormal);
     vWorldPos = worldPos.xyz;
     vUV = aTexCoord;
     vView = uView;
@@ -49,8 +49,10 @@ uniform vec2 uWinResolution;
 uniform vec2 uFBOSize;
 uniform float uSpherePixelRadius;
 uniform int uIsBackFace;
+uniform int uIridescenceMode;
 uniform sampler2D uBackgroundTexture;
 uniform samplerCube uEnvironmentMap;
+uniform sampler2D uThinFilmLUT;
 uniform float uEnvironmentReflectionStrength;
 
 uniform float uThickness;       // film thickness d (nm)
@@ -198,6 +200,24 @@ vec3 belcourAiryIridescence(float NdotV, float thickness) {
     return vec3(r, g, b);
 }
 
+vec3 belcourAiryWeightedIridescence(float NdotV, float thickness) {
+    vec3 color = vec3(0.0);
+    color += airyThinFilmReflectance(NdotV, thickness, 430.0) * vec3(0.05, 0.00, 0.30);
+    color += airyThinFilmReflectance(NdotV, thickness, 470.0) * vec3(0.00, 0.10, 0.75);
+    color += airyThinFilmReflectance(NdotV, thickness, 500.0) * vec3(0.00, 0.40, 0.42);
+    color += airyThinFilmReflectance(NdotV, thickness, 535.0) * vec3(0.10, 0.75, 0.10);
+    color += airyThinFilmReflectance(NdotV, thickness, 575.0) * vec3(0.72, 0.66, 0.04);
+    color += airyThinFilmReflectance(NdotV, thickness, 615.0) * vec3(0.85, 0.18, 0.02);
+    color += airyThinFilmReflectance(NdotV, thickness, 650.0) * vec3(0.45, 0.02, 0.00);
+    return color / 2.7;
+}
+
+vec3 spectralLUTIridescence(float NdotV, float thickness) {
+    float thicknessNorm = clamp((thickness - 100.0) / 800.0, 0.0, 1.0);
+    vec3 encodedReflectance = texture(uThinFilmLUT, vec2(clamp(NdotV, 0.0, 0.99), thicknessNorm)).rgb;
+    return encodedReflectance * encodedReflectance;
+}
+
 // ============================================================
 // 3D Simplex Noise (for film sloshing simulation)
 // Fixed gradient computation
@@ -301,6 +321,8 @@ float specular(vec3 light, vec3 eye, vec3 normal, float shininess, float diffuse
     float kSpecular = pow(NdotH * NdotH, shininess);
     return kSpecular + NdotL * diffuseness;
 }
+)"
+R"(
 
 // ============================================================
 // Main
@@ -335,8 +357,17 @@ void main() {
         + (fineNoise - 0.5) * 0.04
         + (drainage - 0.5) * 0.46;
     float dynamicThickness = uThickness + thicknessPattern * uThicknessVar;
-    vec3 filmReflectance = kim2012Iridescence(NdotV, dynamicThickness);
-    vec3 airyReflectance = belcourAiryIridescence(NdotV, dynamicThickness);
+    vec3 kimReflectance = kim2012Iridescence(NdotV, dynamicThickness);
+    vec3 lutReflectance = spectralLUTIridescence(NdotV, dynamicThickness);
+    lutReflectance *= 0.85;
+    vec3 airyReflectance = belcourAiryWeightedIridescence(NdotV, dynamicThickness);
+    airyReflectance *= 1.35;
+    vec3 filmReflectance = kimReflectance;
+    if (uIridescenceMode == 1) {
+        filmReflectance = lutReflectance;
+    } else if (uIridescenceMode == 2) {
+        filmReflectance = airyReflectance;
+    }
 
     // ---- 2. Refraction (screen-space FBO distortion) ----
     // Use eye (camera->surface) as incident direction for refraction
@@ -361,13 +392,15 @@ void main() {
 
     // Moderate boost: raw reflectance values are 0.01-0.8, need extra visibility.
     float surfaceColorScale = (uIsBackFace == 1) ? 0.18 : 1.0;
-    vec3 iridescence = filmReflectance * 1.55 * surfaceColorScale;
+    float colorBoost = (uIridescenceMode == 1) ? 1.05 : ((uIridescenceMode == 2) ? 1.35 : 1.55);
+    vec3 iridescence = filmReflectance * colorBoost * surfaceColorScale;
 
     // Fresnel edge factor: 0 at center, 1 at silhouette
     float fresnelTerm = pow(1.0 - NdotV, uFresnelPower);
 
     // Iridescence gets stronger at glancing angles (Fresnel enhancement)
-    iridescence *= (1.0 + fresnelTerm * 1.8);
+    float fresnelColorBoost = (uIridescenceMode == 1) ? 0.95 : ((uIridescenceMode == 2) ? 1.35 : 1.8);
+    iridescence *= (1.0 + fresnelTerm * fresnelColorBoost);
 
     // Soft clamp to prevent neon colors at edges: x/(1+x) maps [0,inf) to [0,1)
     iridescence = iridescence / (1.0 + iridescence);
@@ -383,10 +416,32 @@ void main() {
     // reflectance, so iridescence behaves like colored reflected light.
     vec3 reflectDir = normalize(reflect(eye, normal));
     vec3 envColor = texture(uEnvironmentMap, reflectDir).rgb;
-    vec3 filmReflectionTint = airyReflectance * (1.0 + fresnelTerm * 2.4);
+
+    if (uIridescenceMode == 2) {
+        vec3 R = clamp(airyReflectance * 3.5, vec3(0.0), vec3(0.9));
+        float luma = dot(R, vec3(0.2126, 0.7152, 0.0722));
+        R = clamp(mix(vec3(luma), R, 2.2), vec3(0.0), vec3(0.9));
+
+        float edgeW = mix(0.25, 1.3, fresnelTerm);
+        vec3 reflected = envColor * R * edgeW;
+        vec3 transmitted = bgColor * (1.0 - R * 0.55);
+
+        float specularLight = specular(uLight, eye, normal, uShininess, uDiffuseness);
+        vec3 airyColor = transmitted + reflected * 1.8;
+        airyColor += specularLight * 0.08 * surfaceColorScale;
+        airyColor = mix(airyColor, vec3(1.0), fresnelTerm * 0.035 * surfaceColorScale);
+
+        FragColor = vec4(airyColor, 1.0);
+        return;
+    }
+
+    float reflectionTintBoost = (uIridescenceMode == 1) ? 1.25 : ((uIridescenceMode == 2) ? 1.75 : 2.4);
+    vec3 filmReflectionTint = filmReflectance * (1.0 + fresnelTerm * reflectionTintBoost);
     filmReflectionTint = filmReflectionTint / (1.0 + filmReflectionTint);
+    float reflectionWeightBoost = (uIridescenceMode == 1) ? 0.78 : ((uIridescenceMode == 2) ? 1.18 : 1.0);
     float envReflectionWeight = uEnvironmentReflectionStrength
         * surfaceColorScale
+        * reflectionWeightBoost
         * mix(0.06, 0.55, fresnelTerm);
     color += envColor * filmReflectionTint * envReflectionWeight;
 

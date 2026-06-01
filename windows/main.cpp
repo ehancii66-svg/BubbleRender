@@ -41,6 +41,8 @@ static float g_EdgeDistortionBoost = 1.7f;
 static float g_MaxOffsetRatio = 0.7f;
 static float g_EnvironmentReflectionStrength = 0.65f;
 static glm::vec3 g_Light = glm::vec3(-1.0f, 1.0f, 1.0f);
+static int g_IridescenceMode = 2; // 0 = Kim2012, 1 = spectral LUT, 2 = Belcour Airy
+static glm::vec3 g_BubbleScale = glm::vec3(1.0f, 1.035f, 0.985f);
 
 static Camera g_Camera;
 
@@ -60,15 +62,22 @@ static GLuint g_BackgroundFBO = 0;
 static GLuint g_BackFaceFBO = 0;
 static GLuint g_DepthRB = 0;
 static GLuint g_CubemapTexture = 0;
+static GLuint g_ThinFilmLUTTexture = 0;
 
 static constexpr float kFBOOverscan = 1.3f;
 static int g_FBOWidth = 0;
 static int g_FBOHeight = 0;
 
-// Kim2012 iridescence parameters
-static float g_Thickness = 350.0f;    // 皂膜厚度 (nm)
+// Thin-film thickness parameters
+static float g_KimLutThickness = 350.0f; // Kim2012 / LUT thickness (nm)
+static float g_AiryThickness = 740.0f;   // Belcour Airy thickness (nm)
 static float g_ThicknessVar = 160.0f; // 厚度扰动幅度 (nm)
 static double g_Time = 0.0;           // 时间
+
+static float &CurrentThickness()
+{
+    return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
+}
 
 // ============================================================
 // Mouse state
@@ -115,6 +124,31 @@ static GLuint LoadCubemapTexture(const std::vector<std::string> &faceFiles)
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
+    return textureID;
+}
+
+static GLuint LoadTexture2D(const std::string &filePath)
+{
+    int width, height, nrChannels;
+    stbi_set_flip_vertically_on_load(false);
+    unsigned char *data = stbi_load(filePath.c_str(), &width, &height, &nrChannels, 0);
+    if (!data)
+    {
+        std::cerr << "Failed to load texture: " << filePath << std::endl;
+        return 0;
+    }
+
+    GLenum format = (nrChannels == 4) ? GL_RGBA : GL_RGB;
+    GLuint textureID;
+    glGenTextures(1, &textureID);
+    glBindTexture(GL_TEXTURE_2D, textureID);
+    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    stbi_image_free(data);
     return textureID;
 }
 
@@ -208,7 +242,7 @@ static void RenderFrame()
 
     UpdateCamera();
 
-    glm::mat4 model = glm::mat4(1.0f);
+    glm::mat4 model = glm::scale(glm::mat4(1.0f), g_BubbleScale);
     glm::mat4 view = g_Camera.getViewMatrix();
     glm::mat4 proj = g_Camera.getProjectionMatrix();
 
@@ -218,7 +252,8 @@ static void RenderFrame()
         float dist = glm::length(g_Camera.getPosition());
         float fovVert = glm::radians(g_Camera.getFov());
         float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
-        float angularRadius = atanf(1.5f / dist);
+        float bubbleRadius = 1.5f * std::max(g_BubbleScale.x, std::max(g_BubbleScale.y, g_BubbleScale.z));
+        float angularRadius = atanf(bubbleRadius / dist);
         float spherePixelRadius = angularRadius * pixelsPerRadian;
 
         g_RefractionShader->Use();
@@ -235,12 +270,14 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uEnvironmentReflectionStrength", g_EnvironmentReflectionStrength);
         g_RefractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
         g_RefractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
+        g_RefractionShader->SetInt("uIridescenceMode", g_IridescenceMode);
         g_RefractionShader->SetInt("uBackgroundTexture", 0);
         g_RefractionShader->SetInt("uEnvironmentMap", 1);
+        g_RefractionShader->SetInt("uThinFilmLUT", 2);
         g_RefractionShader->SetVec3("uLight", g_Light);
         g_RefractionShader->SetVec2("uWinResolution", glm::vec2((float)w, (float)h));
         g_RefractionShader->SetVec2("uFBOSize", glm::vec2((float)g_FBOWidth, (float)g_FBOHeight));
-        g_RefractionShader->SetFloat("uThickness", g_Thickness);
+        g_RefractionShader->SetFloat("uThickness", CurrentThickness());
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
     };
@@ -304,6 +341,8 @@ static void RenderFrame()
     glBindTexture(GL_TEXTURE_2D, g_BackgroundTexture);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
     g_RefractModel->Draw(*g_RefractionShader);
 
     // ========== Pass 3: Render to screen ==========
@@ -327,6 +366,8 @@ static void RenderFrame()
     glBindTexture(GL_TEXTURE_2D, g_BackFaceTexture);
     glActiveTexture(GL_TEXTURE1);
     glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
     g_RefractModel->Draw(*g_RefractionShader);
 }
 
@@ -455,13 +496,19 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_EnvironmentReflectionStrength = std::min(1.5f, g_EnvironmentReflectionStrength + 0.05f);
         std::cout << "EnvironmentReflectionStrength: " << g_EnvironmentReflectionStrength << std::endl;
         break;
+    case GLFW_KEY_L:
+        g_IridescenceMode = (g_IridescenceMode + 1) % 3;
+        std::cout << "IridescenceMode: "
+                  << (g_IridescenceMode == 0 ? "Kim2012" : (g_IridescenceMode == 1 ? "Spectral LUT" : "Belcour Airy"))
+                  << ", Thickness: " << CurrentThickness() << " nm" << std::endl;
+        break;
     case GLFW_KEY_N:
-        g_Thickness = std::max(100.0f, g_Thickness - 20.0f);
-        std::cout << "Thickness: " << g_Thickness << " nm" << std::endl;
+        CurrentThickness() = std::max(100.0f, CurrentThickness() - 20.0f);
+        std::cout << "Thickness: " << CurrentThickness() << " nm" << std::endl;
         break;
     case GLFW_KEY_M:
-        g_Thickness = std::min(2000.0f, g_Thickness + 20.0f);
-        std::cout << "Thickness: " << g_Thickness << " nm" << std::endl;
+        CurrentThickness() = std::min(2000.0f, CurrentThickness() + 20.0f);
+        std::cout << "Thickness: " << CurrentThickness() << " nm" << std::endl;
         break;
     case GLFW_KEY_1:
         g_ThicknessVar = std::max(0.0f, g_ThicknessVar - 20.0f);
@@ -496,6 +543,8 @@ static void Cleanup()
 
     if (g_CubemapTexture)
         glDeleteTextures(1, &g_CubemapTexture);
+    if (g_ThinFilmLUTTexture)
+        glDeleteTextures(1, &g_ThinFilmLUTTexture);
     if (g_BackgroundFBO)
         glDeleteFramebuffers(1, &g_BackgroundFBO);
     if (g_BackgroundTexture)
@@ -605,16 +654,18 @@ int main()
         float rp = (denom_p > 1e-6f) ? Rp2 * (1.0f - cosPhi) / denom_p : 0.0f;
         return rs + rp;
     };
-    std::cout << "thickness=" << g_Thickness << "nm, thicknessVar=" << g_ThicknessVar << "nm" << std::endl;
-    std::cout << "NdotV=0.9: R=" << cppThinFilm(0.9f, g_Thickness, 615.0f)
-              << " G=" << cppThinFilm(0.9f, g_Thickness, 535.0f)
-              << " B=" << cppThinFilm(0.9f, g_Thickness, 465.0f) << std::endl;
-    std::cout << "NdotV=0.5: R=" << cppThinFilm(0.5f, g_Thickness, 615.0f)
-              << " G=" << cppThinFilm(0.5f, g_Thickness, 535.0f)
-              << " B=" << cppThinFilm(0.5f, g_Thickness, 465.0f) << std::endl;
-    std::cout << "NdotV=0.1: R=" << cppThinFilm(0.1f, g_Thickness, 615.0f)
-              << " G=" << cppThinFilm(0.1f, g_Thickness, 535.0f)
-              << " B=" << cppThinFilm(0.1f, g_Thickness, 465.0f) << std::endl;
+    std::cout << "Kim/LUT thickness=" << g_KimLutThickness
+              << "nm, Belcour Airy thickness=" << g_AiryThickness
+              << "nm, thicknessVar=" << g_ThicknessVar << "nm" << std::endl;
+    std::cout << "NdotV=0.9: R=" << cppThinFilm(0.9f, CurrentThickness(), 615.0f)
+              << " G=" << cppThinFilm(0.9f, CurrentThickness(), 535.0f)
+              << " B=" << cppThinFilm(0.9f, CurrentThickness(), 465.0f) << std::endl;
+    std::cout << "NdotV=0.5: R=" << cppThinFilm(0.5f, CurrentThickness(), 615.0f)
+              << " G=" << cppThinFilm(0.5f, CurrentThickness(), 535.0f)
+              << " B=" << cppThinFilm(0.5f, CurrentThickness(), 465.0f) << std::endl;
+    std::cout << "NdotV=0.1: R=" << cppThinFilm(0.1f, CurrentThickness(), 615.0f)
+              << " G=" << cppThinFilm(0.1f, CurrentThickness(), 535.0f)
+              << " B=" << cppThinFilm(0.1f, CurrentThickness(), 465.0f) << std::endl;
     std::cout << "===========================================" << std::endl;
 
     // -------- Cubemap --------
@@ -626,6 +677,16 @@ int main()
     if (g_CubemapTexture == 0)
     {
         std::cerr << "Failed to load cubemap! Check assets/skybox/ directory." << std::endl;
+        Cleanup();
+        glfwDestroyWindow(window);
+        glfwTerminate();
+        return -1;
+    }
+
+    g_ThinFilmLUTTexture = LoadTexture2D("assets/lut/thinfilm_belcour_bubble.png");
+    if (g_ThinFilmLUTTexture == 0)
+    {
+        std::cerr << "Failed to load thin-film LUT!" << std::endl;
         Cleanup();
         glfwDestroyWindow(window);
         glfwTerminate();
@@ -677,6 +738,7 @@ int main()
     std::cout << "U/J : Edge distortion boost -/+" << std::endl;
     std::cout << "I/K : Max offset ratio -/+" << std::endl;
     std::cout << "O/P : Environment reflection -/+" << std::endl;
+    std::cout << "L   : Cycle iridescence mode (Kim2012 / Spectral LUT / Belcour Airy)" << std::endl;
     std::cout << "N/M : Film thickness -/+ (nm)" << std::endl;
     std::cout << "1/2 : Thickness variation -/+" << std::endl;
     std::cout << "ESC : Quit" << std::endl;
