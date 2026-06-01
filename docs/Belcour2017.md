@@ -215,4 +215,31 @@ Belcour2017 提供了**升级路线**：
 3. 预积分纹理和 m=1~3 的级数求和开销远小于实时 3 波长全公式计算，反而可能更快
 4. Kim2012 的薄膜干涉公式（Eq 3-5）和 Belcour2017 的 Airy 求和（Eq 3）物理上是同一件事的不同表达；Belcour2017 的优势在于正确处理了光谱预积分
 
+### 7.5 当前工程接入状态（2026-06-01）
+
+当前项目已经把 Belcour2017 相关的 Airy 路径接入主 shader，但不是完整论文复现。
+
+已实现：
+
+- `uIridescenceMode == 0`：Kim2012 三波长模式。
+- `uIridescenceMode == 1`：Spectral LUT 模式。
+- `uIridescenceMode == 2`：Belcour Airy 模式，默认展示模式。
+- Belcour Airy 使用 7 个波长近似 Airy 反射，并使用单独的 reflected/transmitted 合成。
+- Belcour Airy 默认膜厚为 `740nm`。
+- Kim2012 / LUT 默认膜厚仍为 `350nm`。
+
+与完整 Belcour2017 的差距：
+
+- 当前 Airy 是 shader 内实时 7 波长近似，不是论文中的傅里叶/解析预积分。
+- 当前 RGB 权重是工程近似，不是严格的 CIE XYZ 光谱积分。
+- 当前没有实现粗糙微面元上的任意 NDF 预积分，也没有实现厚度预过滤。
+
+因此当前状态更准确地说是：
+
+```text
+Belcour2017-inspired Airy bubble mode
+```
+
+而不是完整的 Belcour2017 microfacet iridescence reproduction。
+
 ---
