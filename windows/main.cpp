@@ -37,8 +37,8 @@ static float g_FresnelPower = 8.0f;
 static float g_Shininess = 15.0f;
 static float g_Diffuseness = 0.2f;
 static float g_RefractionStrength = 0.65f;
-static float g_EdgeDistortionBoost = 1.7f;
-static float g_MaxOffsetRatio = 0.42f;
+static float g_EdgeDistortionBoost = 2.2f;
+static float g_MaxOffsetRatio = 0.52f;
 static float g_EnvironmentReflectionStrength = 0.65f;
 static glm::vec3 g_Light = glm::vec3(-1.0f, 1.0f, 1.0f);
 static int g_IridescenceMode = 2; // 0 = Kim2012, 1 = spectral LUT, 2 = Belcour Airy

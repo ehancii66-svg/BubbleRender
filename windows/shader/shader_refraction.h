@@ -373,10 +373,11 @@ void main() {
     // Use eye (camera->surface) as incident direction for refraction
     vec3 refractVec = mat3(vView) * refract(eye, normal, iorRatio);
     float edge = 1.0 - NdotV;
-    float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edge, 1.5));
+    float edgeProfile = smoothstep(0.18, 0.92, edge);
+    float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edgeProfile, 0.85));
     float surfaceRefractionScale = (uIsBackFace == 1) ? 0.16 : 1.0;
     float thicknessRefraction = mix(0.08, 0.45, clamp(dynamicThickness / 1000.0, 0.0, 1.0));
-    float thinFilmRefraction = mix(0.10, 1.0, pow(edge, 1.6)) * thicknessRefraction;
+    float thinFilmRefraction = mix(0.08, 1.28, pow(edgeProfile, 1.15)) * thicknessRefraction;
     vec2 offsetPixels = refractVec.xy
         * uRefractionStrength
         * surfaceRefractionScale
