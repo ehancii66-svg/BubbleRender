@@ -291,6 +291,69 @@ Kim2012 薄膜干涉公式
 - 默认折射强度已调低，更接近薄泡膜。
 - 背面 pass 的折射贡献降低，避免厚玻璃感。
 
+#### 折射与边缘细化补充
+
+本轮又把折射部分从“整体偏移”进一步改成“中心弱、边缘强、受膜厚影响”的薄膜式偏移。当前默认参数为：
+
+```cpp
+g_RefractionStrength = 0.65f;
+g_EdgeDistortionBoost = 2.2f;
+g_MaxOffsetRatio = 0.52f;
+```
+
+shader 中继续使用相机到表面的入射方向：
+
+```glsl
+vec3 refractVec = mat3(vView) * refract(eye, normal, iorRatio);
+```
+
+边缘权重不再直接使用线性的 `1.0 - NdotV`，而是先经过平滑轮廓：
+
+```glsl
+float edge = 1.0 - NdotV;
+float edgeProfile = smoothstep(0.18, 0.92, edge);
+float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edgeProfile, 0.85));
+```
+
+这样球心区域折射更安静，接近轮廓时才逐渐增强，避免整颗泡泡看起来像厚玻璃球。为了让薄膜厚薄变化也影响背景扭曲，折射强度还乘上由动态膜厚得到的 `thinFilmRefraction`：
+
+```glsl
+float thicknessRefraction = mix(0.08, 0.45, clamp(dynamicThickness / 1000.0, 0.0, 1.0));
+float thinFilmRefraction = mix(0.08, 1.28, pow(edgeProfile, 1.15)) * thicknessRefraction;
+```
+
+最终偏移仍然以球体屏幕半径为基准，保证不同窗口尺寸和相机距离下的折射尺度比较稳定：
+
+```glsl
+vec2 offsetPixels = refractVec.xy
+    * uRefractionStrength
+    * surfaceRefractionScale
+    * thinFilmRefraction
+    * uSpherePixelRadius
+    * edgeBoost;
+float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
+offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
+```
+
+背面 pass 的折射缩放进一步降到 `0.16`：
+
+```glsl
+float surfaceRefractionScale = (uIsBackFace == 1) ? 0.16 : 1.0;
+```
+
+目的：背面只承担中间层背景预扭曲，不再产生过强的二次折射，减少前后表面叠加带来的实心感。
+
+采样阶段继续使用 overscan FBO，并用窗口到 FBO 的 padding 修正采样坐标：
+
+```glsl
+vec2 pad = (uFBOSize - uWinResolution) * 0.5;
+vec2 fboPixel = gl_FragCoord.xy + pad;
+vec2 samplePixel = clamp(fboPixel + offsetPixels, vec2(0.0), uFBOSize);
+vec2 sampleUV = samplePixel / uFBOSize;
+```
+
+这部分主要用于处理边缘越界和黑边问题：先扩大背景纹理，再把偏移限制在球半径比例内，最后 clamp 到 FBO 范围，避免折射采样落到无效区域。
+
 ### 薄膜干涉
 
 - 实现 Kim2012 的 `fresnelCoefficients`、`interferencePhase`、`thinFilmReflectance`。
