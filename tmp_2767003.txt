@@ -1,0 +1,662 @@
+                             Double Bubbles Sans Toil and Trouble:
+           Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams
+                             Fang Da                                            Christopher Batty                                Chris Wojtan                  Eitan Grinspun
+                        Columbia University                                   University of Waterloo                             IST Austria                 Columbia University
+
+
+
+
+Figure 1: A variety of dynamic foam, film, and bubble scenarios captured by our method. Left: A small foam rearranges and settles to
+equilibrium. Center: A snapshot of an evolving catenoid soap film joining two circular wires, an instant before the film pinches apart. Right: A
+bubble with a wire constricting its mid-section gradually squeezes to one side.
+
+
+Abstract                                                                                                                  1    Introduction
+Simulating the delightful dynamics of soap films, bubbles, and foams                                                      Although we encounter bubbles and foam on a daily basis while
+has traditionally required the use of a fully three-dimensional many-                                                     drinking coffee, washing the dishes, or playing with children’s toys,
+phase Navier-Stokes solver, even though their visual appearance is                                                        the motion and structure of these phenomena are difficult to under-
+completely dominated by the thin liquid surface. We depart from ear-                                                      stand and even more difficult to simulate with a computer.
+lier work on soap bubbles and foams by noting that their dynamics
+are naturally described by a Lagrangian vortex sheet model in which                                                       Soap bubbles are essentially layers of immiscible fluids: air on the
+circulation is the primary variable. This leads us to derive a novel                                                      inside, a thin film of liquid, and then air on the outside again. The sur-
+circulation-preserving surface-only discretization of foam dynamics                                                       face tension of the liquid drives the bubble toward a shape with less
+driven by surface tension on a non-manifold triangle mesh. We rep-                                                        surface area, while air pressure forces the bubble to maintain a con-
+resent the surface using a mesh-based multimaterial surface tracker                                                       stant volume. These behaviors are described by the Navier-Stokes
+which supports complex bubble topology changes, and evolve the                                                            equations, which can be exceptionally difficult to solve accurately,
+surface according to the ambient air flow induced by a scalar circu-                                                      especially when confronted with the large density jumps, immiscible
+lation field stored on the mesh. Surface tension forces give rise to                                                      fluid interfaces, stiff surface tension forces, and extremely thin liquid
+a simple update rule for circulation, even at non-manifold Plateau                                                        surfaces required for bubble motion.
+borders, based on a discrete measure of signed scalar mean curvature.                                                     Prior work has successfully simulated foam dynamics using an Eule-
+We further incorporate vertex constraints to enable the interaction                                                       rian approach. These approaches utilize considerable computational
+of soap films with wires. The result is a method that is at once                                                          resources for the detailed calculation of the air dynamics within each
+simple, robust, and efficient, yet able to capture an array of soap                                                       bubble and the accurate resolution of film geometry. We propose a
+films behaviors including foam rearrangement, catenoid collapse,                                                          new model which solves the problem more economically while guar-
+blowing bubbles, and double bubbles being pulled apart.                                                                   anteeing several important theoretical properties by construction.
+CR Categories: I.6.8 [Simulation and Modeling]: Types of                                                                  Our proposed model is the first numerical method for the dynamics
+Simulation—Animation                                                                                                      of soap films, bubbles, and foams that is based on the equations of
+                                                                                                                          non-manifold vortex sheets.
+Keywords: fluids, vortex sheet, circulation, non-manifold mesh
+                                                                                                                         We model soap film structures as non-manifold vortex sheets driven
+                                                                                                                         by surface tension forces. We propose a discrete model to evolve
+ACM Reference Format                                                                                                     the sheet as it deforms and undergoes topology changes such as
+Da, F., Batty, C., Wojtan, C., Grinspun, E. 2015. Double Bubbles Sans Toil and Trouble: Discrete Circulation-
+Preserving Vortex Sheets for Soap Films and Foams. ACM Trans. Graph. 34, 4, Article 149 (August 2015), 9
+                                                                                                                         pinching, merging, and rearrangement.
+pages. DOI = 10.1145/2767003 http://doi.acm.org/10.1145/2767003.
+                                                                                                                         We represent the geometry using a Lagrangian non-manifold triangle
+Copyright Notice
+Permission to make digital or hard copies of all or part of this work for personal or classroom use is granted           mesh decorated with material region tags. We store circulation
+without fee provided that copies are not made or distributed for profit or commercial advantage and that                 variables on the vertices; by Kelvin’s circulation theorem this ensures
+copies bear this notice and the full citation on the first page. Copyrights for components of this work owned
+by others than the author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or re-            a circulation-preserving model by construction. Numerical results
+publish, to post on servers or to redistribute to lists, requires prior specific permission and/or a fee. Request
+permissions from permissions@acm.org.                                                                                    exhibit nearly dissipation-free dynamics.
+SIGGRAPH ‘15 Technical Paper, August 09 – 13, 2015, Los Angeles, CA.
+Copyright is held by the owner/author(s). Publication rights licensed to ACM.
+ACM 978-1-4503-3331-3/15/08 ... $15.00.
+                                                                                                                          The use of the vortex sheet equations ensures an exactly divergence-
+DOI: http://dx.doi.org/10.1145/2767003                                                                                    free velocity field via the Biot-Savart law, and integrating mesh
+                                                                                                                    ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+149:2       •      F. Da et al.
+
+vertex positions through the induced velocity field leads to excellent                     applied to the vertices, assuming bubbles maintain a near-spherical
+volume preservation over long simulations.                                                 configuration. Similarly, Brochu [2006] proposed a preliminary
+                                                                                           boundary-element discretization of 2D droplet dynamics, and Zhang
+We derive a simple, discrete update rule for the effect of surface                         et al. [2012] used a surface-only mass-spring model for real-time
+tension forces on the non-manifold sheet, based on a discrete mea-                         animation of triangulated liquid droplets. Batty et al. [2012] mod-
+sure of mean curvature. We formulate the update rule in a manner                           eled thin sheets of viscous liquid with surface tension using triangle
+that generalizes immediately to the case of non-manifold junctions.                        meshes, but did not address bubbles. Though computationally at-
+This yields stable film behavior even along complex foam junctions.                        tractive, these models concentrate the mass of the system on the
+Through the addition of a simple vertex constraint mechanism, we                           (thin) liquid film, whereas in the case of bubbles the film is effec-
+support wire loops and structures to control the bubbles and films,                        tively massless relative to the surrounding air flow. Zhu et al. [2014]
+enabling a variety of familiar bubble interactions.                                        applied a similar thin-sheet idea to inviscid liquids and films, and
+                                                                                           modeled the influence of wind by coupling to a standard dense Eule-
+Our complete computational model provides a compact description
+                                                                                           rian grid method. This approach yielded compelling animations of
+of foam dynamics that requires no volumetric discretization or linear
+                                                                                           blowing bubbles, soap film catenoids pinching apart, and waterbell
+system solve, is computationally efficient as compared to traditional
+                                                                                           shapes, though it cannot model multi-bubble foam structures.
+Eulerian techniques, and is robust enough to animate complicated
+foam dynamics on a standard workstation.                                                   A more accurate approach to mesh-based modeling of bubbles and
+                                                                                           foams at equilibrium is to construct a discrete surface energy based
+2    Related Work                                                                          on the area of the interfaces subject to a volume constraint per
+                                                                                           bubble, and seek to minimize it. This is the approach taken by the
+The behaviors of bubbles and foams are a subject of substantial                            venerable Surface Evolver technique [Brakke 1992]. Since surface
+interest across a variety of scientific and engineering disciplines (e.g.,                 tension forces are proportional to interface mean curvature, the
+[Weaire and Hutzler 2001; Weaire 2013; Saye and Sethian 2013]).                            resulting discrete surface energy gradient in this model is essentially
+The reproduction of their visual characteristics was addressed in a                        equivalent to discrete mean curvature operators common in graphics
+pair of articles by Glassner [2000a; 2000b]; more recent authors                           [Pinkall and Polthier 1993; Meyer et al. 2002]. Recent work on
+have explored the dynamic simulation of bubbles.                                           constant-mean-curvature surfaces [Pan et al. 2012] modifies the
+                                                                                           energy functional to simultaneously optimize mesh quality.
+
+Particulate Bubbles       One simple approach to small-scale bubble                        Methods for volumetric simulation of multiphase flows have also
+dynamics is to treat each bubble as a particle, with various rules                         made use of explicit moving meshes. For example, conforming
+controlling their interactions, such as the early work of Kück et                         Lagrangian tetrahedral meshes with dynamic remeshing allow for
+al. [2002]. Later work has yielded increasingly realistic behavior,                        a finite element discretization of multiple regions with area-based
+and often used these models to add bubble details to traditional                           surface tension discretized on the interface triangles [Misztal et al.
+volumetric liquid simulations [Greenwood and House 2004; Hong                              2012; Clausen et al. 2013]. Rather than use a volumetric tetrahedral
+et al. 2008; Kim et al. 2010; Busaryev et al. 2012; Patkar et al. 2013].                   mesh, Da et al. [2014] presented Los Topos, a multi-region extension
+                                                                                           of the El Topo triangulated mesh-based surface tracking package
+                                                                                           [Brochu and Bridson 2009], and applied it to Eulerian grid-based
+Eulerian Bubbles       A different albeit more expensive tack is to                        volumetric multiphase liquids. Our work makes use of Los Topos to
+model the bubbles themselves with volumetric multiphase fluid                              handle the complex topological rearrangements exhibited by foams.
+simulations. Since the thickness of the bubble’s liquid film is on                         In general, these mesh-based volumetric methods rely on a complete
+the order of micrometers, its mass is effectively negligible and can                       discretization of the fluid domain, rather than the surface alone, and
+be treated as such; thus the main challenges are to simulate the air                       have not been applied to bubble dynamics.
+flow interior to the bubble with appropriate surface tension forces on
+the interface, and to represent the evolving non-manifold geometric
+structure of foams. Hong and Kim [2003] were the first in graphics                         Vortex-Based Fluids Vortex methods model incompressible
+to make use of a multiphase flow solver to model bubbles, applying                         flows by relying on an alternative basis representation [Cottet and
+surface tension as a smoothed body force. Hong and Kim [2005]                              Koumoutsakos 2000]. Rather than choosing the primary variable
+adapted earlier work in computational physics [Kang et al. 2000],                          to be velocity, which must be constrained to lie in the space of
+using ghost-fluid methods to incorporate surface tension boundary                          incompressible vector fields, vortex methods evolve the dynamics
+conditions for fully submerged bubbles. In a similar vein, Mihalef                         using the curl of velocity, or vorticity, ω = ∇ × u. This family
+et al. [2006] simulated boiling water. To allow multiple bubbles                           of methods guarantees incompressibility by construction, avoids
+in mutual contact and thereby support foam structures, Zheng et                            numerical dissipation common to traditional methods, and provides
+al. [2006] presented a regional level set method that generalizes the                      a terser representation of the velocity field.
+standard level set method to more than two regions. Zheng et al. also
+proposed a semi-implicit surface tension discretization to improve                         A variety of Lagrangian discretizations of the vorticity equation
+stability. Losasso et al. [2006] similarly extended the particle level                     have been used including particles [Park and Kim 2005], filaments
+set method to many regions to adapt Hong’s work to the case of                             [Angelidis and Neyret 2005; Angelidis et al. 2006; Weissmann and
+multiple interacting liquids. Kim et al. [2007] artificially inflated                      Pinkall 2009; Weissmann and Pinkall 2010; Barnat and Pollard
+bubbles to compensate for volume drift. Saye and Sethian [2013]                            2012], and sheets [Pfaff et al. 2012; Brochu et al. 2012], along with
+added a model for film drainage operating on different time scales.                        circulation-based Eulerian discretizations [Elcott et al. 2007]. The
+                                                                                           conserved variable in all of these cases is circulation, though Mullen
+                                                                                           et al. [2009] presented an interesting energy-preserving Eulerian
+Mesh-Based Bubbles Since the visual appearance of bubbles                                  discretization. Zhang and Bridson [2014] recently proposed an im-
+is entirely dominated by the soap film itself, a seemingly natural                         proved Particle-Particle Particle-Mesh (PPPM) strategy to accelerate
+approach is to focus modeling efforts there. D̆urikoviç [2001] pro-                       the major bottleneck in Lagrangian vorticity-based schemes: evalua-
+posed such a method in which the bubble surface is represented                             tion of the Biot-Savart kernel to reconstruct the velocity field. Earlier
+by a deformable mass-spring system on a triangle mesh. Simple                              work used the Fast Multipole Method (FMM) [Brochu et al. 2012],
+surface tension forces based on the Laplace-Young equation are                             truncated the required kernel evaluations [Pfaff et al. 2012; Vines
+ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+              Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams                            •       149:3
+                                                                                                                                               L              n
+et al. 2014], or suffered the O(N 2 ) cost of pairwise evaluation.                reference point x0 = f (X0 ) (refer to                                  x
+                                                                                  the inset figure). Γ(X) measures the                    x0
+Although vortex methods are most commonly applied to smoke, a                     alignment of the velocity field to tan-
+few authors have considered the role of vortex sheets at or near a                gent motion along the closed loop, i.e.,
+liquid interface. Golas et al. [2012] used a hybrid approach: a vortex
+particle method handles the large interior of the flow domain, and                                       I
+                                                                                             Γ(X) =              u · dx.            Figure 2: Sign convention
+this is coupled to a regular grid-based simulator applied on a narrow
+                                                                                                             L                      for pointwise circulation.
+band around the liquid interface or solid boundaries. In the context
+of deep ocean waves, Keeler and Bridson [2014] achieved a surface-
+                                                                                  Above, we emphasized the word arbitrary because for any         H two
+only discretization by combining the El Topo surface tracker with
+                                                                                  loops L1 and L2 both piercing the sheet only at x and x0 , L1 u ·
+the solution of a specific boundary integral equation derived under a                     H
+potential flow assumption. Another use for vorticity equations at the             dx = L2 u · dx ([Pozrikidis 2000]). We emphasized the word
+liquid interface is to provide additional detail to a lower resolution            fixed because the scalar field Γ is meaningful only if the same
+fluid simulation [Kim et al. 2009; Bojsen-Hansen and Wojtan 2013],                reference point x0 is used for all evaluations of Γ(X), X ∈ M .
+similar in spirit to the use of vortex particles that augment smoke               Furthermore, selecting a different reference point x00 is equivalent to
+simulations with turbulent detail [Selle et al. 2005; Pfaff et al. 2009].         uniformly offsetting the entire field by some fixed constant, Γ0 (X) =
+                                                                                  Γ(X) + C. Note that Fig. 2 establishes a correspondence between
+                                                                                  the orientation of the surface (normal) and the sign of the circulation.
+Vortex Sheets We make use of a vortex sheet formulation of the
+vorticity equation. Early numerical work in this direction was car-
+ried out by Tryggvason [1988], Agishtein and Migdal [1989], and                   Recovering the ambient velocity from the circulation            With Γ
+Pozrikidis [2000] among others. Recently Stock [2006; 2008] pro-                  as our state variable, we can evaluate the velocity field in 3-space in
+posed a circulation-based discretization that has since been extended             two steps. First we recover the vortex sheet strength, γ : M → R3 ,
+to smoke animation [Pfaff et al. 2012; Brochu et al. 2012]. The
+main source of vorticity for smoke is fluid density gradients (i.e.,                                                γ = n × ∇f Γ,                                 (1)
+baroclinity), which requires some quantities to be converted back
+and forth between vorticity and circulation. For bubbles the vorticity            where ∇f is the surface gradi-
+source is surface tension, which possesses a simple integration rule              ent operator for f . Observe that            n
+that works directly in the space of circulations.                                 by construction γ is tangential to              γ               1
+                                                                                  the surface (because of n×) and                                 2
+3     Smooth Setting                                                              divergence-free (because it is a
+                                                                                  right-angle rotation of a gradient
+A soap film is a thin sheet of liquid immersed in an ambient fluid                field). Note that the direction of γ
+medium, typically air. When the film has a spherical topology, it is              is determined by the local ∇f Γ di-
+known as a soap bubble, and when multiple such bubbles contact,                   rection, independent of the choice Figure 3: Conventions for vor-
+they form a non-manifold network of films known as a foam.                        of the reference point x0 . Vortex tex sheet strength, for a sheet
+                                                                                  sheet strength represents vorticity separating regions 1 and 2.
+We focus on centimeter-scale soap films, whose dynamics are gen-                  confined to the sheet, under the re-
+erally dominated by (a) the surface tension of the film, along with               lationship ω = γδ(f ), with Dirac delta δ.
+(b) the (assumed) incompressibility and (c) inertia of the ambient
+air. For the centimeter length scale, the inertia of the liquid itself            From the vortex sheet strength we recover the ambient velocity,
+is negligible; the temporal evolution of the film is governed by the              u : R3 → R3 through the Biot-Savart integral
+motion of the ambient air.
+                                                                                                                             γ × (x − x0 ) 0
+                                                                                                                         Z
+                                                                                                                     1
+To capture this behavior, we model the interface as a vortex sheet.                                   u(x) =                              df .                    (2)
+                                                                                                                    4π     f  kx − x0 k3
+
+3.1   Kinematics of a vortex sheet                                                The field u is divergence-free by construction. Thus, a velocity field
+                                                                                  derived from vortex sheet kinematics is automatically able to capture
+A vortex sheet is an immersed surface delimiting a discontinuity in               the dynamics of incompressible fluids without explicit enforcement
+(only) the tangential component of a velocity field in 3-space. While             of the incompressibility condition.
+the tangential component of velocity is generally discontinuous, the
+component normal to the vortex sheet remains continuous.                          Next, we consider two nearby
+                                                                                  points x and x0 on the vortex sheet.
+Consider a surface f : M → R3 immersed in ambient space, where                    The integration loop for circulation                     x x′
+M ⊂ R2 is a reference domain. To each surface point f (X) we                      at x0 intersects the sheet at x0 and        x0
+associate a unit surface normal n(X) : M → S 2 .                                  the reference point x0 , and can be
+                                                                                  broken down as the sum of two
+The state of a vortex sheet is encoded by its position f and a scalar             loops: one between x0 and x, and
+field Γ : M → R called the circulation [Pozrikidis 2000].                         one between x and x0 . The former
+                                                                                  corresponds to the circulation at x. Therefore, the difference be-
+Circulation    We note that circulation is most typically defined                 tween Γ(X) and Γ(X0 ) is the velocity integral around the latter
+as a quantity associated to a given closed loop; in a slight abuse of             loop, which is represented by the tangential velocity jump u at x
+terminology, borrowed from other works on vortex sheets [Pozrikidis               as the two points approach each other. This reveals the following
+2000], we take circulation to be a pointwise quantity, by identifying             relation, which is needed in Section 3.3 (see [Pozrikidis 2000] for
+each point f (X) with an arbitrary loop, as follows.                              details):
+
+To understand the geometry behind Γ(X), consider an arbitrary                                                        ∆u = ∇f Γ.                                   (3)
+closed loop L that pierces the sheet at x = f (X) and some fixed
+                                                                            ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+149:4       •      F. Da et al.
+
+3.2     Dynamics of self-advection                                                         choice of a reference point. For an alternative derivation, refer to
+                                                                                           Pozrikidis [2000] who builds on an argument by Baker et al. [1982].
+In the absence of external forces, the evolution of the circulation
+field is given by Kelvin’s circulation theorem:                                            Note that circulation evolves in proportion to the scalar-valued mean
+                                                                                           curvature; this may be contrasted against other representations of
+                                   DΓ                                                      the velocity field, for which the consideration of surface tension can
+                                      = 0,                                    (4)          involve the vector-valued mean curvature normal.
+                                   Dt
+where D denotes the total (equivalently material or advective) deriva-
+tive.                                                                                      Discussion      We have arrived at the temporal evolution of the cir-
+                                                                                           culation Γ subject to inertia and surface tension. The attendant
+Consider the consequences on implementation. As the vortex sheet                           evolution of the ambient velocity field thus accounts for inertia, sur-
+deforms under the advection induced by the ambient air, the scalar                         face tension, and (due to the Biot-Savart law) incompressibility.
+circulation field remains constant. This property sets circulation
+apart from a vorticity-based representation of the velocity field,                         The simplicity and locality of the evolution (9) become pronounced
+avoiding explicit handling of vortex stretching and simplifying the                        when one adopts a Lagrangian discretization of the soap film: the up-
+numerical implementation.                                                                  date to the state variables requires simply the evaluation of the mean
+                                                                                           curvature. To our knowledge this circulation-based temporal evolu-
+3.3     Dynamics with surface tension                                                      tion of vortex sheets subject to surface tension has not previously
+                                                                                           been employed to model soap films.
+With surface tension, the circulation field no longer remains constant;
+instead its evolution is governed by a simple, local law.                                  4     Discrete Setting
+Neglecting viscosity and external forces, we have the momentum
+equation for the incompressible Euler equations                                            4.1   Spatial discretization
+                                Du    ∇p                                                   Nonmanifold triangle mesh without
+                                   =−                                         (5)
+                                Dt    ρ                                                    boundary We represent the geome-
+                                                                                           try of our discrete soap film using a
+everywhere away from the sheet, where ∇ is the canonical gradient                          piecewise linear triangulated surface,
+of R3 . Taking the difference of the limiting values across the sheet                      i.e., a triangle mesh. The mesh con-
+gives the relation                                                                         tains non-manifold edges and vertices
+                D∆u    ∇(p1 − p2 )    ∇f (p1 − p2 )                                        where soap films meet along Plateau
+                    =−             =−                                         (6)          borders [Weaire and Hutzler 2001].
+                 Dt        ρ               ρ
+                                                                                           Our mesh is always watertight, i.e., it Figure 4:        Oscillating
+on the sheet. For the second equality, we have used the fact that
+                                                                                           does not have open boundaries. We ac- cube.
+∇(p1 − p2 ) = ∇f (p1 − p2 ), which holds because the velocity jump
+                                                                                           commodate scenarios where the soap
+∆u is tangential to the surface.
+                                                                                           film has a prescribed open boundary (e.g., a wire) by ignoring a part
+The pressure jump p1 − p2 is balanced by the surface tension                               of the mesh in the dynamics, as discussed in Section 4.6.
+
+                         p1 − p2 = σ(H1 − H2 ),                               (7)
+                                                                                           Regions    We enumerate each watertight region of the mesh (i.e.,
+where p1 , p2 are the pressures on each side of                                            each bubble volume), assigning a unique integer index to each region.
+the surface, σ is the surface tension coefficient               1                          Two regions with a common interface are called a region-pair.
+and H1 , H2 , are the (signed, scalar-valued)                   2
+mean curvatures of the two liquid-air inter-                                               Circulation For the purpose of modeling vortex sheets, we have
+faces possessed by a soap film immersed in air.                                            interpreted circulation as a pointwise quantity [Stock 2006]; that is,
+We use the convention that the mean curvature is positive when the                         it is a scalar field restricted to the surface . Recall that the orientation
+interface is convex toward the liquid. For a manifold patch of the                         of the circulation gradient together with the surface normal deter-
+vortex sheet we simply have that H1 = −H2 , since the conceptual                           mines the orientation of the vortex sheet strength: γ = n × ∇f Γ.
+“two” sides of our idealized thin sheet geometrically coincide while                       We therefore sample the scalar circulation field
+possessing opposing orientations. However, we have explicitly bro-                         Γ at vertices of the triangle mesh. This gives
+ken out the two contributions as a foreshadowing of our treatment                          rise to a piecewise linear field over triangles, Γ2           n
+of triple-junctions.                                                                       whose gradient (and therefore also the sheet-                 γ Γ1
+Substituting (3) and (7) into (6) yields                                                   strength) is piecewise constant, and which co-
+                                                                                           incides with the vertex-based discrete curva-              Γ3
+                      D∇f Γ    σ                                                           ture measure used below. (This is to be con-
+                            = − ∇f (H1 − H2 ).                                (8)
+                       Dt      ρ                                                           trasted with previous work which placed pointwise circulation on
+                                                                                           edges [Stock 2006; Pfaff et al. 2012; Brochu et al. 2012].)
+                                                D∇ Γ
+By linearity of differentiation, we find Dtf            = ∇f DΓ
+                                                             Dt
+                                                                . Applying
+this rule and integrating both sides gives                                                 We associate a distinct scalar circulation field to each region-pair.
+                                                                                           Thus, manifold vertices store one circulation scalar, while triple-
+                                                                                           junction vertices store three circulation scalars, one for each region-
+                          DΓ    σ
+                             = − (H1 − H2 ),                                  (9)          pair incident to the vertex. Quadruple-points, which also arise fre-
+                          Dt    ρ                                                          quently in stable foams, will store six circulations, and so forth.
+where we have chosen to discard the integration constant, recalling                        Region-pair interfaces and circulations must satisfy a consistent sign
+that Γ is only defined up to the choice of a constant, equivalently the                    convention. Our implementation chooses the interface normal as
+ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+              Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams                                 •      149:5
+
+oriented from the higher index region to the lower; the recovered                      with angles of θ ≈ 109.47◦ . Al-
+velocity is independent of this arbitrary choice, so long as circulation               though higher order junctions can
+variables are consistently oriented relative to the surface normal,                    also balance in this manner, they are
+using the convention codified in Fig. 2.                                               typically unstable.
+
+4.2    Temporal discretization                                                         Discussion     For our mean curva-
+                                                                                      ture computation, we initially at-
+Since we work in the Lagrangian frame of the moving surface, the                      tempted to use the familiar cotan
+time-evolution equation for circulation (9) indicates that we can sim-                Laplace curvature discretization,
+ply advect vertices according to the ambient velocity, and integrate                  which gives rise to a mean curva-
+surface tension forces into the vertex-based circulations (§4.3). In                  ture normal vector, Hn; however, Figure 5: A triple-bubble at
+the absence of surface tension, circulations are carried along and                    our dynamics requires signed mean equilibrium exhibits a stable
+naturally conserved. We apply forward Euler to integrate the ver-                     curvature scalars, H. While the lat- central Plateau border.
+tex positions under the velocity field u induced by circulations, as                  ter could theoretically be extracted
+computed from the Biot-Savart law (§4.4).                                             from the former by an inner product
+                                                                                      with an appropriately oriented surface normal, we encountered diffi-
+4.3    Integrating Surface Tension                                                    culties in the use of various options for discrete vertex normals n.
+                                                                                      Without a discrete unit normal n that is guaranteed to be in precise
+We integrate surface tension forces into the circulation using the                    alignment with Hn, the scalar mean curvature H extracted from
+(discrete, scalar, signed, pointwise) mean curvature at the liquid-air                Hn may have an incorrect sign.
+interface. Recall that since we have only surface tension forces, and
+no baroclinic terms, we avoid the need to convert back and forth                       4.4    Evaluating Biot-Savart
+between circulation and vorticity: integration is performed directly
+in the space of circulations.                                                          Given the circulation values stored on each vertex, including multi-
+We take a forward Euler step, updating the circulation associated to                   valued circulations on non-manifold vertices, we can convert to
+each region-pair (i, j), i < j via                                                     vortex sheet strength, and use the Biot-Savart law to find the velocity
+                                                                                       at any point in the domain.
+                                   σ∆t v
+                     ∆Γvi,j = −       (Hi − Hjv )                       (10)           From γ = n×∇f Γ we uniquely recover the vortex sheet strength on
+                                   ρA                                                  a per-triangle basis. The triangle normal n is computed in standard
+                                                                                       fashion recalling our earlier orientation convention, and the scalar
+where A is the Voronoi area of the vertex [Meyer et al. 2002], used to                 circulations on the vertices define a linear circulation field on the
+convert from integrated to pointwise curvature, and Hiv , Hjv are the                  triangle from which the constant gradient can be readily recovered.
+integrated signed scalar mean curvatures at vertex v due to the liquid-                Since the vortex sheet strength is a per-triangle quantity, no changes
+air interface at incident regions i and j, respectively. Recall from                   are needed to evaluate Biot-Savart near non-manifold geometry.
+the smooth setting that Hiv is positive when region i is outwardly
+convex at v.                                                                           Our expression for the Biot-Savart law, with regularization per Pfaff
+                                                                                       et al. [2012], is:
+To evaluate Hiv , we consider only the triangles incident to vertex v
+and region i. We sum the signed scalar mean curvature of incident                                          1
+                                                                                                             Z
+                                                                                                                                x − x0
+edges. For each edge e, we take Hie = |e|θ, where |e| is the edge                                u(x) =        γ(x0 ) ×                       dx0 .    (12)
+                                                                                                          4π S           (|x − x0 | + α2 )3/2
+length, and θi is the dihedral angle given by cos θi = n1i ·n2i , and n1i ,
+n2i are the outwardly oriented normals of the two incident triangles
+to e for region i [Cohen-Steiner and Morvan 2003]. The sign of Hie                     Thus the velocity u at a point x in space is an integral over the
+is unambiguous, based on the outward orientation of region i. Then                     surface, which we discretize with one-point quadrature at triangle
+the signed scalar vertex curvature, Hiv , is                                           barycenters. We set the regularization parameter α to half the mean
+                                                                                       mesh edge length. We perform a direct O(N 2 ) evaluation of this
+                                     1X e                                              integral; proven FMM [Brochu et al. 2012] or PPPM [Zhang and
+                            Hiv =        Hi                             (11)
+                                     2 e                                               Bridson 2014] techniques exist to drop this to essentially O(N ).
+
+where the factor of one half ac-               1                                       4.5    Integrating Position
+counts for the fact that the inte-
+grated edge curvature is divided                                                       The velocity can be evaluated at the mesh vertices in order to perform
+amongst its two vertices.                                                              time integration of the vertex positions. We again use forward Euler,
+                                                   1                                   although higher order schemes could be readily incorporated (both
+This unified treatment is applied
+                                           2                           3               here and when integrating surface tension) at the cost of additional
+identically whether a vertex lies                           2
+on simple manifold regions, or                                                         Biot-Savart evaluations. Since we use forward Euler to integrate
+on a complex triple, quadruple,                                                        surface tension into circulation (effectively updating velocity), and
+or even higher-order junction.                                                         then use forward Euler to advect positions based on the (updated)
+                                                                                       velocity, we are in fact applying a Symplectic Euler scheme.
+
+Plateau borders      At a triple-junction the total effect of surface                  4.6    Solid Interaction
+tension will be zero on all of the three circulations, Γv1,2 , Γv1,3 , Γv1,3 ,
+only when all three curvatures are equal, H1v = H2v = H3v . This
+                                                                                       To support simple solid interactions with wire loops (e.g., Fig. 7), we
+recovers the proper 120◦ angle Plateau border equilibrium, as dic-
+                                                                                       develop a projection method to constrain the motion of the vertices.
+tated by Plateau’s laws, and illustrated in Fig. 5. A similar behavior
+                                                                                       Given a set of constrained vertices and their desired trajectories, our
+occurs for quadruple-points, where the four curvatures become equal
+                                                                                 ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+149:6       •      F. Da et al.
+
+approach locally modifies the circulations of the constrained vertices
+to induce the necessary sheet velocities.
+                                                                                                       Air flow
+Since the tangential motion of the sheet does not necessarily cor-
+respond to tangential motion of the actual liquid film [Pozrikidis
+2000], we seek only to constrain the normal motion of the sheet
+by modifying circulations. In the tangential direction, we simply
+snap the vertices to their desired position in the tangent plane. This
+reduces the number of active constraints from 3n to n for a set of n                       Figure 6: 2D illustration of the treatment of vorticity at open bound-
+constrained vertices. Conveniently, each (manifold) vertex carries a                       ary. The thick blue lines are the vortex sheet, with the yellow dots
+single circulation, giving us exactly n constraints for n degrees of                       being the boundary. Top: The interior vorticity (orange arrows)
+freedom. We can recover a square, dense linear system to find the                          lacks the ability to represent an airflow path from below to above the
+necessary circulations as follows.                                                         sheet. Bottom: The additional vorticity degrees of freedom (yellow)
+We describe the computation of the Biot-Savart integral for this set                       provides the airflow path around the open boundary.
+of vertices as a matrix B applied to the affected circulation variables,
+Γc , yielding a relation u = BΓc . We seek a change in circulations
+∆Γc such that a vertex’s normal velocity component changes by
+∆v · n, where ∆v represents the difference between current and
+target velocity. We must solve the linear system
+
+                           NT B∆Γc = NT ∆v                                  (13)
+
+where N is a matrix composed from the discrete vertex normals of
+the vertices. For robustness against the possibility of (near-) singu-
+larity we employ Tikhonov regularization, by adding the identity
+matrix scaled such that its influence is small and independent of time
+                                                                                           Figure 7: Left:A double-bubble being gradually pulled apart by two
+step and mesh resolution:
+                                                                                           wire loop (constraints) on either end. Right:A stable non-manifold
+                                                                                           film structure spanning an octahedron-shaped wire.
+                (B T NNT B + λ2 I)∆Γc = B T NNT ∆v,                         (14)
+
+where λ = 0.025/ē is the regularization parameter, and ē is the
+average edge length. This corresponds to a mild preference for                             5.1   Discrete Mesh Evolution
+smaller changes in circulation. The computed ∆Γc is directly added
+to the circulation variables and the simulation continues.                                 Our discrete soap film model relies on the ability to represent non-
+                                                                                           manifold liquid interfaces as Lagrangian triangle meshes, and to treat
+At times, we would like to animate an open soap film bounded                               the topological changes that arise as bubbles deform and rearrange.
+by a wire, although the Los Topos package currently requires that                          We make use of the Los Topos multimaterial surface tracking pack-
+all regions be closed and watertight. We therefore approximate                             age introduced by Da et al. [2014], which was tailor-made for these
+open scenarios by adding a film of inactive and non-rendered ghost                         types of topology changes, including bubble splitting, multi-bubble
+triangles that do not participate in the dynamics (i.e., circulation evo-                  merging, and so-called T1 processes (essentially foam rearrange-
+lution, Biot-Savart evaluation, etc.), but do close up the open region.                    ment).
+Moreover, we observe that in the presence of an open boundary,
+having vorticity in the interior of the soap film is insufficient, since                   We treat Los Topos largely as a black box: we provide proposed
+those degrees of freedom cannot adequately encode a path of air                            vertex trajectories for the vertices of the triangle mesh, and the
+flow from below the film to above (and vice versa) around the film                         algorithm finds an updated watertight mesh that satisfies these tra-
+boundary. As a result the flow behaves as if the air volumes above                         jectories as nearly as possible, after handling topological changes
+and below the film are conserved separately, even though the two                           and remeshing. Since we rely on storing circulation data at mesh
+regions are well connected outside the sheet boundary. The top row                         vertices, we must also reassign circulation values to affected vertices
+of Figure 6 illustrates this phenomenon in 2D. We therefore place an                       whenever a remeshing operation is performed. We therefore use a
+additional vorticity degree of freedom on each open boundary edge                          slightly smaller set of operations to reduce resampling: edge split-
+along the edge tangent direction (Figure 6 bottom row), and solve                          ting, edge collapse, T1 processes, and snapping. For edge splitting,
+for their strength using the same projection method above.                                 edge collapse, or snapping (coalescing nearby unconnected vertices),
+                                                                                           we project the new vertex position onto the old mesh and compute
+                                                                                           a new circulation value by barycentric interpolation over triangles.
+5     Time Integration                                                                     For a T1 process, which amounts to duplicating and separating an
+                                                                                           existing vertex, the two resulting vertices are assigned the circulation
+Our complete time integration loop is given by Algorithm 1.                                of the old vertex. (We eschew edge flipping, which changes geom-
+                                                                                           etry without changing vertices leading to temporal discontinuities,
+Algorithm 1 Time Integration Loop                                                          and vertex smoothing, which moves nearly all vertices and leads to
+    while simulating do                                                                    oversmoothing of circulation.)
+       Integrate Surface Tension into Circulations (§4.3)
+       Recover Velocity from Circulation (Biot-Savart) (§4.4)                              6     Results
+       Integrate Vertex Positions Using Velocity (§4.5)
+       Enforce Constraints via Projection (§4.6)                                           We illustrate the effectiveness of our method with a range of exam-
+       Perform Remeshing and Topology Changes, Los Topos (§5.1)                            ples. The results are organized to show how our method effectively
+    end while                                                                              preserves circulation, handles solid boundaries, and stably simu-
+ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+              Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams                        •      149:7
+
+         Test                           Vertices    Faces     Simulation time per frame (s)           Number of frames           Total time (min)
+         Cube oscillation                 4274       8544                             1.29                        6736                       145
+         Double bubble                    5204      10496                             1.94                        3560                       115
+         Octahedron                         854      1951                            0.319                         564                          3
+         Bubble in a ring                 1122       2240                            0.309                        1533                          8
+         Catenoid pinching                1153       2294                             0.96                        1500                        24
+         Pulling double bubble apart      1003       1998                            0.276                        5000                        23
+         Bubble cluster                   2734       5787                            0.695                        2214                        25
+         Bubble popping                   1971       4099                            0.321                       28000                       150
+         Sweeping ring                    3070       6129                            0.504                        7500                        63
+
+                 Table 1: Simulation time for various examples. A frame always corresponds to one time step of simulation.
+
+lates non-manifold foam configurations. The size of the simulation            can correctly stimulate the catenoid soap film shape and eventual
+meshes and simulation times are summarized in Table 1. The max-               separation of a single soap film. Here we have also made use of non-
+imum percentage deviations in the total volume of enclosed air                simulated triangles to illustrate that our numerical method supports
+over the entire simulations for the cube, double-bubble, and foam             open films (although our underlying surface tracker does not). When
+rearrangement examples was 2.2%, 2.4%, and 0.05% respectively.                the separation occurs, sharp geometric features are created near-
+                                                                              instantaneously, but again the simulation remains stable.
+Circulation     preservation The
+circulation-based discretization                                             Figure 7, left, shows a double-bubble being pulled apart by two
+in Section 4 allows our bubbles                                              metal rings until they undergo splitting and become fully separated.
+to preserve circulation over long                                            While the pinching behavior is similar to the catenoid case, here we
+simulations while being relatively                                           see a triple junction curve shared by two bubbles collapsing to a
+insensitive to the effects of remesh-                                        point and separating as opposed to the earlier example involving the
+ing. Figure 4 uses an initially                                              collapse of a single film.
+cube-shaped bubble to illustrate
+how our method maintains bubble                                               Figure 1, right, illustrates a squished bubble constrained by a sta-
+oscillations over very long periods.                                          tionary loop. The surface tension forces lead the bubble to gradually
+The bubble remains stable and tem-                                            squeeze to one side as the combined system relaxes towards a more
+porally smooth despite re-meshing                                             stable configuration. Such an example would be difficult to achieve
+and re-sampling the circulation                                               with a standard Eulerian scheme due to the complex boundary con-
+variables as often as needed to Figure 8: The equilibrium                     ditions created by the wire.
+preserve mesh quality. The sphere bubble.
+also maintains a remarkable degree
+of symmetry throughout.
+Note that our explicit integration scheme is not unconditionally sta-
+ble, and we must introduce some damping (by slightly diffusing Γ
+along the sheet) in order to maintain stability. Conveniently how-
+ever, this can also provide a reasonable visual approximation of
+air viscosity, as we demonstrate by re-running the same oscillating
+cube bubble with a substantially increased damping coefficient. As            Figure 10: Sweeping a metal ring through space to blow bubbles.
+expected it settles rapidly to a stable spherical configuration (Fig.
+8), demonstrating that our method achieves the desired steady-state           Figure 10 simulates blowing bubbles from a wire ring, by sweeping
+equilibrium for this canonical example.                                       the ring through space in the axial direction. The inertia of the air
+                                                                              mass pushes the initially flat soap film to bulge out until it pinches
+Moving beyond the simple                                                      off into individual bubbles.
+sphere topology, we perform
+a similar oscillation test on
+an initially stretched double                                                 Non-manifold foam dynamics           Next we step from single and
+bubble, shown inset. Here,                                                    double film and bubble configurations up to the more general case
+and throughout our exam-                                                      of highly complex non-manifold film and foam structures. Figure
+ples, the velocity of the am-                                                 7, right, shows a network of non-manifold soap films stretched over
+bient air flow plays the dom-                                                 an octahedron, a common physics experiment for children. We
+inant role in the motion, in                                                  initialize the geometry a short distance from its equilibrium, and
+this case generating the in-                                                  observe that it quickly settles and remains stable.
+teresting wobbling behavior;
+this velocity is compactly en-
+                                     Figure 9: A double-bubble.               Our final pair of test cases involves a free-floating foam consisting of
+coded by the triangle mesh.
+                                                                              ten bubbles combined together in a complicated, non-manifold non-
+Furthermore, we see that surface tension behaves naturally on the
+                                                                              equilibrium state (Fig. 1, left). Upon initiating the dynamics, the
+triple curves and the interior interface joining the two bubbles.
+                                                                              bubbles naturally shift and rearrange until they find an equilibrium.
+                                                                              To up the ante, we take the same drifting foam and intermittently
+Interaction with solid boundaries     Our solid boundary condition            puncture a random bubble by directly deleting the relevant interface
+explained in Section 4.6 allows us to simply and stably simulate              triangles. At each pop the foam suddenly ripples and the bubbles
+bubbles interacting with solid obstacles like metal wires or bubble           quickly shift into new non-manifold equilibrium configurations in
+wands. Figure 1, center, shows how pulling apart two metal rings              accordance with the dynamical laws.
+                                                                        ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+149:8       •      F. Da et al.
+
+7    Discussion                                                                            References
+
+We have approached foam simulation from a markedly different                               AGISHTEIN , M. E., AND M IGDAL , A. A. 1989. Dynamics of
+direction than earlier alternatives, yielding a number of trade-offs,                       vortex surfaces in three dimensions: Theory and simulations.
+including limitations.                                                                      Physica D: Nonlinear Phenomena 40, 1, 91–118.
+                                                                                           A NGELIDIS , A., AND N EYRET, F. 2005. Simulation of smoke
+From the standpoint of versatility, purely Eulerian methods currently                        based on vortex filament primitives. In Symposium on Computer
+dominate. Given their long line of investigation, Eulerian methods                           Animation, 87 – 96.
+support a broad range of features that we have yet to explore, includ-
+ing accurate modeling of viscosity, application to volumetric liquids,                     A NGELIDIS , A., N EYRET, F., S INGH , K., AND
+and bidirectional coupling with complex rigid and deformable ob-                              N OWROUZEZAHRAI , D. 2006. A controllable, fast and
+jects. On the other hand, Eulerian methods require that bubbles be                           stable basis for vortex based smoke simulation. In Symposium on
+significantly larger than the grid scale in order to resolve the desired                     Computer Animation, 25–32.
+velocity field and film geometry without excessive dissipation or
+volume loss; even then, explicit volume control may be necessary.                          BAKER , G. R., M IRRON , D. I., AND O RSZAG , S. A. 1982. Gen-
+Although circulation- or energy-preservation has been considered by                          eralized vortex methods for free-surface flow problems. J. Fluid
+a few Eulerian schemes [Elcott et al. 2007; Mullen et al. 2009], con-                        Mech. 123, 477–501.
+serving these quantities in an Eulerian setting remains challenging                        BARNAT, A., AND P OLLARD , N. S. 2012. Smoke sheets for
+in the presence of fluid interfaces. In contrast to Eulerian meth-                           graph-structured vortex filaments. In Symposium on Computer
+ods, our approach efficiently handles all the dynamics on the mesh                           Animation, 77–86.
+surface itself, notably without the need for a large linear solve; fur-
+thermore, circulation is preserved in a natural and simple manner,                         BATTY, C., U RIBE , A., AUDOLY, B., AND G RINSPUN , E. 2012.
+and in particular in the presence of non-manifold fluid interfaces.                          Discrete viscous sheets. ACM Trans. Graph. (SIGGRAPH) 31, 4,
+                                                                                             113.
+In comparison to related surface-based discretizations of thin sheets
+                                                                                           B OJSEN -H ANSEN , M., AND W OJTAN , C. 2013. Liquid surface
+and films [Batty et al. 2012; Zhu et al. 2014], our focus on centimeter-
+                                                                                              tracking with error compensation. ACM Trans. Graph. (SIG-
+scale soap films justifies neglecting certain quantities: we do not
+                                                                                             GRAPH) 32, 4, 79:1–79:10.
+track mass or thickness of the liquid, nor tangential component
+of the dynamics. Instead, we focus on the complex geometry of                              B RAKKE , K. 1992. The surface evolver. Experimental Mathematics
+non-manifold foam structures and its attendant topology changes,                              1, 2, 141–165.
+moreso than any existing purely triangle mesh-based scheme for
+foam. Our treatment of air-dominated dynamics also requires no                             B ROCHU , T., AND B RIDSON , R. 2009. Robust topological opera-
+coupling with a grid-based solver.                                                            tions for dynamic explicit surfaces. SIAM J. Sci. Comput. 31, 4,
+                                                                                              2472–2493.
+Some of our method’s limitations appear to be inherent to the vortex                       B ROCHU , T., K EELER , T., AND B RIDSON , R. 2012. Linear-time
+sheet model, but many offer exciting directions for future inves-                             smoke animation with vortex sheets. In Symposium on Computer
+tigation. Our current derivation assumes inviscid incompressible                              Animation, 87–95.
+flow, so that proper viscous boundary layers (e.g., vortex shedding)
+and divergent flows (e.g., inflating bubbles) remain out of reach;                         B ROCHU , T. 2006. Fluid animation with explicit surface meshes
+it may be interesting to introduce a limited form of divergence in                            and boundary-only dynamics. Master’s thesis, Citeseer.
+the form of normal motion, via an operator splitting approach. The
+assumption of equal densities on either side of the sheet removes the                      B USARYEV, O., D EY, T. K., WANG , H., AND R EN , Z. 2012.
+baroclinic terms, which play a crucial role in previous vortex sheet                          Animating bubble interactions in a liquid foam. ACM Trans.
+smoke methods as well as potential extensions to small-scale liquid                           Graph. (SIGGRAPH) 31, 4, 63.
+droplets. There is also ample room for further acceleration [Brochu                        C LAUSEN , P., W ICKE , M., S HEWCHUK , J. R., AND O’B RIEN ,
+et al. 2012; Zhang and Bridson 2014], as the method currently re-                             J. F. 2013. Simulating liquids and solid-liquid interactions with
+lies on a direct Biot-Savart evaluation that scales quadratically and                         Lagrangian meshes. ACM Trans. Graph. 32, 2, 17.
+explicit time integration of notoriously stiff surface tension forces.
+                                                                                           C OHEN -S TEINER , D., AND M ORVAN , J.-M. 2003. Restricted
+We believe our circulation-based discretization is attractive both for                        delaunay triangulations and normal cycle. 237–246.
+its minimalist representation of complex soap film dynamics, and
+for the concrete numerical and computational benefits it offers. We                        C OTTET, G.-H., AND KOUMOUTSAKOS , P. 2000. Vortex Methods:
+have shown that it preserves volume effectively and exhibits minimal                          Theory and Practice. Cambridge University Press.
+dissipation, while being fast and stable enough to handle a range of                       DA , F., BATTY, C., AND G RINSPUN , E. 2014. Multimaterial
+compelling foam and bubble behaviors. Having so far addressed the                            mesh-based surface tracking. ACM Trans. Graph. (SIGGRAPH)
+dynamics of both turbulent smoke and soap foams, we anticipate                              33, 4, 112:1–112:11.
+that vortex sheet techniques have a great deal yet to offer.
+                                                                                           D URIKOVIC , R. 2001. Animation of soap bubble dynamics, cluster
+                                                                                              formation and collision. Computer Graphics Forum (Eurograph-
+Acknowledgments                                                                               ics) 20, 3, 67–76.
+                                                                                           E LCOTT, S., T ONG , Y., K ANSO , E., S CHR ÖDER , P., AND D ES -
+This work was supported in part by the NSF (Grant IIS-1319483),                               BRUN , M. 2007. Stable, circulation-preserving, simplicial fluids.
+ERC (Grant ERC-2014-StG-638176), NSERC (Grant RGPIN-                                          ACM Trans. Graph. 26, 1, 4.
+04360-2014), Adobe, and Intel. We would also like to thank Hen-
+rique Teles Maia, Liding Zeyu, Yonghao Yue, Papoj Thamjaroem-                              G LASSNER , A. 2000. Soap bubbles: Part 1. IEEE Computer
+porn and Rohan Sawhney for their assistance.                                                 Graphics and Applications 20, 5, 76–84.
+ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+             Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams                           •      149:9
+
+G LASSNER , A. 2000. Soap bubbles: Part 2. IEEE Computer                        PATKAR , S., A ANJANEYA , M., K ARPMAN , D., AND F EDKIW, R.
+  Graphics and Applications 20, 6, 99–109.                                        2013. A Hybrid Lagrangian-Eulerian Formulation for Bubble
+                                                                                  Generation and Dynamics. In Symposium on Computer Anima-
+G OLAS , A., NARAIN , R., S EWALL , J., K RAJCEVSKI , P., D UBEY,                 tion, 105–114.
+   P., AND L IN , M. C. 2012. Large-scale fluid simulation using
+  velocity-vorticity domain decomposition. ACM Trans. Graph.                    P FAFF , T., T HUEREY, N., S ELLE , A., AND G ROSS , M. 2009.
+  (SIGGRAPH Asia) 31, 6, 148.                                                      Synthetic turbulence using artificial boundary layers. ACM Trans.
+                                                                                   Graph. (SIGGRAPH Asia) 28, 5, 121.
+G REENWOOD , S. T., AND H OUSE , D. H. 2004. Better with bubbles.
+   In Symposium on Computer Animation.                                          P FAFF , T., T HUEREY, N., AND G ROSS , M. 2012. Lagrangian vor-
+                                                                                   tex sheets for animating fluids. ACM Trans. Graph. (SIGGRAPH)
+H ONG , J.-M., AND K IM , C.-H. 2003. Animation of bubbles in                      31, 4, 112:1–112:8.
+  liquid. Computer Graphics Forum 22, 3, 253–262.
+                                                                                P INKALL , U., AND P OLTHIER , K. 1993. Computing discrete
+H ONG , J.-M., AND K IM , C.-H. 2005. Discontinuous fluids. ACM                    minimal surfaces and their conjugates. Experimental Mathematics
+  Trans. Graph. (SIGGRAPH) 24, 3 (July), 915–920.                                  2, 1, 15–36.
+H ONG , J.-M., L EE , H.-Y., YOON , J.-C., AND K IM , C.-H. 2008.               P OZRIKIDIS , C. 2000. Theoretical and computational aspects of the
+  Bubbles Alive. ACM Trans. Graph. (SIGGRAPH) 27, 3, 48.                           self-induced motion of three-dimensional vortex sheets. J. Fluid
+                                                                                   Mech. 425, 335–366.
+K ANG , M., F EDKIW, R., AND L IU , X.-D. 2000. A boundary
+  condition capturing method for multiphase incompressible flow.                S AYE , R., AND S ETHIAN , J. 2013. Multiscale Modeling of Mem-
+  SIAM J. Sci. Comput. 15, 3, 323–360.                                             brane Rearrangement, Drainage, and Rupture in Evolving Foams.
+                                                                                   Science 340, 6133, 720–724.
+K EELER , T., AND B RIDSON , R. 2014. Ocean waves animation
+   using boundary integral equations and explicit mesh tracking. In             S ELLE , A., R ASMUSSEN , N., AND F EDKIW, R. 2005. A vortex
+  Symposium on Computer Animation.                                                 particle method for smoke, water and explosions. ACM Trans.
+                                                                                   Graph. (SIGGRAPH) 24, 3, 910–914.
+K IM , B., L IU , Y., L LAMAS , I., J IAO , X., AND ROSSIGNAC , J.
+                                                                                S TOCK , M. J., DAHM , W. J. A., AND T RYGGVASON , G. 2008.
+   2007. Simulation of bubbles in foam with the volume control
+                                                                                   Impact of a vortex ring on a density interface using a regularized
+   method. ACM Trans. Graph. (SIGGRAPH) 26, 3, 98.
+                                                                                   inviscid vortex sheetmethod. J. Comp. Phys. 227, 21, 9021–9043.
+K IM , D., S ONG , O.- Y., AND KO , H.-S. 2009. Stretching and                  S TOCK , M. 2006. A regularized inviscid vortex sheet method for
+   wiggling liquids. ACM Trans. Graph. (SIGGRAPH Asia) 28, 5,                      three-dimensional flows with density interfaces. PhD thesis.
+   120.
+                                                                                T RYGGVASON , G. 1988. Numerical simulations of the Rayleigh-
+K IM , D., S ONG , O.- Y., AND KO , H.-S. 2010. A practical simula-                Taylor instability. J. Comp. Phys. 75, 2, 253–282.
+   tion of dispersed bubble flow. ACM Trans. Graph. (SIGGRAPH)
+   29, 4, 70.                                                                   V INES , M., H OUSTON , B., L ANG , J., AND L EE , W.-S. 2014.
+                                                                                   Vortical inviscid flows with two-way solid-fluid coupling. IEEE
+K UCK , H., VOGELSANG , C., AND G REINER , G. 2002. Simulation                     TVCG 20, 2, 303–315.
+   and rendering of liquid foams. In Graphics Interface, 81–88.
+                                                                                W EAIRE , D., AND H UTZLER , S. 2001. Physics of Foams. Oxford
+L OSASSO , F., S HINAR , T., S ELLE , A., AND F EDKIW, R. 2006.                   University Press, New York.
+   Multiple interacting liquids. ACM Trans. Graph. (SIGGRAPH)
+   25, 3, 812–819.                                                              W EAIRE , D. 2013. A fresh start for foam physics. Science 340,
+                                                                                  6133, 693–694.
+M EYER , M., D ESBRUN , M., S CHR ÖDER , P., AND BARR , A.
+                                                                                W EISSMANN , S., AND P INKALL , U. 2009. Real-time interactive
+  2002. Discrete differential-geometry operators for triangulated 2-
+                                                                                  simulation of smoke using discrete integrable vortex filament. In
+  manifolds. In VisMath, Springer-Verlag, Berlin, Germany, 35–54.
+                                                                                  VRIPHYS, 1–10.
+M IHALEF, V., U NLUSU , B., M ETAXAS , D., S USSMAN , M., AND                   W EISSMANN , S., AND P INKALL , U. 2010. Filament-based smoke
+   H USSAINI , M. Y. 2006. Physics based boiling simulation. In                   with vortex shedding and variational reconnection. ACM Trans.
+  Symposium on Computer Animation, 317–324.                                       Graph. (SIGGRAPH) 29, 4, 115:1–115:12.
+M ISZTAL , M., E RLEBEN , K., BARGTEIL , A. W., C HRISTENSEN ,                  Z HANG , X., AND B RIDSON , R. 2014. A PPPM fast summation
+   B. B., BAERENTZEN , A., AND B RIDSON , R. 2012. Multiphase                      method for fluids and beyond. ACM Trans. Graph. (SIGGRAPH
+  flow of immiscible fluids on unstructured moving meshes. In                      Asia) 33, 6, 206.
+  Symposium on Computer Animation, Eurographics Association,
+  Lausanne, Switzerland, 97–106.                                                Z HANG , Y., WANG , H., WANG , S., T ONG , Y., AND Z HOU , K.
+                                                                                   2012. A deformable surface model for real-time water drop
+M ULLEN , P., C RANE , K., PAVLOV, D., T ONG , Y., AND D ESBRUN ,                  animation. IEEE TVCG 18, 8, 1281–1289.
+  M. 2009. Energy-preserving integrators for fluid animation. ACM
+  Trans. Graph. (SIGGRAPH) 28, 3, 38.                                           Z HENG , W., YONG , J.-H., AND PAUL , J.-C. 2006. Simulation of
+                                                                                   bubbles. In Symposium on Computer Animation, Eurographics
+PAN , H., C HOI , Y.-K., L IU , Y., H U , W., D U , Q., P OLTHIER , K.,            Association, Vienna, 325–333.
+  Z HANG , C., AND WANG , W. 2012. Robust modeling of constant
+  mean curvature surfaces. ACM Trans. Graph. (SIGGRAPH) 31,                     Z HU , B., Q UIGLEY, E., C ONG , M., S OLOMON , J., AND F EDKIW,
+  4, 85.                                                                           R. 2014. Codimensional surface tension flow on simplicial
+                                                                                   complexes. ACM Trans. Graph. (SIGGRAPH) 33, 4, 111.
+PARK , S. I., AND K IM , M. J. 2005. Vortex fluid for gaseous
+  phenomena. In Symposium on Computer Animation, 261–270.
+                                                                          ACM Transactions on Graphics, Vol. 34, No. 4, Article 149, Publication Date: August 2015
+
