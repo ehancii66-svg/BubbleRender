@@ -58,6 +58,9 @@ uniform float uEnvironmentReflectionStrength;
 uniform float uThickness;       // film thickness d (nm)
 uniform float uThicknessVar;    // thickness variation amplitude (nm)
 uniform float uTime;            // time for animation
+uniform vec2 uTouchPoint;       // normalized screen-space touch point
+uniform float uTouchStrength;   // press/drag strength
+uniform float uTouchVelocity;   // normalized drag speed
 
 in vec3 vEyeVector;
 in vec3 vWorldNormal;
@@ -337,6 +340,13 @@ void main() {
 
     vec3 eye = vEyeVector;
     float NdotV = abs(dot(eye, normal));
+    vec2 screenUVForTouch = gl_FragCoord.xy / uWinResolution.xy;
+    vec2 touchDelta = screenUVForTouch - uTouchPoint;
+    touchDelta.x *= uWinResolution.x / max(uWinResolution.y, 1.0);
+    float touchDistance = length(touchDelta);
+    float touchMask = exp(-touchDistance * touchDistance / 0.0065) * uTouchStrength;
+    float touchRing = sin(touchDistance * 78.0 - uTime * 18.0) * exp(-touchDistance * 9.0);
+    float touchRipple = touchRing * uTouchStrength * (0.35 + uTouchVelocity * 0.65);
 
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
@@ -356,7 +366,10 @@ void main() {
         + (flowNoise - 0.5) * 0.30
         + (fineNoise - 0.5) * 0.04
         + (drainage - 0.5) * 0.46;
-    float dynamicThickness = uThickness + thicknessPattern * uThicknessVar;
+    float dynamicThickness = uThickness
+        + thicknessPattern * uThicknessVar
+        + touchMask * 190.0
+        + touchRipple * 95.0;
     vec3 kimReflectance = kim2012Iridescence(NdotV, dynamicThickness);
     vec3 lutReflectance = spectralLUTIridescence(NdotV, dynamicThickness);
     lutReflectance *= 0.85;
@@ -375,6 +388,7 @@ void main() {
     float edge = 1.0 - NdotV;
     float edgeProfile = smoothstep(0.18, 0.92, edge);
     float edgeBoost = mix(1.0, uEdgeDistortionBoost, pow(edgeProfile, 0.85));
+    float touchBoost = 1.0 + touchMask * 2.4 + abs(touchRipple) * 1.1;
     float surfaceRefractionScale = (uIsBackFace == 1) ? 0.16 : 1.0;
     float thicknessRefraction = mix(0.08, 0.45, clamp(dynamicThickness / 1000.0, 0.0, 1.0));
     float thinFilmRefraction = mix(0.08, 1.28, pow(edgeProfile, 1.15)) * thicknessRefraction;
@@ -383,7 +397,13 @@ void main() {
         * surfaceRefractionScale
         * thinFilmRefraction
         * uSpherePixelRadius
-        * edgeBoost;
+        * edgeBoost
+        * touchBoost;
+    offsetPixels += normalize(touchDelta + vec2(1e-4, 0.0))
+        * touchRipple
+        * uSpherePixelRadius
+        * 0.055
+        * surfaceRefractionScale;
     float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
     offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
     vec2 screenPixel = gl_FragCoord.xy;
@@ -402,6 +422,7 @@ void main() {
     float surfaceColorScale = (uIsBackFace == 1) ? 0.18 : 1.0;
     float colorBoost = (uIridescenceMode == 1) ? 1.05 : ((uIridescenceMode == 2) ? 1.35 : 1.55);
     vec3 iridescence = filmReflectance * colorBoost * surfaceColorScale;
+    iridescence *= 1.0 + touchMask * 1.5 + abs(touchRipple) * 0.55;
 
     // Fresnel edge factor: 0 at center, 1 at silhouette
     float fresnelTerm = pow(1.0 - NdotV, uFresnelPower);

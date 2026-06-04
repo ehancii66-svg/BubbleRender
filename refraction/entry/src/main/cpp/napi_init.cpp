@@ -68,9 +68,14 @@ std::vector<glm::vec3> g_SpherePositions;
 float g_FresnelPower = 8.0f;
 float g_Shininess = 15.0f;
 float g_Diffuseness = 0.2f;
+float g_RefractionStrength = 0.08f;
+float g_DispersionStrength = 0.35f;
 glm::vec3 light{-1.0f, 1.0f, 1.0f};
 
 float g_LastTouchX = 0.0f, g_LastTouchY = 0.0f;
+glm::vec2 g_TouchPoint{-10.0f, -10.0f};
+float g_TouchStrength = 0.0f;
+float g_TouchVelocity = 0.0f;
 
 
 GLuint LoadCubemapTexture(NativeResourceManager* resMgr, const std::vector<std::string>& faceFiles){
@@ -335,8 +340,13 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         refractionShader->SetFloat("uShininess", g_Shininess);
         refractionShader->SetFloat("uDiffuseness", g_Diffuseness);
+        refractionShader->SetFloat("uRefractionStrength", g_RefractionStrength);
+        refractionShader->SetFloat("uDispersionStrength", g_DispersionStrength);
         refractionShader->SetVec3("uLight", light);
         refractionShader->SetVec2("uWinResolution", {width, height});
+        refractionShader->SetVec2("uTouchPoint", g_TouchPoint);
+        refractionShader->SetFloat("uTouchStrength", g_TouchStrength);
+        refractionShader->SetFloat("uTouchVelocity", g_TouchVelocity);
     };
     
     auto SetBackgroundUniforms = [&]() {
@@ -473,13 +483,22 @@ static napi_value OnTouch(napi_env env, napi_callback_info info) {
     if (touchType == 0) { // Down
         g_LastTouchX = fx;
         g_LastTouchY = fy;
+        g_TouchPoint = {fx / fmaxf(width, 1.0f), 1.0f - fy / fmaxf(height, 1.0f)};
+        g_TouchStrength = 1.0f;
+        g_TouchVelocity = 0.0f;
     }else if (touchType == 2) { // Move
         float dx = fx - g_LastTouchX;
         float dy = fy - g_LastTouchY;
-        currentAngleY += dx * 0.5f;
-        currentAngleX += dy * 0.5f;
+        float norm = fmaxf(fmaxf(width, height), 1.0f);
+        g_TouchVelocity = glm::clamp(glm::length(glm::vec2(dx, dy)) / norm * 18.0f, 0.0f, 1.0f);
+        g_TouchStrength = glm::clamp(0.65f + g_TouchVelocity * 0.9f, 0.0f, 1.35f);
+        g_TouchPoint = {fx / fmaxf(width, 1.0f), 1.0f - fy / fmaxf(height, 1.0f)};
         g_LastTouchX = fx;
         g_LastTouchY = fy;
+    } else if (touchType == 1) { // Up
+        g_TouchStrength = 0.0f;
+        g_TouchVelocity = 0.0f;
+        g_TouchPoint = {-10.0f, -10.0f};
     }
 
     return nullptr;

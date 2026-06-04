@@ -19,6 +19,8 @@
 #include "shader/shader_background.h"
 #include "shader/shader_skybox.h"
 
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -86,10 +88,17 @@ static float &CurrentThickness()
 // Mouse state
 // ============================================================
 static bool g_MousePressed = false;
+static bool g_TouchPressed = false;
 static float g_LastMouseX = 0.0f;
 static float g_LastMouseY = 0.0f;
+static float g_LastTouchX = 0.0f;
+static float g_LastTouchY = 0.0f;
+static glm::vec2 g_TouchPoint = glm::vec2(-10.0f, -10.0f);
+static float g_TouchStrength = 0.0f;
+static float g_TouchVelocity = 0.0f;
 
 static double g_LastFrameTime = 0.0;
+static double g_DeltaTime = 0.0;
 
 // ============================================================
 // Cubemap loading (filesystem version)
@@ -243,6 +252,17 @@ static void RenderFrame()
     if (w <= 0 || h <= 0)
         return;
 
+    if (!g_TouchPressed)
+    {
+        g_TouchStrength *= expf((float)g_DeltaTime * -3.2f);
+        g_TouchVelocity *= expf((float)g_DeltaTime * -5.0f);
+        if (g_TouchStrength < 0.01f)
+        {
+            g_TouchStrength = 0.0f;
+            g_TouchPoint = glm::vec2(-10.0f, -10.0f);
+        }
+    }
+
     UpdateCamera();
 
     float t = static_cast<float>(g_Time);
@@ -293,6 +313,9 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThickness", CurrentThickness());
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
+        g_RefractionShader->SetVec2("uTouchPoint", g_TouchPoint);
+        g_RefractionShader->SetFloat("uTouchStrength", g_TouchStrength);
+        g_RefractionShader->SetFloat("uTouchVelocity", g_TouchVelocity);
     };
 
     auto SetBackgroundUniforms = [&]()
@@ -421,21 +444,49 @@ static void MouseButtonCallback(GLFWwindow *window, int button, int action, int 
             g_LastMouseY = (float)y;
         }
     }
+    else if (button == GLFW_MOUSE_BUTTON_RIGHT)
+    {
+        g_TouchPressed = (action == GLFW_PRESS);
+        if (g_TouchPressed)
+        {
+            double x, y;
+            glfwGetCursorPos(window, &x, &y);
+            g_LastTouchX = (float)x;
+            g_LastTouchY = (float)y;
+            g_TouchPoint = glm::vec2((float)x / (float)std::max(g_WindowWidth, 1),
+                                     1.0f - (float)y / (float)std::max(g_WindowHeight, 1));
+            g_TouchStrength = 1.0f;
+            g_TouchVelocity = 0.0f;
+        }
+    }
 }
 
 static void CursorPosCallback(GLFWwindow *window, double xpos, double ypos)
 {
-    if (!g_MousePressed)
-        return;
+    if (g_MousePressed)
+    {
+        float dx = (float)xpos - g_LastMouseX;
+        float dy = (float)ypos - g_LastMouseY;
 
-    float dx = (float)xpos - g_LastMouseX;
-    float dy = (float)ypos - g_LastMouseY;
+        g_CurrentAngleY += dx * 0.5f;
+        g_CurrentAngleX += dy * 0.5f;
 
-    g_CurrentAngleY += dx * 0.5f;
-    g_CurrentAngleX += dy * 0.5f;
+        g_LastMouseX = (float)xpos;
+        g_LastMouseY = (float)ypos;
+    }
 
-    g_LastMouseX = (float)xpos;
-    g_LastMouseY = (float)ypos;
+    if (g_TouchPressed)
+    {
+        float dx = (float)xpos - g_LastTouchX;
+        float dy = (float)ypos - g_LastTouchY;
+        float norm = (float)std::max(std::max(g_WindowWidth, g_WindowHeight), 1);
+        g_TouchVelocity = glm::clamp(glm::length(glm::vec2(dx, dy)) / norm * 18.0f, 0.0f, 1.0f);
+        g_TouchStrength = glm::clamp(0.65f + g_TouchVelocity * 0.9f, 0.0f, 1.35f);
+        g_TouchPoint = glm::vec2((float)xpos / (float)std::max(g_WindowWidth, 1),
+                                 1.0f - (float)ypos / (float)std::max(g_WindowHeight, 1));
+        g_LastTouchX = (float)xpos;
+        g_LastTouchY = (float)ypos;
+    }
 }
 
 static void ScrollCallback(GLFWwindow *window, double xoffset, double yoffset)
@@ -742,7 +793,8 @@ int main()
     // -------- Main loop --------
     std::cout << std::endl;
     std::cout << "=== Controls ===" << std::endl;
-    std::cout << "Mouse drag  : Rotate view" << std::endl;
+    std::cout << "Left drag   : Rotate view" << std::endl;
+    std::cout << "Right drag  : Touch bubble ripple" << std::endl;
     std::cout << "Mouse wheel : Zoom in/out" << std::endl;
     std::cout << "R/T : Fresnel power -/+" << std::endl;
     std::cout << "F/G : Diffuseness -/+" << std::endl;
@@ -762,7 +814,8 @@ int main()
         double currentTime = glfwGetTime();
         if (g_LastFrameTime == 0.0)
             g_LastFrameTime = currentTime;
-        g_Time += currentTime - g_LastFrameTime;
+        g_DeltaTime = currentTime - g_LastFrameTime;
+        g_Time += g_DeltaTime;
         g_LastFrameTime = currentTime;
 
         RenderFrame();
