@@ -28,10 +28,20 @@ set(RENDER_HEADERS
     shader/shader_skybox.h
 )
 
+set(SIM_SOURCES
+    simulation/vortex_sheet.cpp
+)
+
+set(SIM_HEADERS
+    simulation/vortex_sheet.h
+)
+
 add_executable(${PROJECT_NAME}
     main.cpp
     ${RENDER_SOURCES}
     ${RENDER_HEADERS}
+    ${SIM_SOURCES}
+    ${SIM_HEADERS}
 )
 
 # -------- Include directories --------
@@ -39,6 +49,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/render
     ${CMAKE_CURRENT_SOURCE_DIR}/shader
+    ${CMAKE_CURRENT_SOURCE_DIR}/simulation
 )
 
 # -------- Link libraries --------

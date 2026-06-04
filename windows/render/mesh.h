@@ -34,12 +34,24 @@ public:
     vector<Texture> textures;
     unsigned int VAO;
 
-    Mesh(vector<Vertex> vertices, vector<unsigned int> indices, vector<Texture> textures)
+    Mesh(vector<Vertex> vertices, vector<unsigned int> indices, vector<Texture> textures,
+         bool dynamic = false)
     {
         this->vertices = vertices;
         this->indices = indices;
         this->textures = textures;
-        setupMesh();
+        setupMesh(dynamic);
+    }
+
+    // Update vertex buffer contents (for simulation-driven geometry).
+    // Assumes vertex count unchanged. Only uploads Position and Normal.
+    void updateVertices(const vector<Vertex>& newVertices)
+    {
+        vertices = newVertices;
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0,
+                        vertices.size() * sizeof(Vertex), &vertices[0]);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
     void Draw(Shader& shader)
@@ -85,14 +97,15 @@ public:
 private:
     unsigned int VBO, EBO;
 
-    void setupMesh()
+    void setupMesh(bool dynamic = false)
     {
+        GLenum usage = dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
         glGenVertexArrays(1, &VAO);
         glGenBuffers(1, &VBO);
         glGenBuffers(1, &EBO);
         glBindVertexArray(VAO);
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], usage);
 
         glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
         glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);

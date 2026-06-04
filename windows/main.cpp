@@ -15,6 +15,7 @@
 #include "render/model.h"
 #include "render/camera.h"
 #include "render/shader.h"
+#include "simulation/vortex_sheet.h"
 #include "shader/shader_refraction.h"
 #include "shader/shader_background.h"
 #include "shader/shader_skybox.h"
@@ -44,10 +45,30 @@ static float g_MaxOffsetRatio = 0.52f;
 static float g_EnvironmentReflectionStrength = 0.65f;
 static glm::vec3 g_Light = glm::vec3(-1.0f, 1.0f, 1.0f);
 static int g_IridescenceMode = 2; // 0 = Kim2012, 1 = spectral LUT, 2 = Belcour Airy
-static glm::vec3 g_BaseBubbleScale = glm::vec3(1.0f, 1.035f, 0.985f);
-static float g_BubbleFloatAmp = 0.08f;
-static float g_BubbleDriftAmp = 0.04f;
-static float g_BubbleWobbleAmp = 0.012f;
+
+// DBSTT vortex sheet simulation
+static VortexSheetSimulation g_Sim;
+static float g_BubbleRadius = 1.5f;
+static int   g_SimSubdivs  = 3;       // icosphere subdivision level
+static float g_SimPerturb  = 0.10f;   // initial stretch 10%
+static float g_SimTimeStep = 0.001f;  // Δt per substep
+static int   g_SimSubsteps = 5;       // substeps per frame
+static bool  g_SimPaused   = false;
+
+// Helper: convert sim mesh data to Vertex vector for GPU upload
+static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation& sim) {
+    const auto& pos = sim.getPositions();
+    const auto& nrm = sim.getNormals();
+    std::vector<Vertex> verts(pos.size());
+    for (size_t i = 0; i < pos.size(); ++i) {
+        verts[i].Position   = pos[i];
+        verts[i].Normal     = nrm[i];
+        verts[i].TexCoords  = glm::vec2(0.0f);
+        verts[i].Tangent    = glm::vec3(0.0f);
+        verts[i].Bitangent  = glm::vec3(0.0f);
+    }
+    return verts;
+}
 
 static Camera g_Camera;
 
@@ -265,27 +286,31 @@ static void RenderFrame()
 
     UpdateCamera();
 
-    float t = static_cast<float>(g_Time);
-    glm::vec3 bubbleOffset = glm::vec3(
-        sinf(t * 0.37f + 1.2f) * g_BubbleDriftAmp,
-        sinf(t * 0.70f) * g_BubbleFloatAmp,
-        cosf(t * 0.31f + 0.6f) * g_BubbleDriftAmp * 0.75f);
-    glm::vec3 bubbleScale = g_BaseBubbleScale + glm::vec3(
-        sinf(t * 0.45f) * g_BubbleWobbleAmp,
-        sinf(t * 0.38f + 2.1f) * g_BubbleWobbleAmp,
-        sinf(t * 0.52f + 4.0f) * g_BubbleWobbleAmp);
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), bubbleOffset);
-    model = glm::scale(model, bubbleScale);
+    // ---- DBSTT simulation step ----
+    if (!g_SimPaused) {
+        g_Sim.update(1.0f / 60.0f);  // target ~60fps simulation rate
+    }
+
+    // Upload updated vertices from simulation to GPU
+    if (g_RefractModel && g_RefractModel->getMeshCount() > 0) {
+        auto verts = buildVerticesFromSim(g_Sim);
+        Mesh* m = g_RefractModel->getMesh(0);
+        if (m) m->updateVertices(verts);
+    }
+
+    // Model matrix: identity — all deformation is in the simulated vertex positions
+    glm::mat4 model = glm::mat4(1.0f);
     glm::mat4 view = g_Camera.getViewMatrix();
     glm::mat4 proj = g_Camera.getProjectionMatrix();
 
     auto SetRefractUniforms = [&](bool isBackFace)
     {
-        // Compute sphere's screen-space pixel radius for refraction offset scaling
+        // Compute sphere's screen-space pixel radius for refraction offset scaling.
+        // Use the simulation's bounding radius (slightly larger than nominal due to deformation).
         float dist = glm::length(g_Camera.getPosition());
         float fovVert = glm::radians(g_Camera.getFov());
         float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
-        float bubbleRadius = 1.5f * std::max(bubbleScale.x, std::max(bubbleScale.y, bubbleScale.z));
+        float bubbleRadius = g_BubbleRadius * 1.15f;  // 15% margin for deformation
         float angularRadius = atanf(bubbleRadius / dist);
         float spherePixelRadius = angularRadius * pixelsPerRadian;
 
@@ -582,6 +607,52 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_ThicknessVar = std::min(500.0f, g_ThicknessVar + 20.0f);
         std::cout << "ThicknessVar: " << g_ThicknessVar << " nm" << std::endl;
         break;
+    // ---- DBSTT Simulation controls ----
+    case GLFW_KEY_Z:
+        g_SimPaused = !g_SimPaused;
+        std::cout << "Simulation " << (g_SimPaused ? "PAUSED" : "RUNNING") << std::endl;
+        break;
+    case GLFW_KEY_X:
+        std::cout << "Resetting simulation..." << std::endl;
+        g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
+        g_Sim.timeStep = g_SimTimeStep;
+        g_Sim.substepsPerFrame = g_SimSubsteps;
+        g_Sim.surfaceTensionStrength = 15.0f;
+        g_Sim.circulationDiffusion = 0.0005f;
+        g_Sim.flipSurfaceTensionSign = true;
+        break;
+    case GLFW_KEY_3:
+        g_Sim.surfaceTensionStrength = std::max(1.0f, g_Sim.surfaceTensionStrength - 1.0f);
+        std::cout << "SurfaceTensionStrength: " << g_Sim.surfaceTensionStrength << std::endl;
+        break;
+    case GLFW_KEY_4:
+        g_Sim.surfaceTensionStrength = std::min(50.0f, g_Sim.surfaceTensionStrength + 1.0f);
+        std::cout << "SurfaceTensionStrength: " << g_Sim.surfaceTensionStrength << std::endl;
+        break;
+    case GLFW_KEY_5:
+        g_Sim.circulationDiffusion = std::max(0.0f, g_Sim.circulationDiffusion - 0.0002f);
+        std::cout << "CirculationDiffusion: " << g_Sim.circulationDiffusion << std::endl;
+        break;
+    case GLFW_KEY_6:
+        g_Sim.circulationDiffusion = std::min(0.01f, g_Sim.circulationDiffusion + 0.0002f);
+        std::cout << "CirculationDiffusion: " << g_Sim.circulationDiffusion << std::endl;
+        break;
+    case GLFW_KEY_9:
+        g_Sim.flipSurfaceTensionSign = !g_Sim.flipSurfaceTensionSign;
+        std::cout << "SurfaceTensionSign flipped: dΓ ∝ "
+                  << (g_Sim.flipSurfaceTensionSign ? "+" : "-")
+                  << "(H₁-H₂)" << std::endl;
+        break;
+    case GLFW_KEY_7:
+        g_SimSubsteps = std::max(1, g_SimSubsteps - 1);
+        g_Sim.substepsPerFrame = g_SimSubsteps;
+        std::cout << "Substeps: " << g_SimSubsteps << std::endl;
+        break;
+    case GLFW_KEY_8:
+        g_SimSubsteps = std::min(10, g_SimSubsteps + 1);
+        g_Sim.substepsPerFrame = g_SimSubsteps;
+        std::cout << "Substeps: " << g_SimSubsteps << std::endl;
+        break;
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
@@ -760,7 +831,23 @@ int main()
     // -------- Models --------
     g_SkyboxModel = Model::CreateSkyboxCube();
 
-    g_RefractModel = Model::CreateSphere(1.5f, 128, 64, true);
+    // Initialize DBSTT vortex sheet simulation (replaces static sphere).
+    g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
+    g_Sim.timeStep       = g_SimTimeStep;
+    g_Sim.substepsPerFrame = g_SimSubsteps;
+
+    // Build rendering Model from simulation mesh
+    {
+        const auto& pos = g_Sim.getPositions();
+        const auto& nrm = g_Sim.getNormals();
+        std::vector<unsigned int> idx;
+        for (const auto& t : g_Sim.getTriangles()) {
+            idx.push_back((unsigned int)t.x);
+            idx.push_back((unsigned int)t.y);
+            idx.push_back((unsigned int)t.z);
+        }
+        g_RefractModel = Model::CreateFromVertices(pos, nrm, idx);
+    }
 
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
@@ -796,6 +883,7 @@ int main()
     std::cout << "Left drag   : Rotate view" << std::endl;
     std::cout << "Right drag  : Touch bubble ripple" << std::endl;
     std::cout << "Mouse wheel : Zoom in/out" << std::endl;
+    std::cout << "--- Rendering ---" << std::endl;
     std::cout << "R/T : Fresnel power -/+" << std::endl;
     std::cout << "F/G : Diffuseness -/+" << std::endl;
     std::cout << "V/B : Shininess -/+" << std::endl;
@@ -806,6 +894,13 @@ int main()
     std::cout << "L   : Cycle iridescence mode (Kim2012 / Spectral LUT / Belcour Airy)" << std::endl;
     std::cout << "N/M : Film thickness -/+ (nm)" << std::endl;
     std::cout << "1/2 : Thickness variation -/+" << std::endl;
+    std::cout << "--- DBSTT Simulation ---" << std::endl;
+    std::cout << "Z   : Pause/resume simulation" << std::endl;
+    std::cout << "X   : Reset simulation" << std::endl;
+    std::cout << "3/4 : Surface tension strength -/+" << std::endl;
+    std::cout << "5/6 : Circulation diffusion -/+" << std::endl;
+    std::cout << "7/8 : Substeps per frame -/+" << std::endl;
+    std::cout << "9   : Flip dΓ sign (toggle paper vs reversed)" << std::endl;
     std::cout << "ESC : Quit" << std::endl;
     std::cout << "================" << std::endl;
 
