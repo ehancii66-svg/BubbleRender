@@ -1,5 +1,5 @@
 //
-// BubbleRender — DBSTT (Da et al. 2015) Vortex Sheet Simulation
+// BubbleRender - DBSTT (Da et al. 2015) Vortex Sheet Simulation
 // Implementation for a single closed soap bubble.
 //
 
@@ -78,8 +78,7 @@ void VortexSheetSimulation::initIcosphere(float radius, int subdivs, float pertu
     }
     regularizationAlpha = m_avgEdgeLength * 1.0f;
 
-    // ---- Diagnostic: check curvature sign on initial perturbed mesh ----
-    {
+    if (diagnosticsEnabled) {
         computeMeanCurvature();
         float Hmin = 1e9f, Hmax = -1e9f, Havg = 0.0f;
         int negC = 0;
@@ -93,11 +92,10 @@ void VortexSheetSimulation::initIcosphere(float radius, int subdivs, float pertu
                   << "] avg=" << Havg << " neg=" << negC << "/" << nv
                   << " (sphere target=" << (1.0f/radius) << ")"
                   << std::endl;
-        // Reset — curvature will be recomputed during update()
         std::fill(m_mesh.meanCurvature.begin(), m_mesh.meanCurvature.end(), 0.0f);
     }
 
-    std::cout << "[DBSTT] Icosphere: " << nv << " verts, "
+    std::cout << "[DBSTT] Mesh: " << nv << " verts, "
               << m_mesh.triangles.size() << " tris, "
               << "edge=" << m_avgEdgeLength << ", alpha=" << regularizationAlpha
               << std::endl;
@@ -156,7 +154,7 @@ void VortexSheetSimulation::initFromMesh(
 }
 
 // ============================================================
-// Per-frame update — Algorithm 1 from Da et al. 2015
+// Per-frame update - Algorithm 1 from Da et al. 2015
 // ============================================================
 
 void VortexSheetSimulation::update(float frameDt)
@@ -188,8 +186,7 @@ void VortexSheetSimulation::update(float frameDt)
     // Final normal update for rendering
     computeVertexNormalsAndAreas();
 
-    // ---- Diagnostic output ----
-    {
+    if (diagnosticsEnabled) {
         static int frameCount = 0;
         if (++frameCount % 60 == 0) {
             int nv = (int)m_mesh.positions.size();
@@ -230,8 +227,8 @@ void VortexSheetSimulation::update(float frameDt)
 
             std::cout << "[DBSTT] r=[" << minR << "," << maxR << "] avgR=" << avgR
                       << " max|v|=" << maxV << " max|H|=" << maxH
-                      << " max|Γ|=" << maxAbsGamma
-                      << " v·n(pole)=" << vdotn_pole << " v·n(eq)=" << vdotn_eq
+                      << " max|circulation|=" << maxAbsGamma
+                      << " vDotN(pole)=" << vdotn_pole << " vDotN(eq)=" << vdotn_eq
                       << " Hpole=" << Hpole << " Heq=" << Heq
                       << " Gpole=" << Gpole
                       << " " << status

@@ -372,16 +372,18 @@ vec2 sampleUV = samplePixel / uFBOSize;
 
 ```text
 Mouse drag  : Rotate view
+Right drag  : Touch bubble ripple
 Mouse wheel : Zoom in/out
 R/T : Fresnel power -/+
-F/G : Diffuseness -/+
-V/B : Shininess -/+
 Y/H : Refraction strength -/+
 U/J : Edge distortion boost -/+
-I/K : Max offset ratio -/+
 O/P : Environment reflection -/+
+L   : Cycle iridescence mode
 N/M : Film thickness -/+
 1/2 : Thickness variation -/+
+Z   : Pause/resume simulation
+X   : Reset simulation
+3/4 : Surface tension strength -/+
 ESC : Quit
 ```
 

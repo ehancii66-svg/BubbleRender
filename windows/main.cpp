@@ -10,6 +10,13 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "stb_image.h"
 
 #include "render/model.h"
@@ -31,6 +38,7 @@
 // ============================================================
 static int g_WindowWidth = 1280;
 static int g_WindowHeight = 720;
+static constexpr const char *g_AppTitle = "Soap Bubble Rendering - Thin Film + DBSTT";
 
 static float g_CameraDistance = 3.5f;
 static float g_CurrentAngleX = 0.0f; // pitch
@@ -537,22 +545,6 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_FresnelPower = std::min(20.0f, g_FresnelPower + step);
         std::cout << "FresnelPower: " << g_FresnelPower << std::endl;
         break;
-    case GLFW_KEY_F:
-        g_Diffuseness = std::max(0.0f, g_Diffuseness - 0.05f);
-        std::cout << "Diffuseness: " << g_Diffuseness << std::endl;
-        break;
-    case GLFW_KEY_G:
-        g_Diffuseness = std::min(1.0f, g_Diffuseness + 0.05f);
-        std::cout << "Diffuseness: " << g_Diffuseness << std::endl;
-        break;
-    case GLFW_KEY_V:
-        g_Shininess = std::max(1.0f, g_Shininess - step);
-        std::cout << "Shininess: " << g_Shininess << std::endl;
-        break;
-    case GLFW_KEY_B:
-        g_Shininess = std::min(64.0f, g_Shininess + step);
-        std::cout << "Shininess: " << g_Shininess << std::endl;
-        break;
     case GLFW_KEY_Y:
         g_RefractionStrength = std::max(0.0f, g_RefractionStrength - 0.1f);
         std::cout << "RefractionStrength: " << g_RefractionStrength << std::endl;
@@ -568,14 +560,6 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
     case GLFW_KEY_J:
         g_EdgeDistortionBoost = std::min(3.0f, g_EdgeDistortionBoost + 0.1f);
         std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
-        break;
-    case GLFW_KEY_I:
-        g_MaxOffsetRatio = std::max(0.1f, g_MaxOffsetRatio - 0.05f);
-        std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
-        break;
-    case GLFW_KEY_K:
-        g_MaxOffsetRatio = std::min(1.2f, g_MaxOffsetRatio + 0.05f);
-        std::cout << "MaxOffsetRatio: " << g_MaxOffsetRatio << std::endl;
         break;
     case GLFW_KEY_O:
         g_EnvironmentReflectionStrength = std::max(0.0f, g_EnvironmentReflectionStrength - 0.05f);
@@ -629,30 +613,6 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_Sim.surfaceTensionStrength = std::min(50.0f, g_Sim.surfaceTensionStrength + 1.0f);
         std::cout << "SurfaceTensionStrength: " << g_Sim.surfaceTensionStrength << std::endl;
         break;
-    case GLFW_KEY_5:
-        g_Sim.circulationDiffusion = std::max(0.0f, g_Sim.circulationDiffusion - 0.0002f);
-        std::cout << "CirculationDiffusion: " << g_Sim.circulationDiffusion << std::endl;
-        break;
-    case GLFW_KEY_6:
-        g_Sim.circulationDiffusion = std::min(0.01f, g_Sim.circulationDiffusion + 0.0002f);
-        std::cout << "CirculationDiffusion: " << g_Sim.circulationDiffusion << std::endl;
-        break;
-    case GLFW_KEY_9:
-        g_Sim.flipSurfaceTensionSign = !g_Sim.flipSurfaceTensionSign;
-        std::cout << "SurfaceTensionSign flipped: dΓ ∝ "
-                  << (g_Sim.flipSurfaceTensionSign ? "+" : "-")
-                  << "(H₁-H₂)" << std::endl;
-        break;
-    case GLFW_KEY_7:
-        g_SimSubsteps = std::max(1, g_SimSubsteps - 1);
-        g_Sim.substepsPerFrame = g_SimSubsteps;
-        std::cout << "Substeps: " << g_SimSubsteps << std::endl;
-        break;
-    case GLFW_KEY_8:
-        g_SimSubsteps = std::min(10, g_SimSubsteps + 1);
-        g_Sim.substepsPerFrame = g_SimSubsteps;
-        std::cout << "Substeps: " << g_SimSubsteps << std::endl;
-        break;
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, GLFW_TRUE);
         break;
@@ -702,6 +662,10 @@ static void Cleanup()
 // ============================================================
 int main()
 {
+#ifdef _WIN32
+    SetConsoleTitleA(g_AppTitle);
+#endif
+
     // -------- GLFW init --------
     if (!glfwInit())
     {
@@ -714,7 +678,7 @@ int main()
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     GLFWwindow *window = glfwCreateWindow(g_WindowWidth, g_WindowHeight,
-                                          "BubbleRender - Iridescence (Kim2012)", nullptr, nullptr);
+                                          g_AppTitle, nullptr, nullptr);
     if (!window)
     {
         std::cerr << "Failed to create GLFW window" << std::endl;
@@ -736,10 +700,8 @@ int main()
 
     std::cout << "OpenGL " << glGetString(GL_VERSION) << std::endl << std::flush;
     std::cout << "Renderer: " << glGetString(GL_RENDERER) << std::endl << std::flush;
-    std::cout << ">>> PAST GLAD INIT" << std::endl << std::flush;
 
     // -------- Callbacks --------
-    std::cout << "Setting callbacks..." << std::endl;
     glfwSetFramebufferSizeCallback(window, FramebufferSizeCallback);
     glfwSetMouseButtonCallback(window, MouseButtonCallback);
     glfwSetCursorPosCallback(window, CursorPosCallback);
@@ -752,7 +714,6 @@ int main()
     g_Camera.setTarget(glm::vec3(0.0f, 0.0f, 0.0f));
 
     // -------- Shaders --------
-    std::cout << "Creating shaders..." << std::endl;
     g_RefractionShader = new Shader(refractionVertexShader, refractionFragmentShader);
     g_BackgroundShader = new Shader(backgroundVertexShader, backgroundFragmentShader);
     g_SkyboxShader = new Shader(skyboxVertexShader, skyboxFragmentShader);
@@ -765,43 +726,6 @@ int main()
         glfwTerminate();
         return -1;
     }
-
-    // -------- Debug: verify thin film formula -----
-    std::cout << "=== Kim2012 iridescence formula check ===" << std::endl;
-    auto cppThinFilm = [](float cosTheta, float thickness, float wavelength)
-    {
-        float n = 1.33f;
-        float sinTheta2 = max(0.0f, 1.0f - cosTheta * cosTheta);
-        float sinTheta = sqrt(sinTheta2);
-        // Fix: cos(theta_t) = sqrt(n^2 - sin^2(theta_i)) / n
-        float cosT = sqrt(max(0.0f, n * n - sinTheta2)) / n;
-        float Rs = (cosTheta - cosT) / (cosTheta + cosT);
-        float Rp = (n * n * cosTheta - cosT) / (n * n * cosTheta + cosT);
-        // Phase uses correct cosT via sinT route
-        float sinT = sinTheta / n;
-        float cosTphase = sqrt(max(0.0f, 1.0f - sinT * sinT));
-        float phi = (4.0f * 3.14159265f * n * thickness * cosTphase) / wavelength;
-        float cosPhi = cos(phi);
-        float Rs2 = Rs * Rs, Rp2 = Rp * Rp;
-        float denom_s = 1.0f + Rs2 * Rs2 - 2.0f * Rs2 * cosPhi;
-        float denom_p = 1.0f + Rp2 * Rp2 - 2.0f * Rp2 * cosPhi;
-        float rs = (denom_s > 1e-6f) ? Rs2 * (1.0f - cosPhi) / denom_s : 0.0f;
-        float rp = (denom_p > 1e-6f) ? Rp2 * (1.0f - cosPhi) / denom_p : 0.0f;
-        return rs + rp;
-    };
-    std::cout << "Kim/LUT thickness=" << g_KimLutThickness
-              << "nm, Belcour Airy thickness=" << g_AiryThickness
-              << "nm, thicknessVar=" << g_ThicknessVar << "nm" << std::endl;
-    std::cout << "NdotV=0.9: R=" << cppThinFilm(0.9f, CurrentThickness(), 615.0f)
-              << " G=" << cppThinFilm(0.9f, CurrentThickness(), 535.0f)
-              << " B=" << cppThinFilm(0.9f, CurrentThickness(), 465.0f) << std::endl;
-    std::cout << "NdotV=0.5: R=" << cppThinFilm(0.5f, CurrentThickness(), 615.0f)
-              << " G=" << cppThinFilm(0.5f, CurrentThickness(), 535.0f)
-              << " B=" << cppThinFilm(0.5f, CurrentThickness(), 465.0f) << std::endl;
-    std::cout << "NdotV=0.1: R=" << cppThinFilm(0.1f, CurrentThickness(), 615.0f)
-              << " G=" << cppThinFilm(0.1f, CurrentThickness(), 535.0f)
-              << " B=" << cppThinFilm(0.1f, CurrentThickness(), 465.0f) << std::endl;
-    std::cout << "===========================================" << std::endl;
 
     // -------- Cubemap --------
     std::vector<std::string> cubemapFaces = {
@@ -879,30 +803,40 @@ int main()
 
     // -------- Main loop --------
     std::cout << std::endl;
-    std::cout << "=== Controls ===" << std::endl;
-    std::cout << "Left drag   : Rotate view" << std::endl;
-    std::cout << "Right drag  : Touch bubble ripple" << std::endl;
-    std::cout << "Mouse wheel : Zoom in/out" << std::endl;
-    std::cout << "--- Rendering ---" << std::endl;
-    std::cout << "R/T : Fresnel power -/+" << std::endl;
-    std::cout << "F/G : Diffuseness -/+" << std::endl;
-    std::cout << "V/B : Shininess -/+" << std::endl;
-    std::cout << "Y/H : Refraction strength -/+" << std::endl;
-    std::cout << "U/J : Edge distortion boost -/+" << std::endl;
-    std::cout << "I/K : Max offset ratio -/+" << std::endl;
-    std::cout << "O/P : Environment reflection -/+" << std::endl;
-    std::cout << "L   : Cycle iridescence mode (Kim2012 / Spectral LUT / Belcour Airy)" << std::endl;
-    std::cout << "N/M : Film thickness -/+ (nm)" << std::endl;
-    std::cout << "1/2 : Thickness variation -/+" << std::endl;
-    std::cout << "--- DBSTT Simulation ---" << std::endl;
-    std::cout << "Z   : Pause/resume simulation" << std::endl;
-    std::cout << "X   : Reset simulation" << std::endl;
-    std::cout << "3/4 : Surface tension strength -/+" << std::endl;
-    std::cout << "5/6 : Circulation diffusion -/+" << std::endl;
-    std::cout << "7/8 : Substeps per frame -/+" << std::endl;
-    std::cout << "9   : Flip dΓ sign (toggle paper vs reversed)" << std::endl;
-    std::cout << "ESC : Quit" << std::endl;
-    std::cout << "================" << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "  " << g_AppTitle << std::endl;
+    std::cout << "==================================================" << std::endl;
+    std::cout << "View" << std::endl;
+    std::cout << "  Left drag      Rotate camera" << std::endl;
+    std::cout << "  Right drag     Touch ripple on bubble" << std::endl;
+    std::cout << "  Mouse wheel    Zoom in / out" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Appearance" << std::endl;
+    std::cout << "  R / T          Fresnel edge power       - / +" << std::endl;
+    std::cout << "  Y / H          Refraction strength      - / +" << std::endl;
+    std::cout << "  U / J          Edge distortion          - / +" << std::endl;
+    std::cout << "  O / P          Environment reflection   - / +" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Thin Film" << std::endl;
+    std::cout << "  L              Cycle mode: Kim2012 / LUT / Belcour Airy" << std::endl;
+    std::cout << "  N / M          Film thickness (nm)      - / +" << std::endl;
+    std::cout << "  1 / 2          Thickness variation      - / +" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Simulation" << std::endl;
+    std::cout << "  Z              Pause / resume" << std::endl;
+    std::cout << "  X              Reset bubble" << std::endl;
+    std::cout << "  3 / 4          Surface tension          - / +" << std::endl;
+    std::cout << std::endl;
+    std::cout << "  ESC            Quit" << std::endl;
+    std::cout << "--------------------------------------------------" << std::endl;
+    std::cout << "Current: mode="
+              << (g_IridescenceMode == 0 ? "Kim2012" : (g_IridescenceMode == 1 ? "LUT" : "Belcour Airy"))
+              << ", thickness=" << CurrentThickness() << " nm"
+              << ", refraction=" << g_RefractionStrength
+              << ", edge=" << g_EdgeDistortionBoost
+              << ", reflection=" << g_EnvironmentReflectionStrength
+              << std::endl;
+    std::cout << "==================================================" << std::endl;
 
     while (!glfwWindowShouldClose(window))
     {
