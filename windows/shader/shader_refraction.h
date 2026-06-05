@@ -49,6 +49,7 @@ uniform vec2 uWinResolution;
 uniform vec2 uFBOSize;
 uniform float uSpherePixelRadius;
 uniform int uIsBackFace;
+uniform int uRenderToFBO;
 uniform int uIridescenceMode;
 uniform sampler2D uBackgroundTexture;
 uniform samplerCube uEnvironmentMap;
@@ -407,9 +408,10 @@ void main() {
     float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
     offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
     vec2 screenPixel = gl_FragCoord.xy;
-    vec2 pad = (uFBOSize - uWinResolution) * 0.5;
-    vec2 fboPixel = screenPixel + pad;
-    vec2 samplePixel = clamp(fboPixel + offsetPixels, vec2(0.0), uFBOSize);
+    vec2 fboPixel = (uRenderToFBO == 1)
+        ? screenPixel
+        : screenPixel * (uFBOSize / uWinResolution);
+    vec2 samplePixel = clamp(fboPixel + offsetPixels, vec2(0.0), uFBOSize - vec2(1.0));
     vec2 sampleUV = samplePixel / uFBOSize;
     vec3 bgColor = texture(uBackgroundTexture, sampleUV).rgb;
 

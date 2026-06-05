@@ -85,10 +85,22 @@ static Shader *g_BackgroundShader = nullptr;
 static Shader *g_SkyboxShader = nullptr;
 
 static Model *g_RefractModel = nullptr;
+static Model *g_DecorativeBubbleModel = nullptr;
 static Model *g_SkyboxModel = nullptr;
 
 static std::vector<Model *> g_BackgroundModels;
 static std::vector<glm::vec3> g_SpherePositions;
+
+struct DisplayBubble {
+    glm::vec3 basePosition;
+    float radius;
+    float phase;
+    float windAmplitude;
+    float floatAmplitude;
+    float speed;
+};
+
+static std::vector<DisplayBubble> g_DisplayBubbles;
 
 static GLuint g_BackgroundTexture = 0;
 static GLuint g_BackFaceTexture = 0;
@@ -111,6 +123,20 @@ static double g_Time = 0.0;           // 时间
 static float &CurrentThickness()
 {
     return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
+}
+
+static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
+{
+    glm::vec3 windDir = glm::normalize(glm::vec3(0.75f, 0.22f, 0.0f));
+    float wind = sinf(time * bubble.speed + bubble.phase) * bubble.windAmplitude;
+    float lift = sinf(time * (bubble.speed * 0.73f) + bubble.phase * 1.7f) * bubble.floatAmplitude;
+    float depth = cosf(time * (bubble.speed * 0.51f) + bubble.phase * 0.9f) * bubble.windAmplitude * 0.22f;
+    float wobble = 1.0f + sinf(time * (bubble.speed * 1.13f) + bubble.phase * 2.1f) * 0.035f;
+
+    glm::vec3 pos = bubble.basePosition + windDir * wind + glm::vec3(0.0f, lift, depth);
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
+    model = glm::scale(model, glm::vec3(bubble.radius * wobble));
+    return model;
 }
 
 // ============================================================
@@ -307,19 +333,22 @@ static void RenderFrame()
     }
 
     // Model matrix: identity — all deformation is in the simulated vertex positions
-    glm::mat4 model = glm::mat4(1.0f);
     glm::mat4 view = g_Camera.getViewMatrix();
     glm::mat4 proj = g_Camera.getProjectionMatrix();
 
-    auto SetRefractUniforms = [&](bool isBackFace)
+    auto SetRefractUniforms = [&](const glm::mat4 &model,
+                                  float localRadius,
+                                  bool isBackFace,
+                                  bool renderToFBO,
+                                  bool interactive)
     {
         // Compute sphere's screen-space pixel radius for refraction offset scaling.
         // Use the simulation's bounding radius (slightly larger than nominal due to deformation).
-        float dist = glm::length(g_Camera.getPosition());
+        glm::vec3 center = glm::vec3(model * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        float dist = glm::length(g_Camera.getPosition() - center);
         float fovVert = glm::radians(g_Camera.getFov());
         float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
-        float bubbleRadius = g_BubbleRadius * 1.15f;  // 15% margin for deformation
-        float angularRadius = atanf(bubbleRadius / dist);
+        float angularRadius = atanf((localRadius * 1.15f) / std::max(dist, 0.001f));
         float spherePixelRadius = angularRadius * pixelsPerRadian;
 
         g_RefractionShader->Use();
@@ -336,6 +365,7 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uEnvironmentReflectionStrength", g_EnvironmentReflectionStrength);
         g_RefractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
         g_RefractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
+        g_RefractionShader->SetInt("uRenderToFBO", renderToFBO ? 1 : 0);
         g_RefractionShader->SetInt("uIridescenceMode", g_IridescenceMode);
         g_RefractionShader->SetInt("uBackgroundTexture", 0);
         g_RefractionShader->SetInt("uEnvironmentMap", 1);
@@ -346,9 +376,30 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThickness", CurrentThickness());
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
-        g_RefractionShader->SetVec2("uTouchPoint", g_TouchPoint);
-        g_RefractionShader->SetFloat("uTouchStrength", g_TouchStrength);
-        g_RefractionShader->SetFloat("uTouchVelocity", g_TouchVelocity);
+        g_RefractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
+        g_RefractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
+        g_RefractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
+    };
+
+    auto DrawRefractiveBubbles = [&](bool isBackFace, GLuint backgroundTexture)
+    {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, backgroundTexture);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
+
+        for (const auto &bubble : g_DisplayBubbles)
+        {
+            glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
+            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, isBackFace, false);
+            g_DecorativeBubbleModel->Draw(*g_RefractionShader);
+        }
+
+        glm::mat4 mainModel = glm::mat4(1.0f);
+        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, isBackFace, true);
+        g_RefractModel->Draw(*g_RefractionShader);
     };
 
     auto SetBackgroundUniforms = [&]()
@@ -405,14 +456,7 @@ static void RenderFrame()
 
     glCullFace(GL_FRONT);
 
-    SetRefractUniforms(true);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_BackgroundTexture);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
-    g_RefractModel->Draw(*g_RefractionShader);
+    DrawRefractiveBubbles(true, g_BackgroundTexture);
 
     // ========== Pass 3: Render to screen ==========
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -430,14 +474,7 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
-    SetRefractUniforms(false);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, g_BackFaceTexture);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
-    g_RefractModel->Draw(*g_RefractionShader);
+    DrawRefractiveBubbles(false, g_BackFaceTexture);
 }
 
 // ============================================================
@@ -627,8 +664,9 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
 static void Cleanup()
 {
     delete g_RefractModel;
+    delete g_DecorativeBubbleModel;
     delete g_SkyboxModel;
-    g_RefractModel = g_SkyboxModel = nullptr;
+    g_RefractModel = g_DecorativeBubbleModel = g_SkyboxModel = nullptr;
 
     for (auto *sphere : g_BackgroundModels)
     {
@@ -773,6 +811,28 @@ int main()
         g_RefractModel = Model::CreateFromVertices(pos, nrm, idx);
     }
 
+    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 64, 32, true);
+    g_DisplayBubbles = {
+        {{-4.05f,  1.05f, -2.10f}, 0.42f, 0.2f, 0.20f, 0.11f, 0.55f},
+        {{-3.50f, -0.95f, -2.60f}, 0.24f, 1.1f, 0.13f, 0.07f, 0.82f},
+        {{-3.10f,  2.55f, -3.15f}, 0.20f, 2.0f, 0.10f, 0.06f, 0.94f},
+        {{-2.55f,  0.10f, -1.35f}, 0.34f, 2.8f, 0.16f, 0.09f, 0.72f},
+        {{-2.10f, -2.10f, -2.30f}, 0.30f, 3.7f, 0.15f, 0.08f, 0.68f},
+        {{-1.45f,  3.05f, -2.90f}, 0.18f, 4.5f, 0.09f, 0.06f, 1.02f},
+        {{-1.25f, -1.85f,  0.95f}, 0.24f, 5.4f, 0.11f, 0.07f, 0.78f},
+        {{-0.65f,  1.90f, -3.55f}, 0.22f, 6.2f, 0.11f, 0.07f, 0.90f},
+        {{-0.55f, -2.75f,  1.20f}, 0.20f, 7.1f, 0.10f, 0.06f, 0.86f},
+        {{ 0.45f,  2.85f, -2.55f}, 0.24f, 8.0f, 0.12f, 0.07f, 0.86f},
+        {{ 0.85f, -2.05f, -3.15f}, 0.20f, 8.9f, 0.10f, 0.06f, 0.98f},
+        {{ 1.25f, -1.45f,  0.85f}, 0.22f, 9.7f, 0.11f, 0.07f, 0.80f},
+        {{ 1.35f,  1.55f, -1.75f}, 0.38f, 10.6f, 0.18f, 0.11f, 0.62f},
+        {{ 1.85f,  2.95f, -3.45f}, 0.18f, 11.4f, 0.09f, 0.06f, 1.00f},
+        {{ 2.25f, -1.95f, -2.05f}, 0.32f, 12.2f, 0.16f, 0.08f, 0.80f},
+        {{ 2.75f,  0.35f, -1.55f}, 0.46f, 13.1f, 0.22f, 0.12f, 0.58f},
+        {{ 3.35f, -0.85f, -2.85f}, 0.24f, 13.9f, 0.12f, 0.07f, 0.92f},
+        {{ 3.95f,  1.15f, -2.35f}, 0.34f, 14.8f, 0.17f, 0.09f, 0.70f}
+    };
+
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
     float sphere_radius = 0.15f;
@@ -836,6 +896,8 @@ int main()
               << ", edge=" << g_EdgeDistortionBoost
               << ", reflection=" << g_EnvironmentReflectionStrength
               << std::endl;
+    std::cout << "Scene: 1 interactive bubble + " << g_DisplayBubbles.size()
+              << " drifting display bubbles" << std::endl;
     std::cout << "==================================================" << std::endl;
 
     while (!glfwWindowShouldClose(window))

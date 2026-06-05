@@ -6,7 +6,7 @@
 Soap Bubble Rendering - Thin Film + DBSTT
 ```
 
-该版本用于展示肥皂泡的实时折射、薄膜虹彩、环境反射、右键触摸波纹以及 DBSTT 泡泡表面形变模拟。
+该版本用于展示肥皂泡的实时折射、薄膜虹彩、环境反射、右键触摸波纹、DBSTT 泡泡表面形变模拟，以及多泡泡风吹漂移展示效果。
 
 ## 1. 项目结构
 
@@ -195,7 +195,8 @@ Simulation
 5. Kim2012 / LUT / Belcour Airy 三种薄膜虹彩模式
 6. Fresnel 边缘光与环境反射
 7. 右键拖动触发局部膜厚和折射波纹
-8. DBSTT / vortex sheet 单泡泡表面形变模拟
+8. DBSTT / vortex sheet 主泡泡表面形变模拟
+9. 多个展示泡泡随风轻微漂移，用于增强演示效果
 ```
 
 ## 10. 常见问题
