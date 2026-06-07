@@ -3,7 +3,7 @@
 #  BubbleRender — 透明物体实时折射与色散渲染系统
 
 </div>
-PB23010350杨弘宇 PB23010362常毅寒 PB23000052杨硕
+<div align="center">PB23010350 杨弘宇 &emsp; PB23010362 常毅寒 &emsp; PB23000052 杨硕</div>
 
 
 ##  效果展示
