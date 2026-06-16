@@ -1,100 +1,91 @@
-# Windows 版编译与项目结构说明
+# Soap Bubble Rendering Windows
 
-本目录是项目的 Windows OpenGL 版本，程序名称为：
+本文档说明 Windows 版本的源码结构、环境配置、编译运行方式，以及哪些文件需要提交到仓库。
+
+## 1. 提交结构
+
+仓库根目录建议保留：
 
 ```text
-Soap Bubble Rendering - Thin Film + DBSTT
+BubbleRender/
+  windows/                 # Windows OpenGL 源代码与运行资源
+  docs/                    # 开发日志、论文方法说明
+  papers/                  # 参考论文 PDF
+  tools/                   # 辅助脚本，例如 LUT 生成
+  homepage/                # GitHub 首页展示材料
+  demo.mp4                 # 最终演示视频
+  readme.md                # 项目总说明
 ```
 
-该版本用于展示肥皂泡的实时折射、薄膜虹彩、环境反射、右键触摸波纹、DBSTT 泡泡表面形变模拟，以及多泡泡风吹漂移展示效果。
+不需要提交的本地内容：
 
-## 1. 项目结构
+```text
+vcpkg/                     # 本地依赖环境
+build/                     # 根目录构建产物
+windows/build/             # Windows 版本构建产物
+out/
+report/
+report.zip
+demo/                      # 本地字幕、剪辑中间文件
+demo.raw/
+.asr_cache/
+.asr_pkgs/
+.venv-asr/
+.venv-asr312/
+.tmp/
+.vscode/
+```
+
+## 2. Windows 目录
 
 ```text
 windows/
-  CMakeLists.txt          # CMake 构建脚本
-  CMakePresets.json       # 可选的 CMake preset，默认使用项目根目录下的 vcpkg
-  main.cpp                # 程序入口、OpenGL 初始化、渲染循环、交互控制
-  read.md                 # 本说明文件
-
-  render/
-    camera.h/.cpp         # 相机控制
-    model.h/.cpp          # 球体、天空盒、动态网格模型创建
-    mesh.h                # OpenGL VAO/VBO/EBO 网格封装
-    shader.h/.cpp         # Shader 编译与 uniform 设置
-    stb_image.h           # 图片加载库
-
-  shader/
-    shader_refraction.h   # 主泡泡 shader：折射、薄膜干涉、环境反射、触摸波纹
-    shader_background.h   # 背景小球 shader
-    shader_skybox.h       # 天空盒 shader
-    shader_quad.h         # 保留的屏幕 quad shader
-
-  simulation/
-    vortex_sheet.h/.cpp   # DBSTT / vortex sheet 泡泡表面形变模拟
+  CMakeLists.txt           # CMake 构建脚本
+  CMakePresets.json        # CMake Tools / 命令行 preset
+  vcpkg.json               # vcpkg manifest，声明 glfw3 / glad / glm
+  main.cpp                 # 程序入口、渲染循环、交互、FBO 管线
+  read.md                  # 本文档
 
   assets/
-    skybox/               # 天空盒 6 面贴图，运行必需
-    lut/
-      thinfilm_belcour_bubble.png   # 薄膜虹彩 LUT，运行必需
+    skybox/                # 天空盒贴图，运行必须
+    lut/                   # 薄膜干涉 LUT，运行必须
+
+  render/
+    camera.*               # 相机控制
+    model.*                # 球体、天空盒、动态网格模型创建
+    shader.*               # shader 编译与 uniform 设置
+    mesh.h                 # OpenGL 网格封装
+    stb_image.h            # 图片加载库
+
+  shader/
+    shader_refraction.h    # 折射、Fresnel、环境反射、薄膜干涉
+    shader_background.h    # 背景参照物 shader
+    shader_skybox.h        # 天空盒 shader
+    shader_quad.h          # 备用屏幕 quad shader
+
+  simulation/
+    vortex_sheet.*         # DBSTT / vortex sheet 主泡泡表面形变仿真
 ```
 
-## 2. 必须保留的文件
-
-源码交付时，至少需要保留：
-
-```text
-windows/CMakeLists.txt
-windows/CMakePresets.json
-windows/main.cpp
-windows/render/
-windows/shader/
-windows/simulation/
-windows/assets/
-windows/read.md
-```
-
-其中 `windows/assets/` 必须保留。程序运行时会读取：
-
-```text
-assets/skybox/right.jpg
-assets/skybox/left.jpg
-assets/skybox/top.jpg
-assets/skybox/bottom.jpg
-assets/skybox/front.jpg
-assets/skybox/back.jpg
-assets/lut/thinfilm_belcour_bubble.png
-```
-
-## 3. 不需要随源码提交的内容
-
-以下目录或文件不是编译源码所必需，通常不建议提交：
-
-```text
-windows/build/       # CMake / Visual Studio 构建产物
-windows/out/         # 临时输出目录，如存在可忽略
-```
-
-如果只交付 Windows 版本，项目根目录下的 HarmonyOS 工程 `refraction/` 也不是 Windows 版运行必需。
-
-项目根目录下的 `tools/` 不是 Windows demo 编译和运行必需。它主要用于重新生成 LUT 等辅助资源；当前程序直接使用已经生成好的：
-
-```text
-windows/assets/lut/thinfilm_belcour_bubble.png
-```
-
-因此助教只编译和运行 Windows demo 时，不需要执行 `tools/` 中的脚本。
-
-## 4. 编译环境
+## 3. 环境要求
 
 推荐环境：
 
 ```text
-Windows 10/11
-Visual Studio 2022，需安装 Desktop development with C++
-CMake 3.16 或更高版本
+Windows 10 / Windows 11
+Visual Studio 2022
+CMake 3.21 或更高版本
 vcpkg
-支持 OpenGL 3.3 的显卡驱动
+支持 OpenGL 3.3 Core Profile 的显卡驱动
+```
+
+Visual Studio 2022 安装时建议勾选：
+
+```text
+Desktop development with C++
+MSVC v143 C++ build tools
+Windows 10/11 SDK
+CMake tools for Windows
 ```
 
 项目使用 C++17，依赖如下：
@@ -107,56 +98,57 @@ glm
 
 `stb_image.h` 已包含在 `windows/render/` 中，不需要额外安装。
 
-## 5. 依赖安装
+## 4. 配置 vcpkg
 
-如果项目根目录下没有 `vcpkg/`，可以自行安装 vcpkg。示例：
+推荐把 vcpkg 安装在项目目录外，例如：
 
 ```powershell
+cd D:\dev
 git clone https://github.com/microsoft/vcpkg.git
-.\vcpkg\bootstrap-vcpkg.bat
-.\vcpkg\vcpkg install glfw3 glad glm --triplet x64-windows
+cd vcpkg
+.\bootstrap-vcpkg.bat
 ```
 
-如果使用自己的 vcpkg 路径，后续 CMake 命令中的 `CMAKE_TOOLCHAIN_FILE` 需要改成对应路径。
-
-## 6. CMake 配置与编译
-
-在项目根目录执行：
+设置当前终端环境变量：
 
 ```powershell
-cmake -S windows -B windows/build -G "Visual Studio 17 2022" -A x64 -DCMAKE_TOOLCHAIN_FILE=.\vcpkg\scripts\buildsystems\vcpkg.cmake
+$env:VCPKG_ROOT = "D:\dev\vcpkg"
+```
+
+也可以在系统环境变量中永久新增：
+
+```text
+VCPKG_ROOT = D:\dev\vcpkg
+```
+
+依赖由 `windows/vcpkg.json` 声明。执行 CMake configure 时，vcpkg 会根据 manifest 自动安装所需依赖。
+
+## 5. 编译运行
+
+在仓库根目录执行：
+
+```powershell
+$env:VCPKG_ROOT = "D:\dev\vcpkg"
+cmake --preset default -S windows
 cmake --build windows/build --config Release
 ```
 
-编译成功后，可执行文件位于：
-
-```text
-windows/build/Release/BubbleRender.exe
-```
-
-CMake 会在构建后自动把 `windows/assets/` 复制到可执行文件所在目录：
-
-```text
-windows/build/Release/assets/
-```
-
-## 7. 运行方式
-
-进入 Release 目录运行：
+运行：
 
 ```powershell
 cd windows/build/Release
 .\BubbleRender.exe
 ```
 
-如果提示找不到 skybox 或 LUT，请检查 `BubbleRender.exe` 同级目录下是否存在：
+CMake 会在构建后把 `windows/assets/` 复制到可执行文件目录：
 
 ```text
-assets/skybox/
-assets/lut/thinfilm_belcour_bubble.png
+windows/build/Release/assets/
 ```
 
-## 8. 运行时按键
+如果程序提示找不到 skybox 或 LUT，请检查该目录是否存在。
+
+## 6. 操作方式
 
 ```text
 View
@@ -183,48 +175,21 @@ Simulation
   ESC            Quit
 ```
 
-## 9. 当前实现内容
+窗口标题会实时显示 FPS。
 
-当前 Windows 版本实现了：
+## 7. 当前功能
 
-```text
-1. OpenGL 3.3 桌面窗口与渲染循环
-2. 三 pass 屏幕空间折射管线
-3. 天空盒环境贴图
-4. 背景小球阵列，用于观察折射扭曲
-5. Kim2012 / LUT / Belcour Airy 三种薄膜虹彩模式
-6. Fresnel 边缘光与环境反射
-7. 右键拖动触发局部膜厚和折射波纹
-8. DBSTT / vortex sheet 主泡泡表面形变模拟
-9. 多个展示泡泡随风轻微漂移，用于增强演示效果
-```
-
-## 10. 常见问题
-
-### 编译时出现 C4819 编码警告
-
-Visual Studio 可能会提示：
+当前 Windows 版本实现：
 
 ```text
-warning C4819: 该文件包含不能在当前代码页中表示的字符
+1. OpenGL 3.3 实时渲染窗口
+2. 天空盒环境贴图
+3. 屏幕空间折射 FBO 管线
+4. 主泡泡与副泡泡之间的一层双向折射近似
+5. Fresnel 边缘高光与环境反射
+6. Kim2012 / Spectral LUT / Belcour Airy 三种薄膜干涉模式
+7. 动态膜厚、虹彩条纹与右键触摸扰动
+8. DBSTT / vortex sheet 主泡泡表面形变仿真
+9. 18 个 Belcour Airy 副泡泡随风轻微漂移
+10. 键盘参数调节、鼠标交互与标题栏 FPS 显示
 ```
-
-这是部分注释中存在非当前代码页字符导致的警告，不影响程序编译和运行。
-
-### CMake 找不到 glfw3 / glad / glm
-
-通常是 vcpkg toolchain 路径没有传对。请确认 CMake 命令中：
-
-```text
--DCMAKE_TOOLCHAIN_FILE=...\vcpkg\scripts\buildsystems\vcpkg.cmake
-```
-
-指向真实存在的 vcpkg 路径，并且已经安装：
-
-```powershell
-vcpkg install glfw3 glad glm --triplet x64-windows
-```
-
-### 程序启动后资源加载失败
-
-请从 `windows/build/Release/` 目录运行程序，或确保 `BubbleRender.exe` 同级目录下存在 `assets/` 文件夹。
