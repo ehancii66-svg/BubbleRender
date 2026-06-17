@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cmath>
 #include <iostream>
+#include <utility>
 #include <vector>
 #include <string>
 
@@ -411,7 +412,8 @@ static void RenderFrame()
                                   bool isBackFace,
                                   bool renderToFBO,
                                   bool interactive,
-                                  int iridescenceMode)
+                                  int iridescenceMode,
+                                  float outputAlpha)
     {
         // Compute sphere's screen-space pixel radius for refraction offset scaling.
         // Use the simulation's bounding radius (slightly larger than nominal due to deformation).
@@ -447,6 +449,7 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThickness", CurrentThickness());
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
+        g_RefractionShader->SetFloat("uOutputAlpha", outputAlpha);
         g_RefractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
         g_RefractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
         g_RefractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
@@ -462,14 +465,43 @@ static void RenderFrame()
         glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
     };
 
-    auto DrawDisplayBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture)
+    auto DrawDisplayBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture, bool straightComposite)
     {
         BindRefractionInputs(backgroundTexture);
+
+        std::vector<std::pair<float, const DisplayBubble *>> sortedBubbles;
+        sortedBubbles.reserve(g_DisplayBubbles.size());
         for (const auto &bubble : g_DisplayBubbles)
         {
+            glm::vec3 center = glm::vec3(BubbleModelMatrix(bubble, (float)g_Time) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+            glm::vec3 toCamera = center - g_Camera.getPosition();
+            sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), &bubble);
+        }
+        std::sort(sortedBubbles.begin(), sortedBubbles.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        if (straightComposite)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        for (const auto &item : sortedBubbles)
+        {
+            const auto &bubble = *item.second;
             glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
-            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO, false, 2);
+            float alpha = straightComposite ? 0.72f : 1.0f;
+            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO, false, 2, alpha);
             g_DecorativeBubbleModel->Draw(*g_RefractionShader);
+        }
+
+        if (straightComposite)
+        {
+            glDepthMask(GL_TRUE);
+            if (!blendWasEnabled)
+                glDisable(GL_BLEND);
         }
     };
 
@@ -477,7 +509,7 @@ static void RenderFrame()
     {
         BindRefractionInputs(backgroundTexture);
         glm::mat4 mainModel = glm::mat4(1.0f);
-        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO, true, g_IridescenceMode);
+        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO, true, g_IridescenceMode, 1.0f);
         g_RefractModel->Draw(*g_RefractionShader);
     };
 
@@ -545,7 +577,7 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
-    DrawDisplayBubbles(false, true, g_BackgroundTexture);
+    DrawDisplayBubbles(false, true, g_BackgroundTexture, true);
 
     // ========== Pass 3: Render main bubble back faces to backFaceFBO ==========
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackFaceFBO);
@@ -591,7 +623,7 @@ static void RenderFrame()
 
     DrawMainBubble(false, false, g_BackFaceTexture);
 
-    DrawDisplayBubbles(false, false, g_MainSceneTexture);
+    DrawDisplayBubbles(false, false, g_MainSceneTexture, true);
 }
 
 // ============================================================
