@@ -28,8 +28,10 @@
 #include "shader/shader_skybox.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <iostream>
+#include <utility>
 #include <vector>
 #include <string>
 
@@ -60,7 +62,7 @@ static float g_BubbleRadius = 1.5f;
 static int   g_SimSubdivs  = 3;       // icosphere subdivision level
 static float g_SimPerturb  = 0.10f;   // initial stretch 10%
 static float g_SimTimeStep = 0.001f;  // Δt per substep
-static int   g_SimSubsteps = 5;       // substeps per frame
+static int   g_SimSubsteps = 3;       // substeps per frame
 static bool  g_SimPaused   = false;
 
 // Helper: convert sim mesh data to Vertex vector for GPU upload
@@ -103,16 +105,24 @@ struct DisplayBubble {
 static std::vector<DisplayBubble> g_DisplayBubbles;
 
 static GLuint g_BackgroundTexture = 0;
+static GLuint g_SceneBehindTexture = 0;
+static GLuint g_MainSceneTexture = 0;
 static GLuint g_BackFaceTexture = 0;
 static GLuint g_BackgroundFBO = 0;
+static GLuint g_SceneBehindFBO = 0;
+static GLuint g_MainSceneFBO = 0;
 static GLuint g_BackFaceFBO = 0;
 static GLuint g_DepthRB = 0;
 static GLuint g_CubemapTexture = 0;
 static GLuint g_ThinFilmLUTTexture = 0;
 
-static constexpr float kFBOOverscan = 1.3f;
+static constexpr float kFBOOverscan = 1.0f;
 static int g_FBOWidth = 0;
 static int g_FBOHeight = 0;
+
+static float g_CurrentFPS = 0.0f;
+static int g_FPSFrameCount = 0;
+static double g_FPSLastUpdate = 0.0;
 
 // Thin-film thickness parameters
 static float g_KimLutThickness = 350.0f; // Kim2012 / LUT thickness (nm)
@@ -137,6 +147,25 @@ static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     model = glm::scale(model, glm::vec3(bubble.radius * wobble));
     return model;
+}
+
+static void UpdateFPS(GLFWwindow *window, double currentTime)
+{
+    ++g_FPSFrameCount;
+    if (g_FPSLastUpdate == 0.0)
+        g_FPSLastUpdate = currentTime;
+
+    double elapsed = currentTime - g_FPSLastUpdate;
+    if (elapsed >= 0.25)
+    {
+        g_CurrentFPS = (float)((double)g_FPSFrameCount / elapsed);
+        g_FPSFrameCount = 0;
+        g_FPSLastUpdate = currentTime;
+
+        char title[160];
+        std::snprintf(title, sizeof(title), "%s | FPS %.1f", g_AppTitle, g_CurrentFPS);
+        glfwSetWindowTitle(window, title);
+    }
 }
 
 // ============================================================
@@ -255,6 +284,48 @@ static void InitFBO(int w, int h)
         std::cerr << "Background FBO incomplete!" << std::endl;
     }
 
+    // -------- sceneBehindFBO --------
+    // Contains the visible scene behind the main bubble, including display bubbles.
+    // The main bubble samples this texture through its two-pass screen-space refraction.
+    glGenTextures(1, &g_SceneBehindTexture);
+    glBindTexture(GL_TEXTURE_2D, g_SceneBehindTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glGenFramebuffers(1, &g_SceneBehindFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_SceneBehindFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_SceneBehindTexture, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_DepthRB);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        std::cerr << "Scene-behind FBO incomplete!" << std::endl;
+    }
+
+    // -------- mainSceneFBO --------
+    // Contains background + main bubble only. Display bubbles sample it in the
+    // final screen pass so a foreground small bubble can reveal the large one.
+    glGenTextures(1, &g_MainSceneTexture);
+    glBindTexture(GL_TEXTURE_2D, g_MainSceneTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+
+    glGenFramebuffers(1, &g_MainSceneFBO);
+    glBindFramebuffer(GL_FRAMEBUFFER, g_MainSceneFBO);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_MainSceneTexture, 0);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_DepthRB);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+    {
+        std::cerr << "Main-scene FBO incomplete!" << std::endl;
+    }
+
     // -------- backFaceFBO --------
     glGenTextures(1, &g_BackFaceTexture);
     glBindTexture(GL_TEXTURE_2D, g_BackFaceTexture);
@@ -340,7 +411,9 @@ static void RenderFrame()
                                   float localRadius,
                                   bool isBackFace,
                                   bool renderToFBO,
-                                  bool interactive)
+                                  bool interactive,
+                                  int iridescenceMode,
+                                  float outputAlpha)
     {
         // Compute sphere's screen-space pixel radius for refraction offset scaling.
         // Use the simulation's bounding radius (slightly larger than nominal due to deformation).
@@ -366,7 +439,7 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
         g_RefractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
         g_RefractionShader->SetInt("uRenderToFBO", renderToFBO ? 1 : 0);
-        g_RefractionShader->SetInt("uIridescenceMode", g_IridescenceMode);
+        g_RefractionShader->SetInt("uIridescenceMode", iridescenceMode);
         g_RefractionShader->SetInt("uBackgroundTexture", 0);
         g_RefractionShader->SetInt("uEnvironmentMap", 1);
         g_RefractionShader->SetInt("uThinFilmLUT", 2);
@@ -376,12 +449,13 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThickness", CurrentThickness());
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
+        g_RefractionShader->SetFloat("uOutputAlpha", outputAlpha);
         g_RefractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
         g_RefractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
         g_RefractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
     };
 
-    auto DrawRefractiveBubbles = [&](bool isBackFace, GLuint backgroundTexture)
+    auto BindRefractionInputs = [&](GLuint backgroundTexture)
     {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, backgroundTexture);
@@ -389,16 +463,53 @@ static void RenderFrame()
         glBindTexture(GL_TEXTURE_CUBE_MAP, g_CubemapTexture);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
+    };
 
+    auto DrawDisplayBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture, bool straightComposite)
+    {
+        BindRefractionInputs(backgroundTexture);
+
+        std::vector<std::pair<float, const DisplayBubble *>> sortedBubbles;
+        sortedBubbles.reserve(g_DisplayBubbles.size());
         for (const auto &bubble : g_DisplayBubbles)
         {
+            glm::vec3 center = glm::vec3(BubbleModelMatrix(bubble, (float)g_Time) * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+            glm::vec3 toCamera = center - g_Camera.getPosition();
+            sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), &bubble);
+        }
+        std::sort(sortedBubbles.begin(), sortedBubbles.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        if (straightComposite)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        for (const auto &item : sortedBubbles)
+        {
+            const auto &bubble = *item.second;
             glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
-            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, isBackFace, false);
+            float alpha = straightComposite ? 0.72f : 1.0f;
+            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO, false, 2, alpha);
             g_DecorativeBubbleModel->Draw(*g_RefractionShader);
         }
 
+        if (straightComposite)
+        {
+            glDepthMask(GL_TRUE);
+            if (!blendWasEnabled)
+                glDisable(GL_BLEND);
+        }
+    };
+
+    auto DrawMainBubble = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture)
+    {
+        BindRefractionInputs(backgroundTexture);
         glm::mat4 mainModel = glm::mat4(1.0f);
-        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, isBackFace, true);
+        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO, true, g_IridescenceMode, 1.0f);
         g_RefractModel->Draw(*g_RefractionShader);
     };
 
@@ -449,16 +560,52 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
-    // ========== Pass 2: Render refraction sphere back faces to backFaceFBO ==========
+    // ========== Pass 2: Render scene behind the main bubble ==========
+    // This texture includes display bubbles. The main bubble will refract it,
+    // so small bubbles remain visible when covered by the large transparent bubble.
+    glBindFramebuffer(GL_FRAMEBUFFER, g_SceneBehindFBO);
+    glViewport(0, 0, fboW, fboH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glCullFace(GL_BACK);
+
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    DrawSkybox();
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+
+    SetBackgroundUniforms();
+
+    DrawDisplayBubbles(false, true, g_BackgroundTexture, true);
+
+    // ========== Pass 3: Render main bubble back faces to backFaceFBO ==========
     glBindFramebuffer(GL_FRAMEBUFFER, g_BackFaceFBO);
     glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glCullFace(GL_FRONT);
 
-    DrawRefractiveBubbles(true, g_BackgroundTexture);
+    DrawMainBubble(true, true, g_SceneBehindTexture);
 
-    // ========== Pass 3: Render to screen ==========
+    // ========== Pass 4: Render main-only scene for display-bubble refraction ==========
+    glBindFramebuffer(GL_FRAMEBUFFER, g_MainSceneFBO);
+    glViewport(0, 0, fboW, fboH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    glCullFace(GL_BACK);
+
+    glDepthFunc(GL_LEQUAL);
+    glDepthMask(GL_FALSE);
+    DrawSkybox();
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+
+    SetBackgroundUniforms();
+
+    DrawMainBubble(false, true, g_BackFaceTexture);
+
+    // ========== Pass 5: Render to screen ==========
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, w, h);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -474,7 +621,9 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
-    DrawRefractiveBubbles(false, g_BackFaceTexture);
+    DrawMainBubble(false, false, g_BackFaceTexture);
+
+    DrawDisplayBubbles(false, false, g_MainSceneTexture, true);
 }
 
 // ============================================================
@@ -491,6 +640,14 @@ static void FramebufferSizeCallback(GLFWwindow *window, int width, int height)
         glDeleteFramebuffers(1, &g_BackgroundFBO);
     if (g_BackgroundTexture)
         glDeleteTextures(1, &g_BackgroundTexture);
+    if (g_SceneBehindFBO)
+        glDeleteFramebuffers(1, &g_SceneBehindFBO);
+    if (g_SceneBehindTexture)
+        glDeleteTextures(1, &g_SceneBehindTexture);
+    if (g_MainSceneFBO)
+        glDeleteFramebuffers(1, &g_MainSceneFBO);
+    if (g_MainSceneTexture)
+        glDeleteTextures(1, &g_MainSceneTexture);
     if (g_BackFaceFBO)
         glDeleteFramebuffers(1, &g_BackFaceFBO);
     if (g_BackFaceTexture)
@@ -682,13 +839,20 @@ static void Cleanup()
         glDeleteFramebuffers(1, &g_BackgroundFBO);
     if (g_BackgroundTexture)
         glDeleteTextures(1, &g_BackgroundTexture);
+    if (g_SceneBehindFBO)
+        glDeleteFramebuffers(1, &g_SceneBehindFBO);
+    if (g_SceneBehindTexture)
+        glDeleteTextures(1, &g_SceneBehindTexture);
+    if (g_MainSceneFBO)
+        glDeleteFramebuffers(1, &g_MainSceneFBO);
+    if (g_MainSceneTexture)
+        glDeleteTextures(1, &g_MainSceneTexture);
     if (g_BackFaceFBO)
         glDeleteFramebuffers(1, &g_BackFaceFBO);
     if (g_BackFaceTexture)
         glDeleteTextures(1, &g_BackFaceTexture);
     if (g_DepthRB)
         glDeleteRenderbuffers(1, &g_DepthRB);
-
     delete g_RefractionShader;
     delete g_BackgroundShader;
     delete g_SkyboxShader;
@@ -725,7 +889,7 @@ int main()
     }
 
     glfwMakeContextCurrent(window);
-    glfwSwapInterval(1); // VSync
+    glfwSwapInterval(0); // Show uncapped FPS for performance testing/demo tuning.
 
     // -------- GLAD init --------
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
@@ -811,7 +975,7 @@ int main()
         g_RefractModel = Model::CreateFromVertices(pos, nrm, idx);
     }
 
-    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 64, 32, true);
+    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
     g_DisplayBubbles = {
         {{-4.05f,  1.05f, -2.10f}, 0.42f, 0.2f, 0.20f, 0.11f, 0.55f},
         {{-3.50f, -0.95f, -2.60f}, 0.24f, 1.1f, 0.13f, 0.07f, 0.82f},
@@ -846,7 +1010,7 @@ int main()
     }
     for (auto &pos : g_SpherePositions)
     {
-        Model *sphere = Model::CreateSphere(sphere_radius, 32, 16, false);
+        Model *sphere = Model::CreateSphere(sphere_radius, 16, 8, false);
         if (sphere)
         {
             g_BackgroundModels.push_back(sphere);
@@ -908,6 +1072,7 @@ int main()
         g_DeltaTime = currentTime - g_LastFrameTime;
         g_Time += g_DeltaTime;
         g_LastFrameTime = currentTime;
+        UpdateFPS(window, currentTime);
 
         RenderFrame();
         glfwSwapBuffers(window);

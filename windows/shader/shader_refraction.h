@@ -55,6 +55,7 @@ uniform sampler2D uBackgroundTexture;
 uniform samplerCube uEnvironmentMap;
 uniform sampler2D uThinFilmLUT;
 uniform float uEnvironmentReflectionStrength;
+uniform float uOutputAlpha;
 
 uniform float uThickness;       // film thickness d (nm)
 uniform float uThicknessVar;    // thickness variation amplitude (nm)
@@ -462,7 +463,7 @@ void main() {
         airyColor += specularLight * 0.08 * surfaceColorScale;
         airyColor = mix(airyColor, vec3(1.0), fresnelTerm * 0.035 * surfaceColorScale);
 
-        FragColor = vec4(airyColor, 1.0);
+        FragColor = vec4(airyColor, uOutputAlpha);
         return;
     }
 
@@ -483,7 +484,7 @@ void main() {
     // Fresnel white edge glow (environment reflection at grazing angles)
     color = mix(color, vec3(1.0), fresnelTerm * 0.06 * surfaceColorScale);
 
-    FragColor = vec4(color, 1.0);
+    FragColor = vec4(color, uOutputAlpha);
 }
 )";
 

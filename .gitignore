@@ -1,3 +1,13 @@
 build/
+out/
 vcpkg/
 .vscode
+report/
+report.zip
+.asr_cache/
+.asr_pkgs/
+.venv-asr/
+.venv-asr312/
+.tmp/
+demo/
+demo.raw/
