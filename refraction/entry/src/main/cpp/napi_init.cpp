@@ -18,6 +18,7 @@
 #include "shader/shader_refraction.h"
 #include "shader/shader_background.h"
 #include "shader/shader_skybox.h"
+#include "simulation/vortex_sheet.h"
 
 #include <cmath>
 #include <cstdint>
@@ -28,6 +29,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <time.h>
 
 #undef LOG_DOMAIN
 #undef LOG_TAG
@@ -61,21 +63,89 @@ GLuint cubemapTexture = 0;
 Camera g_camera;
 
 Model* g_RefractModel;
+Model* g_DecorativeBubbleModel;
 Model* g_SkyboxModel;
 std::vector<Model*> g_BackgroundModels;
 std::vector<glm::vec3> g_SpherePositions;
 
+struct DisplayBubble {
+    glm::vec3 basePosition;
+    float radius;
+    float phase;
+    float windAmplitude;
+    float floatAmplitude;
+    float speed;
+};
+
+static std::vector<DisplayBubble> g_DisplayBubbles;
+
+// ---- Rendering parameters ----
 float g_FresnelPower = 8.0f;
 float g_Shininess = 15.0f;
 float g_Diffuseness = 0.2f;
-float g_RefractionStrength = 0.08f;
-float g_DispersionStrength = 0.35f;
+float g_RefractionStrength = 0.35f;
+float g_EdgeDistortionBoost = 2.2f;
+float g_MaxOffsetRatio = 0.52f;
+float g_EnvironmentReflectionStrength = 0.65f;
 glm::vec3 light{-1.0f, 1.0f, 1.0f};
+int   g_IridescenceMode = 2;         // 0=Kim2012, 1=SpectralLUT, 2=BelcourAiry
+float g_KimLutThickness = 350.0f;
+float g_AiryThickness = 740.0f;
+float g_ThicknessVar = 160.0f;
+double g_Time = 0.0;
+double g_LastFrameTime = 0.0;
 
+// ---- FBO overscan ----
+static constexpr float kFBOOverscan = 1.3f;
+int g_FBOWidth = 0, g_FBOHeight = 0;
+
+// ---- Thin-film LUT texture ----
+GLuint g_ThinFilmLUTTexture = 0;
+
+// ---- DBSTT simulation ----
+static VortexSheetSimulation g_Sim;
+static float g_BubbleRadius = 1.5f;
+static int   g_SimSubdivs  = 3;
+static float g_SimPerturb  = 0.10f;
+static bool  g_SimPaused   = false;
+
+static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation& sim) {
+    const auto& pos = sim.getPositions();
+    const auto& nrm = sim.getNormals();
+    std::vector<Vertex> verts(pos.size());
+    for (size_t i = 0; i < pos.size(); ++i) {
+        verts[i].Position  = pos[i];
+        verts[i].Normal    = nrm[i];
+        verts[i].TexCoords = glm::vec2(0.0f);
+        verts[i].Tangent   = glm::vec3(0.0f);
+        verts[i].Bitangent = glm::vec3(0.0f);
+    }
+    return verts;
+}
+
+static float& CurrentThickness() {
+    return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
+}
+
+static glm::mat4 BubbleModelMatrix(const DisplayBubble& bubble, float time) {
+    glm::vec3 windDir = glm::normalize(glm::vec3(0.75f, 0.22f, 0.0f));
+    float wind = sinf(time * bubble.speed + bubble.phase) * bubble.windAmplitude;
+    float lift = sinf(time * (bubble.speed * 0.73f) + bubble.phase * 1.7f) * bubble.floatAmplitude;
+    float depth = cosf(time * (bubble.speed * 0.51f) + bubble.phase * 0.9f) * bubble.windAmplitude * 0.22f;
+    float wobble = 1.0f + sinf(time * (bubble.speed * 1.13f) + bubble.phase * 2.1f) * 0.035f;
+
+    glm::vec3 pos = bubble.basePosition + windDir * wind + glm::vec3(0.0f, lift, depth);
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
+    model = glm::scale(model, glm::vec3(bubble.radius * wobble));
+    return model;
+}
+
+// ---- Touch state ----
 float g_LastTouchX = 0.0f, g_LastTouchY = 0.0f;
 glm::vec2 g_TouchPoint{-10.0f, -10.0f};
 float g_TouchStrength = 0.0f;
 float g_TouchVelocity = 0.0f;
+bool  g_TouchPressed = false;
 
 
 GLuint LoadCubemapTexture(NativeResourceManager* resMgr, const std::vector<std::string>& faceFiles){
@@ -145,14 +215,18 @@ GLuint CreateProgram(const char* vsSource, const char* fsSource) {
 }
 
 void InitFBO(int w, int h) {
+    g_FBOWidth  = static_cast<int>(w * kFBOOverscan);
+    g_FBOHeight = static_cast<int>(h * kFBOOverscan);
+    int fboW = g_FBOWidth, fboH = g_FBOHeight;
+
     glGenRenderbuffers(1, &depthRB);
     glBindRenderbuffer(GL_RENDERBUFFER, depthRB);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fboW, fboH);
 
     // ---------- backgroundFBO ----------
     glGenTextures(1, &backgroundTexture);
     glBindTexture(GL_TEXTURE_2D, backgroundTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -161,14 +235,13 @@ void InitFBO(int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, backgroundFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, backgroundTexture, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        OH_LOG_ERROR(LOG_APP, "Back FBO incomplete!");
-    }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        OH_LOG_ERROR(LOG_APP, "Background FBO incomplete!");
 
     // ---------- backFaceFBO ----------
     glGenTextures(1, &backFaceTexture);
     glBindTexture(GL_TEXTURE_2D, backFaceTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -177,9 +250,8 @@ void InitFBO(int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, backFaceFBO);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, backFaceTexture, 0);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        OH_LOG_ERROR(LOG_APP, "Main FBO incomplete!");
-    }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        OH_LOG_ERROR(LOG_APP, "BackFace FBO incomplete!");
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -240,14 +312,17 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     g_camera.setViewportSize(width, height);
     g_camera.setPosition({0.0f, 0.0f, g_CameraDistance});
 
-    refractionShader = new Shader(refractionVertexShader, refractionFragmentShader);
+    // Shader: concatenate common + main for the fragment shader
+    std::string fsFull = std::string(refractionFragmentCommon) + "\n" + std::string(refractionFragmentMain);
+    refractionShader = new Shader(refractionVertexShader, fsFull.c_str());
     backgroundShader = new Shader(backgroundVertexShader, backgroundFragmentShader);
-    skyboxShader = new Shader (skyboxVertexShader, skyboxFragmentShader);
+    skyboxShader = new Shader(skyboxVertexShader, skyboxFragmentShader);
     if (refractionShader->m_id == 0 || backgroundShader->m_id == 0 || skyboxShader->m_id == 0){
         OH_LOG_ERROR(LOG_APP, "create shader failed");
         return nullptr;
     }
-    
+
+    // ---- Cubemap ----
     std::vector<std::string> cubemapFaces = {
         "skybox/right.jpg", "skybox/left.jpg",
         "skybox/top.jpg", "skybox/bottom.jpg",
@@ -258,18 +333,90 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
         OH_LOG_ERROR(LOG_APP, "Failed to load cubemap texture");
         return nullptr;
     }
-    
+
+    // ---- Thin-film LUT texture ----
+    {
+        RawFile* lutFile = OH_ResourceManager_OpenRawFile(g_ResourceManager, "thinfilm_belcour_bubble.png");
+        if (lutFile) {
+            long sz = OH_ResourceManager_GetRawFileSize(lutFile);
+            std::vector<unsigned char> buf(sz);
+            OH_ResourceManager_ReadRawFile(lutFile, buf.data(), sz);
+            OH_ResourceManager_CloseRawFile(lutFile);
+            int w, h, ch;
+            stbi_uc* data = stbi_load_from_memory(buf.data(), sz, &w, &h, &ch, 0);
+            if (data) {
+                glGenTextures(1, &g_ThinFilmLUTTexture);
+                glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                stbi_image_free(data);
+                OH_LOG_INFO(LOG_APP, "Thin-film LUT loaded: %{public}dx%{public}d", w, h);
+            }
+        } else {
+            OH_LOG_WARN(LOG_APP, "Thin-film LUT not found, LUT mode will show black");
+        }
+    }
+
+    // ---- Skybox model ----
     g_SkyboxModel = Model::CreateSkyboxCube();
     if (!g_SkyboxModel) {
         OH_LOG_ERROR(LOG_APP, "create skybox failed");
         return nullptr;
     }
-    
-    g_RefractModel = Model::CreateSphere(1.5f, 64, 32, true);
-    if (!g_RefractModel) {
-        OH_LOG_ERROR(LOG_APP, "load refract model failed");
+
+    // ---- Decorative bubble model (smooth sphere) ----
+    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 64, 32, true);
+    if (!g_DecorativeBubbleModel) {
+        OH_LOG_ERROR(LOG_APP, "create decorative bubble model failed");
         return nullptr;
     }
+
+    // 18 display bubbles distributed around the scene
+    g_DisplayBubbles = {
+        {{-4.05f,  1.05f, -2.10f}, 0.42f, 0.2f, 0.20f, 0.11f, 0.55f},
+        {{-3.50f, -0.95f, -2.60f}, 0.24f, 1.1f, 0.13f, 0.07f, 0.82f},
+        {{-3.10f,  2.55f, -3.15f}, 0.20f, 2.0f, 0.10f, 0.06f, 0.94f},
+        {{-2.55f,  0.10f, -1.35f}, 0.34f, 2.8f, 0.16f, 0.09f, 0.72f},
+        {{-2.10f, -2.10f, -2.30f}, 0.30f, 3.7f, 0.15f, 0.08f, 0.68f},
+        {{-1.45f,  3.05f, -2.90f}, 0.18f, 4.5f, 0.09f, 0.06f, 1.02f},
+        {{-1.25f, -1.85f,  0.95f}, 0.24f, 5.4f, 0.11f, 0.07f, 0.78f},
+        {{-0.65f,  1.90f, -3.55f}, 0.22f, 6.2f, 0.11f, 0.07f, 0.90f},
+        {{-0.55f, -2.75f,  1.20f}, 0.20f, 7.1f, 0.10f, 0.06f, 0.86f},
+        {{ 0.45f,  2.85f, -2.55f}, 0.24f, 8.0f, 0.12f, 0.07f, 0.86f},
+        {{ 0.85f, -2.05f, -3.15f}, 0.20f, 8.9f, 0.10f, 0.06f, 0.98f},
+        {{ 1.25f, -1.45f,  0.85f}, 0.22f, 9.7f, 0.11f, 0.07f, 0.80f},
+        {{ 1.35f,  1.55f, -1.75f}, 0.38f, 10.6f, 0.18f, 0.11f, 0.62f},
+        {{ 1.85f,  2.95f, -3.45f}, 0.18f, 11.4f, 0.09f, 0.06f, 1.00f},
+        {{ 2.25f, -1.95f, -2.05f}, 0.32f, 12.2f, 0.16f, 0.08f, 0.80f},
+        {{ 2.75f,  0.35f, -1.55f}, 0.46f, 13.1f, 0.22f, 0.12f, 0.58f},
+        {{ 3.35f, -0.85f, -2.85f}, 0.24f, 13.9f, 0.12f, 0.07f, 0.92f},
+        {{ 3.95f,  1.15f, -2.35f}, 0.34f, 14.8f, 0.17f, 0.09f, 0.70f}
+    };
+
+    // ---- DBSTT simulation init ----
+    g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
+    g_Sim.timeStep = 0.001f;
+    g_Sim.substepsPerFrame = 5;
+    {
+        const auto& pos = g_Sim.getPositions();
+        const auto& nrm = g_Sim.getNormals();
+        std::vector<unsigned int> idx;
+        for (const auto& t : g_Sim.getTriangles()) {
+            idx.push_back((unsigned int)t.x);
+            idx.push_back((unsigned int)t.y);
+            idx.push_back((unsigned int)t.z);
+        }
+        g_RefractModel = Model::CreateFromVertices(pos, nrm, idx);
+    }
+    if (!g_RefractModel) {
+        OH_LOG_ERROR(LOG_APP, "create refract model failed");
+        return nullptr;
+    }
+
+    // ---- Background spheres ----
     float sphere_z = -5.0f;
     float sphere_radius = 0.15f;
     for (int i = 0; i < 5; ++i){
@@ -280,9 +427,7 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     }
     for (auto& pos : g_SpherePositions) {
         Model* sphere = Model::CreateSphere(sphere_radius, 32, 16, false);
-        if (sphere) {
-            g_BackgroundModels.push_back(sphere);
-        }
+        if (sphere) g_BackgroundModels.push_back(sphere);
     }
 
     InitFBO(surfW, surfH);
@@ -296,138 +441,172 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
 
 static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     if (display == EGL_NO_DISPLAY || surface == EGL_NO_SURFACE) return nullptr;
-    
+
     EGLint surfW = 0, surfH = 0;
     if (eglQuerySurface(display, surface, EGL_WIDTH, &surfW) == EGL_FALSE ||
         eglQuerySurface(display, surface, EGL_HEIGHT, &surfH) == EGL_FALSE ||
         surfW <= 0 || surfH <= 0) return nullptr;
-    width = static_cast<float>(surfW);
-    height = static_cast<float>(surfH);
-    
-    g_camera.setViewportSize(width, height);
-    
-    // rotate camera
+    float w = static_cast<float>(surfW);
+    float h = static_cast<float>(surfH);
+
+    // ---- Time ----
+    double now = 0.0;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = ts.tv_sec + ts.tv_nsec * 1e-9;
+    if (g_LastFrameTime == 0.0) g_LastFrameTime = now;
+    double dt = now - g_LastFrameTime;
+    g_LastFrameTime = now;
+    g_Time += dt;
+
+    // ---- Touch decay ----
+    if (!g_TouchPressed) {
+        g_TouchStrength *= expf(-3.2f * (float)dt);
+        g_TouchVelocity  *= expf(-5.0f * (float)dt);
+        if (g_TouchStrength < 0.01f) {
+            g_TouchStrength = 0.0f;
+            g_TouchPoint = glm::vec2(-10.0f, -10.0f);
+        }
+    }
+
+    // ---- Camera ----
+    g_camera.setViewportSize(w, h);
     float radius = g_CameraDistance;
     float pitch = glm::radians(currentAngleX);
-    float yaw = glm::radians(currentAngleY);
-    const float maxPitch = glm::radians(89.0f);
-    pitch = glm::clamp(pitch, -maxPitch, maxPitch);
-    glm::vec3 cameraPos;
-    cameraPos.x = radius * cos(pitch) * sin(yaw);
-    cameraPos.y = radius * sin(pitch);
-    cameraPos.z = radius * cos(pitch) * cos(yaw);
+    float yaw   = glm::radians(currentAngleY);
+    pitch = glm::clamp(pitch, glm::radians(-89.0f), glm::radians(89.0f));
+    glm::vec3 cameraPos(radius * cos(pitch) * sin(yaw),
+                        radius * sin(pitch),
+                        radius * cos(pitch) * cos(yaw));
     g_camera.setPosition(cameraPos);
     g_camera.setTarget(glm::vec3(0.0f, 0.0f, 0.0f));
-    glm::mat4 model = glm::mat4(1.0f);
-    
-//    // rotate model
-//    glm::vec3 cameraPos = g_camera.getPosition();
-//    glm::mat4 rotateModel = glm::rotate(glm::mat4(1.0f), glm::radians(currentAngleX), glm::vec3(1.0f, 0.0f, 0.0f));
-//    rotateModel = glm::rotate(rotateModel, glm::radians(currentAngleY), glm::vec3(0.0f, 1.0f, 0.0f));
-//    glm::mat4 model = rotateModel * glm::mat4(1.0f);
-    
+
+    // ---- DBSTT simulation ----
+    if (!g_SimPaused) g_Sim.update(1.0f / 60.0f);
+    if (g_RefractModel && g_RefractModel->getMeshCount() > 0) {
+        auto verts = buildVerticesFromSim(g_Sim);
+        Mesh* m = g_RefractModel->getMesh(0);
+        if (m) m->updateVertices(verts);
+    }
+
     glm::mat4 view = g_camera.getViewMatrix();
     glm::mat4 proj = g_camera.getProjectionMatrix();
-//    glm::mat4 mvp = g_camera.getMVP(model);
-    
-    auto SetRefractUniforms = [&]() {
+
+    // ---- SetRefractUniforms: per-bubble with individual model matrix ----
+    auto SetRefractUniforms = [&](const glm::mat4& model, float localRadius, bool isBackFace, bool renderToFBO, bool interactive) {
+        glm::vec3 center = glm::vec3(model * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+        float dist = glm::length(cameraPos - center);
+        float fovVert = glm::radians(g_camera.getFov());
+        float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
+        float angularRadius = atanf((localRadius * 1.15f) / std::max(dist, 0.001f));
+        float spherePixelRadius = angularRadius * pixelsPerRadian;
+
         refractionShader->Use();
         refractionShader->SetMat4("uModel", model);
         refractionShader->SetMat4("uView", view);
         refractionShader->SetMat4("uProj", proj);
         refractionShader->SetVec3("uCameraPos", cameraPos);
-
         refractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         refractionShader->SetFloat("uShininess", g_Shininess);
         refractionShader->SetFloat("uDiffuseness", g_Diffuseness);
         refractionShader->SetFloat("uRefractionStrength", g_RefractionStrength);
-        refractionShader->SetFloat("uDispersionStrength", g_DispersionStrength);
+        refractionShader->SetFloat("uEdgeDistortionBoost", g_EdgeDistortionBoost);
+        refractionShader->SetFloat("uMaxOffsetRatio", g_MaxOffsetRatio);
+        refractionShader->SetFloat("uEnvironmentReflectionStrength", g_EnvironmentReflectionStrength);
+        refractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
+        refractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
+        refractionShader->SetInt("uRenderToFBO", renderToFBO ? 1 : 0);
+        refractionShader->SetInt("uIridescenceMode", g_IridescenceMode);
+        refractionShader->SetInt("uBackgroundTexture", 0);
+        refractionShader->SetInt("uEnvironmentMap", 1);
+        refractionShader->SetInt("uThinFilmLUT", 2);
         refractionShader->SetVec3("uLight", light);
-        refractionShader->SetVec2("uWinResolution", {width, height});
-        refractionShader->SetVec2("uTouchPoint", g_TouchPoint);
-        refractionShader->SetFloat("uTouchStrength", g_TouchStrength);
-        refractionShader->SetFloat("uTouchVelocity", g_TouchVelocity);
+        refractionShader->SetVec2("uWinResolution", {w, h});
+        refractionShader->SetVec2("uFBOSize", {(float)g_FBOWidth, (float)g_FBOHeight});
+        refractionShader->SetFloat("uThickness", CurrentThickness());
+        refractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
+        refractionShader->SetFloat("uTime", (float)g_Time);
+        refractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
+        refractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
+        refractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
     };
-    
+
+    // ---- DrawRefractiveBubbles: decorative bubbles + main interactive bubble ----
+    auto DrawRefractiveBubbles = [&](bool isBackFace, GLuint backgroundTex) {
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, backgroundTex);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
+        glActiveTexture(GL_TEXTURE2);
+        glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
+
+        // Draw 18 decorative (non-interactive) bubbles
+        for (const auto& bubble : g_DisplayBubbles) {
+            glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
+            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, isBackFace, false);
+            g_DecorativeBubbleModel->Draw(*refractionShader);
+        }
+
+        // Draw the main interactive bubble
+        glm::mat4 mainModel = glm::mat4(1.0f);
+        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, isBackFace, true);
+        g_RefractModel->Draw(*refractionShader);
+    };
+
     auto SetBackgroundUniforms = [&]() {
         backgroundShader->Use();
-        for (size_t i = 0; i < g_BackgroundModels.size(); ++i){
-            glm::mat4 model = glm::translate(glm::mat4(1.0f), g_SpherePositions[i]);
-            glm::mat4 mvp = g_camera.getMVP(model);
+        for (size_t i = 0; i < g_BackgroundModels.size(); ++i) {
+            glm::mat4 bgModel = glm::translate(glm::mat4(1.0f), g_SpherePositions[i]);
+            glm::mat4 mvp = g_camera.getMVP(bgModel);
             backgroundShader->SetMat4("uMVP", mvp);
             g_BackgroundModels[i]->Draw(*backgroundShader);
         }
     };
-    
+
     auto DrawSkybox = [&]() {
         skyboxShader->Use();
-        glm::mat4 viewNoTranslation = glm::mat4(glm::mat3(g_camera.getViewMatrix()));
-        glm::mat4 projection = g_camera.getProjectionMatrix();
-        skyboxShader->SetMat4("projection", projection);
-        skyboxShader->SetMat4("view", viewNoTranslation);
-    
+        glm::mat4 viewNT = glm::mat4(glm::mat3(view));
+        skyboxShader->SetMat4("projection", proj);
+        skyboxShader->SetMat4("view", viewNT);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
         skyboxShader->SetInt("skybox", 0);
-    
         g_SkyboxModel->Draw(*skyboxShader);
     };
 
-    // ---------- 1. 渲染背景到 backgroundFBO ----------
+    int fboW = g_FBOWidth, fboH = g_FBOHeight;
+
+    // ===== Pass 1: Background → backgroundFBO (overscan) =====
     glBindFramebuffer(GL_FRAMEBUFFER, backgroundFBO);
-    glViewport(0, 0, surfW, surfH);
+    glViewport(0, 0, fboW, fboH);
     glEnable(GL_DEPTH_TEST);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);  // 黑色背景
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    
     glCullFace(GL_BACK);
-    
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
     DrawSkybox();
-    glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
-    
+    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
 
-    // ---------- 2. 渲染折射物体背面到 backFaceFBO ----------
+    // ===== Pass 2: Back faces → backFaceFBO =====
     glBindFramebuffer(GL_FRAMEBUFFER, backFaceFBO);
-    glViewport(0, 0, surfW, surfH);
+    glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
     glCullFace(GL_FRONT);
+    DrawRefractiveBubbles(true, backgroundTexture);
 
-    SetRefractUniforms();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, backgroundTexture);
-    glUniform1i(glGetUniformLocation(refractionShader->m_id, "uBackgroundTexture"), 0);
-    g_RefractModel->Draw(*refractionShader);
-
-    // ---------- 3. 渲染折射物体正面到屏幕 ----------
+    // ===== Pass 3: Front faces → screen =====
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, surfW, surfH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
-    
     glCullFace(GL_BACK);
-    
-    glDepthFunc(GL_LEQUAL);
-    glDepthMask(GL_FALSE);
+    glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
     DrawSkybox();
-    glDepthMask(GL_TRUE);
-    glDepthFunc(GL_LESS);
-    
+    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
-
-    SetRefractUniforms();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, backFaceTexture);
-//    glBindTexture(GL_TEXTURE_2D, backgroundTexture);
-    glUniform1i(glGetUniformLocation(refractionShader->m_id, "uBackgroundTexture"), 0);
-    g_RefractModel->Draw(*refractionShader);
+    DrawRefractiveBubbles(false, backFaceTexture);
 
     eglSwapBuffers(display, surface);
-
     return nullptr;
 }
 
@@ -481,6 +660,7 @@ static napi_value OnTouch(napi_env env, napi_callback_info info) {
     }
 
     if (touchType == 0) { // Down
+        g_TouchPressed = true;
         g_LastTouchX = fx;
         g_LastTouchY = fy;
         g_TouchPoint = {fx / fmaxf(width, 1.0f), 1.0f - fy / fmaxf(height, 1.0f)};
@@ -496,23 +676,120 @@ static napi_value OnTouch(napi_env env, napi_callback_info info) {
         g_LastTouchX = fx;
         g_LastTouchY = fy;
     } else if (touchType == 1) { // Up
-        g_TouchStrength = 0.0f;
-        g_TouchVelocity = 0.0f;
-        g_TouchPoint = {-10.0f, -10.0f};
+        g_TouchPressed = false;
     }
 
     return nullptr;
 }
 
+// ---- Parameter control NAPI ----
+static napi_value SetIridescenceMode(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    int32_t mode; napi_get_value_int32(env, args[0], &mode);
+    g_IridescenceMode = mode % 3;
+    OH_LOG_INFO(LOG_APP, "IridescenceMode = %{public}d", g_IridescenceMode);
+    return nullptr;
+}
+static napi_value SetSurfaceTension(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_Sim.surfaceTensionStrength = (float)val;
+    return nullptr;
+}
+static napi_value SetRefractionStrength(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_RefractionStrength = (float)val;
+    return nullptr;
+}
+static napi_value SetFresnelPower(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_FresnelPower = glm::clamp((float)val, 0.5f, 20.0f);
+    return nullptr;
+}
+static napi_value SetEdgeDistortionBoost(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_EdgeDistortionBoost = glm::clamp((float)val, 1.0f, 3.0f);
+    return nullptr;
+}
+static napi_value SetMaxOffsetRatio(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_MaxOffsetRatio = glm::clamp((float)val, 0.1f, 1.0f);
+    return nullptr;
+}
+static napi_value SetEnvironmentReflectionStrength(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_EnvironmentReflectionStrength = glm::clamp((float)val, 0.0f, 1.5f);
+    return nullptr;
+}
+static napi_value SetCameraDistance(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_CameraDistance = glm::clamp((float)val, 3.5f, 20.0f);
+    return nullptr;
+}
+static napi_value ToggleSimulation(napi_env env, napi_callback_info info) {
+    g_SimPaused = !g_SimPaused;
+    OH_LOG_INFO(LOG_APP, "Simulation %{public}s", g_SimPaused ? "PAUSED" : "RUNNING");
+    return nullptr;
+}
+static napi_value SetThickness(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    CurrentThickness() = glm::clamp((float)val, 100.0f, 2000.0f);
+    return nullptr;
+}
+static napi_value SetThicknessVar(napi_env env, napi_callback_info info) {
+    size_t argc = 1; napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double val; napi_get_value_double(env, args[0], &val);
+    g_ThicknessVar = glm::clamp((float)val, 0.0f, 500.0f);
+    return nullptr;
+}
+static napi_value RotateCamera(napi_env env, napi_callback_info info) {
+    size_t argc = 2; napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double dx = 0.0, dy = 0.0;
+    if (argc >= 1) napi_get_value_double(env, args[0], &dx);
+    if (argc >= 2) napi_get_value_double(env, args[1], &dy);
+    currentAngleY += (float)dx * 0.3f;
+    currentAngleX += (float)dy * 0.3f;
+    currentAngleX = glm::clamp(currentAngleX, -89.0f, 89.0f);
+    return nullptr;
+}
+static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
+    g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
+    g_Sim.timeStep = 0.001f;
+    g_Sim.substepsPerFrame = 5;
+    g_Sim.surfaceTensionStrength = 15.0f;
+    g_Sim.circulationDiffusion = 0.0005f;
+    g_Sim.flipSurfaceTensionSign = true;
+    return nullptr;
+}
+
 static napi_value ReleaseResource(napi_env env, napi_callback_info info) {
-    delete g_RefractModel, g_SkyboxModel;
-    g_RefractModel = g_SkyboxModel = nullptr;
+    delete g_RefractModel, g_DecorativeBubbleModel, g_SkyboxModel;
+    g_RefractModel = g_DecorativeBubbleModel = g_SkyboxModel = nullptr;
     for (auto* sphere : g_BackgroundModels){
         delete sphere;
     }
     g_BackgroundModels.clear();
     
     if (cubemapTexture) glDeleteTextures(1, &cubemapTexture);
+    if (g_ThinFilmLUTTexture) glDeleteTextures(1, &g_ThinFilmLUTTexture);
 
     if (backgroundFBO) glDeleteFramebuffers(1, &backgroundFBO);
     if (backgroundTexture) glDeleteTextures(1, &backgroundTexture);
@@ -554,6 +831,19 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "onTouch", nullptr, OnTouch, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setInputViewport", nullptr, SetInputViewport, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "releaseResource", nullptr, ReleaseResource, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setIridescenceMode", nullptr, SetIridescenceMode, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setSurfaceTension", nullptr, SetSurfaceTension, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setRefractionStrength", nullptr, SetRefractionStrength, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "resetSimulation", nullptr, ResetSimulation, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "rotateCamera", nullptr, RotateCamera, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setFresnelPower", nullptr, SetFresnelPower, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setEdgeDistortionBoost", nullptr, SetEdgeDistortionBoost, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setMaxOffsetRatio", nullptr, SetMaxOffsetRatio, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setEnvironmentReflectionStrength", nullptr, SetEnvironmentReflectionStrength, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setCameraDistance", nullptr, SetCameraDistance, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "toggleSimulation", nullptr, ToggleSimulation, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setThickness", nullptr, SetThickness, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setThicknessVar", nullptr, SetThicknessVar, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -2,6 +2,9 @@
 cmake_minimum_required(VERSION 3.5.0)
 project(Refraction)
 
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 set(NATIVERENDER_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 #set(ASSIMP_LIB_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -20,6 +23,7 @@ add_library(entry SHARED
     render/model.cpp
     render/shader.cpp
     render/camera.cpp
+    simulation/vortex_sheet.cpp
 )
 
 if (OHOS_ARCH STREQUAL "arm64-v8a")

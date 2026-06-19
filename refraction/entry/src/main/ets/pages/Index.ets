@@ -16,6 +16,11 @@ struct Index {
     @State private compY: number = 0;
     @State private compW: number = 0;
     @State private compH: number = 0;
+    @State private showSettings: boolean = false;
+
+    private lastTouchX: number = 0
+    private lastTouchY: number = 0
+    private touchMoved: boolean = false
 
     private startRenderLoop(): void {
         if (this.renderTimerId >= 0) {
@@ -41,6 +46,8 @@ struct Index {
     }
 
     private mapAndDispatchTouch(event: TouchEvent): void {
+        if (this.showSettings) return
+
         let points = event.touches
         if (!points || points.length === 0) {
             points = event.changedTouches
@@ -54,6 +61,9 @@ struct Index {
         switch (event.type) {
             case TouchType.Down:
                 touchType = 0
+                this.lastTouchX = touch.x
+                this.lastTouchY = touch.y
+                this.touchMoved = false
                 break
             case TouchType.Up:
                 touchType = 1
@@ -69,6 +79,25 @@ struct Index {
         const inComp = hasArea ? (localX >= 0 && localX <= this.compW && localY >= 0 && localY <= this.compH) : true
         if (!inComp && touchType !== 1) {
             return
+        }
+
+        // ---- drag to rotate camera ----
+        if (touchType === 2) {
+            const dx = touch.x - this.lastTouchX
+            const dy = touch.y - this.lastTouchY
+            if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+                this.touchMoved = true
+            }
+            if (this.touchMoved) {
+                try {
+                    testNapi.rotateCamera(dx, dy)
+                } catch (e) {
+                    hilog.error(DOMAIN, 'Index', 'rotateCamera failed: %{public}s', JSON.stringify(e))
+                }
+                this.lastTouchX = touch.x
+                this.lastTouchY = touch.y
+                return
+            }
         }
 
         hilog.info(
@@ -93,8 +122,18 @@ struct Index {
         testNapi.releaseResource()
     }
 
+    @Builder SettingSlider(label: string, defVal: number, minVal: number, maxVal: number,
+                           stepVal: number, onChange: (val: number) => void) {
+        Row() {
+            Text(label).fontSize(10).fontColor(Color.White).width(60)
+            Slider({ value: defVal, min: minVal, max: maxVal, step: stepVal, style: SliderStyle.OutSet })
+                .width(140).height(18)
+                .onChange((val: number) => { onChange(val) })
+        }.width('100%').justifyContent(FlexAlign.Center).padding({ top: 2, bottom: 2 })
+    }
+
     build() {
-        Column() {
+        Stack() {
             XComponent({
                 id: this.xcomponentId,
                 type: XComponentType.SURFACE,
@@ -126,6 +165,59 @@ struct Index {
                 })
                 .width('100%')
                 .height('100%')
+
+            // ---- Compact top bar ----
+            Row() {
+                Button('Kim2012').fontSize(10).width(60).height(28)
+                    .onClick(() => { try { testNapi.setIridescenceMode(0) } catch (e) {} })
+                Button('LUT').fontSize(10).width(48).height(28)
+                    .onClick(() => { try { testNapi.setIridescenceMode(1) } catch (e) {} })
+                Button('Airy').fontSize(10).width(48).height(28)
+                    .onClick(() => { try { testNapi.setIridescenceMode(2) } catch (e) {} })
+                Button('⏯').fontSize(10).width(40).height(28)
+                    .onClick(() => { try { testNapi.toggleSimulation() } catch (e) {} })
+                Button('⚙').fontSize(14).width(40).height(28)
+                    .onClick(() => { this.showSettings = !this.showSettings })
+            }
+            .width('100%').justifyContent(FlexAlign.Center).padding({ top: 4 })
+            .position({ x: 0, y: 0 })
+
+            // ---- Settings panel overlay ----
+            if (this.showSettings) {
+                // Semi-transparent backdrop – tap to close
+                Column()
+                    .width('100%').height('100%')
+                    .backgroundColor('rgba(0,0,0,0.35)')
+                    .onClick(() => { this.showSettings = false })
+
+                // Settings card
+                Column() {
+                    Text('参数设置').fontSize(14).fontColor(Color.White).padding({ top: 8, bottom: 4 })
+
+                    this.SettingSlider('薄膜厚度', 740, 100, 2000, 10, (v) => { try { testNapi.setThickness(v) } catch (e) {} })
+                    this.SettingSlider('厚度扰动', 160, 0, 500, 10, (v) => { try { testNapi.setThicknessVar(v) } catch (e) {} })
+                    this.SettingSlider('表面张力', 15, 1, 50, 1, (v) => { try { testNapi.setSurfaceTension(v) } catch (e) {} })
+                    this.SettingSlider('菲涅尔', 8, 0.5, 20, 0.5, (v) => { try { testNapi.setFresnelPower(v) } catch (e) {} })
+                    this.SettingSlider('折射强度', 0.35, 0, 4, 0.05, (v) => { try { testNapi.setRefractionStrength(v) } catch (e) {} })
+                    this.SettingSlider('边缘畸变', 2.2, 1, 3, 0.1, (v) => { try { testNapi.setEdgeDistortionBoost(v) } catch (e) {} })
+                    this.SettingSlider('环境反射', 0.65, 0, 1.5, 0.05, (v) => { try { testNapi.setEnvironmentReflectionStrength(v) } catch (e) {} })
+                    this.SettingSlider('相机距离', 7, 3.5, 20, 0.5, (v) => { try { testNapi.setCameraDistance(v) } catch (e) {} })
+
+                    Row() {
+                        Button('关闭').fontSize(12).width(80).height(32)
+                            .onClick(() => { this.showSettings = false })
+                        Button('重置').fontSize(12).width(80).height(32)
+                            .onClick(() => {
+                                try { testNapi.resetSimulation() } catch (e) {}
+                            })
+                    }.width('100%').justifyContent(FlexAlign.SpaceEvenly).padding({ top: 8, bottom: 8 })
+                }
+                .width('85%')
+                .backgroundColor('rgba(30,30,30,0.92)')
+                .borderRadius(12)
+                .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+                .position({ x: '7.5%', y: '25%' })
+            }
         }
         .onTouch((event: TouchEvent) => {
             this.mapAndDispatchTouch(event)

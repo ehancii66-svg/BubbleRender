@@ -173,11 +173,31 @@ Model* Model::CreateSkyboxCube()
     return skyboxModel;
 }
 
-void Model::Draw(Shader shader)
+void Model::Draw(Shader& shader)
 {
     for (unsigned int i = 0; i < m_meshes.size(); i++) {
         m_meshes[i].Draw(shader);
     }
+}
+
+Model* Model::CreateFromVertices(
+    const std::vector<glm::vec3>& positions,
+    const std::vector<glm::vec3>& normals,
+    const std::vector<unsigned int>& indices)
+{
+    Model* model = new Model();
+    std::vector<Vertex> vertices(positions.size());
+    for (size_t i = 0; i < positions.size(); ++i) {
+        vertices[i].Position   = positions[i];
+        vertices[i].Normal     = normals[i];
+        vertices[i].TexCoords  = glm::vec2(0.0f);
+        vertices[i].Tangent    = glm::vec3(0.0f);
+        vertices[i].Bitangent  = glm::vec3(0.0f);
+        model->updateMaxMinXyz(positions[i]);
+    }
+    Mesh simMesh(vertices, indices, std::vector<Texture>(), true);  // dynamic
+    model->m_meshes.push_back(simMesh);
+    return model;
 }
 
 void Model::updateMaxMinXyz(glm::vec3 pos)

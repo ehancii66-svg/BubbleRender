@@ -44,84 +44,95 @@ struct Texture {
 
 class Mesh {
 public:
-vector<Vertex> vertices;
-vector<unsigned int> indices;
-vector<Texture> textures;
-unsigned int VAO;
+    vector<Vertex> vertices;
+    vector<unsigned int> indices;
+    vector<Texture> textures;
+    unsigned int VAO;
 
-Mesh(vector<Vertex> vertices, vector<unsigned int> indices, vector<Texture> textures)
-{
-    this->vertices = vertices;
-    this->indices = indices;
-    this->textures = textures;
-    setupMesh();
-}
+    Mesh(vector<Vertex> vertices, vector<unsigned int> indices, vector<Texture> textures,
+         bool dynamic = false)
+    {
+        this->vertices = vertices;
+        this->indices = indices;
+        this->textures = textures;
+        setupMesh(dynamic);
+    }
 
-void Draw(Shader shader)
-{
-    unsigned int diffuseNr  = 1;
-    unsigned int specularNr = 1;
-    unsigned int normalNr   = 1;
-    unsigned int heightNr   = 1;
-    for (unsigned int i = 0; i < textures.size(); i++) {
-        glActiveTexture(GL_TEXTURE0 + i);
-        string number;
-        string name = textures[i].type;
-        if (name == "texture_diffuse") {
-            number = std::to_string(diffuseNr++);
-        } else if (name == "texture_specular") {
-            number = std::to_string(specularNr++);
-        } else if (name == "texture_normal") {
-            number = std::to_string(normalNr++);
-        } else if (name == "texture_height") {
-            number = std::to_string(heightNr++);
+    // Update vertex buffer contents (for DBSTT simulation)
+    void updateVertices(const vector<Vertex>& newVertices) {
+        vertices = newVertices;
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.size() * sizeof(Vertex), &vertices[0]);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    void Draw(Shader& shader)
+    {
+        unsigned int diffuseNr  = 1;
+        unsigned int specularNr = 1;
+        unsigned int normalNr   = 1;
+        unsigned int heightNr   = 1;
+        for (unsigned int i = 0; i < textures.size(); i++) {
+            glActiveTexture(GL_TEXTURE0 + i);
+            string number;
+            string name = textures[i].type;
+            if (name == "texture_diffuse") {
+                number = std::to_string(diffuseNr++);
+            } else if (name == "texture_specular") {
+                number = std::to_string(specularNr++);
+            } else if (name == "texture_normal") {
+                number = std::to_string(normalNr++);
+            } else if (name == "texture_height") {
+                number = std::to_string(heightNr++);
+            }
+            glUniform1i(glGetUniformLocation(shader.m_id, (name + number).c_str()), i);
+            glBindTexture(GL_TEXTURE_2D, textures[i].id);
         }
-        glUniform1i(glGetUniformLocation(shader.m_id, (name + number).c_str()), i);
-        glBindTexture(GL_TEXTURE_2D, textures[i].id);
-    }
-    
-    glBindVertexArray(VAO);
-    glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
-    glBindVertexArray(0);
-    glActiveTexture(GL_TEXTURE0);
-}
 
-void Destroy()
-{
-    for (int i = 0; i < textures.size(); ++i) {
-        glDeleteTextures(1, &textures[i].id);
+        glBindVertexArray(VAO);
+        glDrawElements(GL_TRIANGLES, indices.size(), GL_UNSIGNED_INT, 0);
+        glBindVertexArray(0);
+        glActiveTexture(GL_TEXTURE0);
     }
-    glDeleteBuffers(1, &EBO);
-    glDeleteBuffers(1, &VBO);
-    glDeleteVertexArrays(1, &VAO);
-    VAO = EBO = VBO = GL_NONE;
-}
+
+    void Destroy()
+    {
+        for (int i = 0; i < textures.size(); ++i) {
+            glDeleteTextures(1, &textures[i].id);
+        }
+        glDeleteBuffers(1, &EBO);
+        glDeleteBuffers(1, &VBO);
+        glDeleteVertexArrays(1, &VAO);
+        VAO = EBO = VBO = GL_NONE;
+    }
 
 private:
-unsigned int VBO, EBO;
-void setupMesh()
-{
-    glGenVertexArrays(1, &VAO);
-    glGenBuffers(1, &VBO);
-    glGenBuffers(1, &EBO);
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], GL_STATIC_DRAW);
+    unsigned int VBO, EBO;
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
-    
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
-    glEnableVertexAttribArray(2);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, TexCoords));
-    glEnableVertexAttribArray(3);
-    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Tangent));
-    glEnableVertexAttribArray(4);
-    glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
-    glBindVertexArray(0);
-}
+    void setupMesh(bool dynamic = false)
+    {
+        GLenum usage = dynamic ? GL_DYNAMIC_DRAW : GL_STATIC_DRAW;
+        glGenVertexArrays(1, &VAO);
+        glGenBuffers(1, &VBO);
+        glGenBuffers(1, &EBO);
+        glBindVertexArray(VAO);
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex), &vertices[0], usage);
+
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+
+        glEnableVertexAttribArray(0);
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
+        glEnableVertexAttribArray(1);
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Normal));
+        glEnableVertexAttribArray(2);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, TexCoords));
+        glEnableVertexAttribArray(3);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Tangent));
+        glEnableVertexAttribArray(4);
+        glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
+        glBindVertexArray(0);
+    }
 };
 #endif // REFRACTIONMODEL_MESH_H

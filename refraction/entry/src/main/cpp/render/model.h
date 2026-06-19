@@ -39,11 +39,21 @@ public:
     
     ~Model();
     
-    void Draw(Shader shader);
-    
-    static Model* CreateSphere(float radius = 1.0f, int sector = 36, int stacks = 18, bool withTexCoords = true);
+    void Draw(Shader& shader);
 
+    // DBSTT dynamic mesh access
+    Mesh* getMesh(int index) {
+        if (index >= 0 && index < (int)m_meshes.size()) return &m_meshes[index];
+        return nullptr;
+    }
+    int getMeshCount() const { return (int)m_meshes.size(); }
+
+    static Model* CreateSphere(float radius = 1.0f, int sector = 36, int stacks = 18, bool withTexCoords = true);
     static Model* CreateSkyboxCube();
+    static Model* CreateFromVertices(
+        const std::vector<glm::vec3>& positions,
+        const std::vector<glm::vec3>& normals,
+        const std::vector<unsigned int>& indices);
 
 private:
     string m_directory;
@@ -53,7 +63,7 @@ private:
     bool m_gammaCorrection;
     bool m_hasTexture;
     bool m_loadTextures;
-    
+
     void updateMaxMinXyz(glm::vec3 pos);
 
 };
