@@ -11,3 +11,17 @@ report.zip
 .tmp/
 demo/
 demo.raw/
+
+# HarmonyOS / DevEco generated files
+refraction/.hvigor/
+refraction/.idea/
+refraction/entry/.cxx/
+refraction/oh_modules/
+refraction/entry/oh_modules/
+*.hap
+*.hsp
+*.har
+*.app
+
+# Local presentation source
+/beamer.tex
