@@ -11,12 +11,14 @@ struct Index {
     private xComponentController: XComponentController = new XComponentController()
 
     private renderTimerId: number = -1
+    private fpsUpdateCounter: number = 0
 
     @State private compX: number = 0;
     @State private compY: number = 0;
     @State private compW: number = 0;
     @State private compH: number = 0;
     @State private showSettings: boolean = false;
+    @State private fpsText: string = 'FPS: --  RS: 0.50';
 
     private lastTouchX: number = 0
     private lastTouchY: number = 0
@@ -29,6 +31,14 @@ struct Index {
         this.renderTimerId = setInterval(() => {
             try {
                 testNapi.renderFrame()
+                this.fpsUpdateCounter += 1
+                if (this.fpsUpdateCounter >= 15) {
+                    this.fpsUpdateCounter = 0
+                    const fps = testNapi.getFps()
+                    if (fps > 0) {
+                        this.fpsText = `FPS: ${fps.toFixed(1)}  RS: 0.50`
+                    }
+                }
             } catch (err) {
                 hilog.error(DOMAIN, 'Index', 'renderFrame failed: %{public}s', JSON.stringify(err))
             }
@@ -165,6 +175,15 @@ struct Index {
                 })
                 .width('100%')
                 .height('100%')
+
+            Text(this.fpsText)
+                .fontSize(12)
+                .fontColor(Color.White)
+                .fontWeight(FontWeight.Medium)
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .backgroundColor('rgba(0,0,0,0.42)')
+                .borderRadius(6)
+                .position({ x: 8, y: 6 })
 
             // ---- Compact top bar ----
             Row() {

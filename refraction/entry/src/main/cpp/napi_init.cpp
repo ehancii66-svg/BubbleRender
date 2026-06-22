@@ -18,6 +18,7 @@
 #include "shader/shader_refraction.h"
 #include "shader/shader_background.h"
 #include "shader/shader_skybox.h"
+#include "shader/shader_quad.h"
 #include "simulation/vortex_sheet.h"
 
 #include <cmath>
@@ -56,13 +57,16 @@ float g_CameraDistance = 7.0f;
 Shader* refractionShader = nullptr;
 Shader* backgroundShader = nullptr;
 Shader* skyboxShader = nullptr;
+Shader* quadShader = nullptr;
 
 GLuint backgroundFBO = 0, backgroundTexture = 0;
 GLuint sceneBehindFBO = 0, sceneBehindTexture = 0;
 GLuint mainSceneFBO = 0, mainSceneTexture = 0;
+GLuint finalSceneFBO = 0, finalSceneTexture = 0;
 GLuint backFaceFBO = 0, backFaceTexture = 0;
 GLuint depthRB = 0;
 GLuint cubemapTexture = 0;
+GLuint quadVAO = 0, quadVBO = 0;
 
 Camera g_camera;
 
@@ -98,9 +102,13 @@ float g_AiryThickness = 740.0f;
 float g_ThicknessVar = 160.0f;
 double g_Time = 0.0;
 double g_LastFrameTime = 0.0;
+double g_CurrentFps = 0.0;
+double g_FpsLogWindowStart = 0.0;
+int g_FpsLogFrameCount = 0;
 
 // ---- FBO overscan ----
-static constexpr float kFBOOverscan = 1.3f;
+static constexpr float kRenderScale = 0.5f;
+static constexpr float kFBOOverscan = 1.0f;
 int g_FBOWidth = 0, g_FBOHeight = 0;
 
 // ---- Thin-film LUT texture ----
@@ -110,8 +118,10 @@ GLuint g_ThinFilmLUTTexture = 0;
 static VortexSheetSimulation g_Sim;
 static float g_BubbleRadius = 1.5f;
 static int   g_SimSubdivs  = 3;
-static float g_SimPerturb  = 0.10f;
+static float g_SimPerturb  = 0.16f;
 static bool  g_SimPaused   = false;
+static constexpr int kSimFrameInterval = 6;
+static int g_SimFrameCounter = 0;
 
 static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation& sim) {
     const auto& pos = sim.getPositions();
@@ -218,9 +228,32 @@ GLuint CreateProgram(const char* vsSource, const char* fsSource) {
     return prog;
 }
 
+void InitFullscreenQuad() {
+    if (quadVAO != 0) return;
+
+    float vertices[] = {
+        -1.0f, -1.0f,
+         1.0f, -1.0f,
+        -1.0f,  1.0f,
+        -1.0f,  1.0f,
+         1.0f, -1.0f,
+         1.0f,  1.0f
+    };
+
+    glGenVertexArrays(1, &quadVAO);
+    glGenBuffers(1, &quadVBO);
+    glBindVertexArray(quadVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
+}
+
 void InitFBO(int w, int h) {
-    g_FBOWidth  = static_cast<int>(w * kFBOOverscan);
-    g_FBOHeight = static_cast<int>(h * kFBOOverscan);
+    g_FBOWidth  = std::max(1, static_cast<int>(w * kRenderScale * kFBOOverscan));
+    g_FBOHeight = std::max(1, static_cast<int>(h * kRenderScale * kFBOOverscan));
     int fboW = g_FBOWidth, fboH = g_FBOHeight;
 
     glGenRenderbuffers(1, &depthRB);
@@ -246,6 +279,7 @@ void InitFBO(int w, int h) {
     CreateColorTarget(backgroundFBO, backgroundTexture, "Background");
     CreateColorTarget(sceneBehindFBO, sceneBehindTexture, "Scene-behind");
     CreateColorTarget(mainSceneFBO, mainSceneTexture, "Main-scene");
+    CreateColorTarget(finalSceneFBO, finalSceneTexture, "Final-scene");
     CreateColorTarget(backFaceFBO, backFaceTexture, "Back-face");
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -301,8 +335,15 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     if (surfW > 0 && surfH > 0) {
         width = static_cast<float>(surfW);
         height = static_cast<float>(surfH);
-        OH_LOG_INFO(LOG_APP, "get surfW and surfH success");
+        OH_LOG_INFO(LOG_APP, "surface size = %{public}dx%{public}d", surfW, surfH);
     }
+
+    const GLubyte* glVendor = glGetString(GL_VENDOR);
+    const GLubyte* glRenderer = glGetString(GL_RENDERER);
+    const GLubyte* glVersion = glGetString(GL_VERSION);
+    OH_LOG_INFO(LOG_APP, "GL_VENDOR = %{public}s", glVendor ? reinterpret_cast<const char*>(glVendor) : "unknown");
+    OH_LOG_INFO(LOG_APP, "GL_RENDERER = %{public}s", glRenderer ? reinterpret_cast<const char*>(glRenderer) : "unknown");
+    OH_LOG_INFO(LOG_APP, "GL_VERSION = %{public}s", glVersion ? reinterpret_cast<const char*>(glVersion) : "unknown");
     
     g_camera.setViewportSize(width, height);
     g_camera.setPosition({0.0f, 0.0f, g_CameraDistance});
@@ -312,7 +353,9 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     refractionShader = new Shader(refractionVertexShader, fsFull.c_str());
     backgroundShader = new Shader(backgroundVertexShader, backgroundFragmentShader);
     skyboxShader = new Shader(skyboxVertexShader, skyboxFragmentShader);
-    if (refractionShader->m_id == 0 || backgroundShader->m_id == 0 || skyboxShader->m_id == 0){
+    quadShader = new Shader(quadVertexShader, quadFragmentShader);
+    if (refractionShader->m_id == 0 || backgroundShader->m_id == 0 ||
+        skyboxShader->m_id == 0 || quadShader->m_id == 0){
         OH_LOG_ERROR(LOG_APP, "create shader failed");
         return nullptr;
     }
@@ -363,13 +406,13 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     }
 
     // ---- Decorative bubble model (smooth sphere) ----
-    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 64, 32, true);
+    g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
     if (!g_DecorativeBubbleModel) {
         OH_LOG_ERROR(LOG_APP, "create decorative bubble model failed");
         return nullptr;
     }
 
-    // 18 display bubbles distributed around the scene
+    // 15 display bubbles distributed around the scene.
     g_DisplayBubbles = {
         {{-4.05f,  1.05f, -2.10f}, 0.42f, 0.2f, 0.20f, 0.11f, 0.55f},
         {{-3.50f, -0.95f, -2.60f}, 0.24f, 1.1f, 0.13f, 0.07f, 0.82f},
@@ -386,15 +429,13 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
         {{ 1.35f,  1.55f, -1.75f}, 0.38f, 10.6f, 0.18f, 0.11f, 0.62f},
         {{ 1.85f,  2.95f, -3.45f}, 0.18f, 11.4f, 0.09f, 0.06f, 1.00f},
         {{ 2.25f, -1.95f, -2.05f}, 0.32f, 12.2f, 0.16f, 0.08f, 0.80f},
-        {{ 2.75f,  0.35f, -1.55f}, 0.46f, 13.1f, 0.22f, 0.12f, 0.58f},
-        {{ 3.35f, -0.85f, -2.85f}, 0.24f, 13.9f, 0.12f, 0.07f, 0.92f},
         {{ 3.95f,  1.15f, -2.35f}, 0.34f, 14.8f, 0.17f, 0.09f, 0.70f}
     };
 
     // ---- DBSTT simulation init ----
     g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
     g_Sim.timeStep = 0.001f;
-    g_Sim.substepsPerFrame = 5;
+    g_Sim.substepsPerFrame = 1;
     {
         const auto& pos = g_Sim.getPositions();
         const auto& nrm = g_Sim.getNormals();
@@ -421,11 +462,15 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
         }
     }
     for (auto& pos : g_SpherePositions) {
-        Model* sphere = Model::CreateSphere(sphere_radius, 32, 16, false);
+        Model* sphere = Model::CreateSphere(sphere_radius, 16, 8, false);
         if (sphere) g_BackgroundModels.push_back(sphere);
     }
 
     InitFBO(surfW, surfH);
+    InitFullscreenQuad();
+    OH_LOG_INFO(LOG_APP, "FBO size = %{public}dx%{public}d, renderScale = %{public}.2f, display bubbles = %{public}zu, sim substeps = %{public}d, sim interval = %{public}d",
+        g_FBOWidth, g_FBOHeight, kRenderScale, g_DisplayBubbles.size(),
+        g_Sim.substepsPerFrame, kSimFrameInterval);
 
     glEnable(GL_DEPTH_TEST);
     glEnable(GL_CULL_FACE);
@@ -452,6 +497,27 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     double dt = now - g_LastFrameTime;
     g_LastFrameTime = now;
     g_Time += dt;
+    if (dt > 1e-6) {
+        double instantFps = 1.0 / dt;
+        g_CurrentFps = (g_CurrentFps <= 0.0)
+            ? instantFps
+            : g_CurrentFps * 0.85 + instantFps * 0.15;
+    }
+    if (g_FpsLogWindowStart == 0.0) {
+        g_FpsLogWindowStart = now;
+    }
+    ++g_FpsLogFrameCount;
+    double fpsLogElapsed = now - g_FpsLogWindowStart;
+    if (fpsLogElapsed >= 15.0) {
+        double avgFps = static_cast<double>(g_FpsLogFrameCount) / fpsLogElapsed;
+        OH_LOG_INFO(LOG_APP,
+            "perf avgFps15s=%{public}.2f smoothFps=%{public}.2f surface=%{public}dx%{public}d fbo=%{public}dx%{public}d renderScale=%{public}.2f displayBubbles=%{public}zu simSubsteps=%{public}d simInterval=%{public}d",
+            avgFps, g_CurrentFps, surfW, surfH, g_FBOWidth, g_FBOHeight,
+            kRenderScale, g_DisplayBubbles.size(), g_Sim.substepsPerFrame,
+            kSimFrameInterval);
+        g_FpsLogFrameCount = 0;
+        g_FpsLogWindowStart = now;
+    }
 
     // ---- Touch decay ----
     if (!g_TouchPressed) {
@@ -476,11 +542,13 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     g_camera.setTarget(glm::vec3(0.0f, 0.0f, 0.0f));
 
     // ---- DBSTT simulation ----
-    if (!g_SimPaused) g_Sim.update(1.0f / 60.0f);
-    if (g_RefractModel && g_RefractModel->getMeshCount() > 0) {
-        auto verts = buildVerticesFromSim(g_Sim);
-        Mesh* m = g_RefractModel->getMesh(0);
-        if (m) m->updateVertices(verts);
+    if (!g_SimPaused && g_RefractModel && g_RefractModel->getMeshCount() > 0) {
+        if ((g_SimFrameCounter++ % kSimFrameInterval) == 0) {
+            g_Sim.update(1.0f / 60.0f);
+            auto verts = buildVerticesFromSim(g_Sim);
+            Mesh* m = g_RefractModel->getMesh(0);
+            if (m) m->updateVertices(verts);
+        }
     }
 
     glm::mat4 view = g_camera.getViewMatrix();
@@ -490,10 +558,12 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     auto SetRefractUniforms = [&](const glm::mat4& model, float localRadius, bool isBackFace,
                                   bool renderToFBO, bool interactive, int iridescenceMode,
                                   float outputAlpha) {
+        float targetW = renderToFBO ? static_cast<float>(g_FBOWidth) : w;
+        float targetH = renderToFBO ? static_cast<float>(g_FBOHeight) : h;
         glm::vec3 center = glm::vec3(model * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
         float dist = glm::length(cameraPos - center);
         float fovVert = glm::radians(g_camera.getFov());
-        float pixelsPerRadian = (h / 2.0f) / tanf(fovVert / 2.0f);
+        float pixelsPerRadian = (static_cast<float>(g_FBOHeight) / 2.0f) / tanf(fovVert / 2.0f);
         float angularRadius = atanf((localRadius * 1.15f) / std::max(dist, 0.001f));
         float spherePixelRadius = angularRadius * pixelsPerRadian;
 
@@ -502,6 +572,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetMat4("uView", view);
         refractionShader->SetMat4("uProj", proj);
         refractionShader->SetVec3("uCameraPos", cameraPos);
+        refractionShader->SetFloat("uGeometryWobbleStrength", interactive ? 0.085f : 0.0f);
         refractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         refractionShader->SetFloat("uShininess", g_Shininess);
         refractionShader->SetFloat("uDiffuseness", g_Diffuseness);
@@ -517,7 +588,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetInt("uEnvironmentMap", 1);
         refractionShader->SetInt("uThinFilmLUT", 2);
         refractionShader->SetVec3("uLight", light);
-        refractionShader->SetVec2("uWinResolution", {w, h});
+        refractionShader->SetVec2("uWinResolution", {targetW, targetH});
         refractionShader->SetVec2("uFBOSize", {(float)g_FBOWidth, (float)g_FBOHeight});
         refractionShader->SetFloat("uThickness", CurrentThickness());
         refractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
@@ -648,9 +719,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     SetBackgroundUniforms();
     DrawMainBubble(false, true, backFaceTexture);
 
-    // ===== Pass 5: Composite front faces to screen =====
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glViewport(0, 0, surfW, surfH);
+    // ===== Pass 5: Composite complete scene into the low-res final target =====
+    glBindFramebuffer(GL_FRAMEBUFFER, finalSceneFBO);
+    glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
     glCullFace(GL_BACK);
@@ -658,8 +729,25 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     DrawSkybox();
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
-    DrawMainBubble(false, false, backFaceTexture);
-    DrawDisplayBubbles(false, false, mainSceneTexture, true);
+    DrawMainBubble(false, true, backFaceTexture);
+    DrawDisplayBubbles(false, true, mainSceneTexture, true);
+
+    // ===== Pass 6: Upscale final scene to the screen =====
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, surfW, surfH);
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glClear(GL_COLOR_BUFFER_BIT);
+    quadShader->Use();
+    quadShader->SetInt("uTexture", 0);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, finalSceneTexture);
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+    glEnable(GL_CULL_FACE);
+    glEnable(GL_DEPTH_TEST);
 
     eglSwapBuffers(display, surface);
     return nullptr;
@@ -692,6 +780,13 @@ static napi_value SetInputViewport(napi_env env, napi_callback_info info)
         OH_LOG_WARN(LOG_APP, "setInputViewport reset because input size is invalid");
     }
     return nullptr;
+}
+
+static napi_value GetFps(napi_env env, napi_callback_info info)
+{
+    napi_value result;
+    napi_create_double(env, g_CurrentFps, &result);
+    return result;
 }
 
 static napi_value OnTouch(napi_env env, napi_callback_info info) {
@@ -828,7 +923,8 @@ static napi_value RotateCamera(napi_env env, napi_callback_info info) {
 static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
     g_Sim.timeStep = 0.001f;
-    g_Sim.substepsPerFrame = 5;
+    g_Sim.substepsPerFrame = 1;
+    g_SimFrameCounter = 0;
     g_Sim.surfaceTensionStrength = 15.0f;
     g_Sim.circulationDiffusion = 0.0005f;
     g_Sim.flipSurfaceTensionSign = true;
@@ -836,8 +932,12 @@ static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
 }
 
 static napi_value ReleaseResource(napi_env env, napi_callback_info info) {
-    delete g_RefractModel, g_DecorativeBubbleModel, g_SkyboxModel;
-    g_RefractModel = g_DecorativeBubbleModel = g_SkyboxModel = nullptr;
+    delete g_RefractModel;
+    delete g_DecorativeBubbleModel;
+    delete g_SkyboxModel;
+    g_RefractModel = nullptr;
+    g_DecorativeBubbleModel = nullptr;
+    g_SkyboxModel = nullptr;
     for (auto* sphere : g_BackgroundModels){
         delete sphere;
     }
@@ -852,14 +952,19 @@ static napi_value ReleaseResource(napi_env env, napi_callback_info info) {
     if (sceneBehindTexture) glDeleteTextures(1, &sceneBehindTexture);
     if (mainSceneFBO) glDeleteFramebuffers(1, &mainSceneFBO);
     if (mainSceneTexture) glDeleteTextures(1, &mainSceneTexture);
+    if (finalSceneFBO) glDeleteFramebuffers(1, &finalSceneFBO);
+    if (finalSceneTexture) glDeleteTextures(1, &finalSceneTexture);
     if (backFaceFBO) glDeleteFramebuffers(1, &backFaceFBO);
     if (backFaceTexture) glDeleteTextures(1, &backFaceTexture);
     if (depthRB) glDeleteRenderbuffers(1, &depthRB);
+    if (quadVBO) glDeleteBuffers(1, &quadVBO);
+    if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
 
     delete refractionShader;
     delete backgroundShader;
     delete skyboxShader;
-    refractionShader = backgroundShader = skyboxShader = nullptr;
+    delete quadShader;
+    refractionShader = backgroundShader = skyboxShader = quadShader = nullptr;
 
     if (display != EGL_NO_DISPLAY) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
@@ -887,6 +992,7 @@ static napi_value Init(napi_env env, napi_value exports) {
     napi_property_descriptor desc[] = {
         { "initGraphics", nullptr, InitGraphics, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "renderFrame", nullptr, RenderFrame, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "getFps", nullptr, GetFps, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "onTouch", nullptr, OnTouch, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setInputViewport", nullptr, SetInputViewport, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "releaseResource", nullptr, ReleaseResource, nullptr, nullptr, nullptr, napi_default, nullptr },

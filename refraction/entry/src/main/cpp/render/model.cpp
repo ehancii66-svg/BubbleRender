@@ -16,10 +16,12 @@
 #include "model.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#include <cfloat>
 #include <cmath>
 
 const int NUM_RGB = 3;
 const int NUM_RGBA = 4;
+constexpr float kPi = 3.14159265358979323846f;
 
 Model::Model()
 {
@@ -44,11 +46,11 @@ Model* Model::CreateSphere(float radius, int sectors, int stacks, bool withTexCo
     std::vector<Vertex> vertices;
     std::vector<unsigned int> indices;
     
-    float sectorStep = 2.0f * M_PI / sectors;
-    float stackStep = M_PI / stacks;
+    float sectorStep = 2.0f * kPi / sectors;
+    float stackStep = kPi / stacks;
     
     for (int i = 0; i <= stacks; ++i) {
-        float stackAngle = M_PI / 2.0f - i * stackStep;
+        float stackAngle = kPi / 2.0f - i * stackStep;
         float xy = radius * cosf(stackAngle);
         float z = radius * sinf(stackAngle);
         

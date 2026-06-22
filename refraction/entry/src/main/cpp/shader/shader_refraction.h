@@ -15,6 +15,8 @@ uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec3 uCameraPos;
+uniform float uTime;
+uniform float uGeometryWobbleStrength;
 
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
@@ -24,7 +26,12 @@ out mat4 vView;
 out mat4 vProj;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
+    vec3 localNormal = normalize(aNormal);
+    float wobble = sin(dot(localNormal, vec3(1.7, 0.6, 1.1)) * 3.4 + uTime * 1.15) * 0.45;
+    wobble += sin(dot(localNormal, vec3(-0.4, 1.8, 0.7)) * 4.1 - uTime * 0.82) * 0.35;
+    wobble += sin((localNormal.x - localNormal.y + localNormal.z) * 5.2 + uTime * 0.56) * 0.20;
+    vec3 deformedPos = aPos + localNormal * wobble * uGeometryWobbleStrength;
+    vec4 worldPos = uModel * vec4(deformedPos, 1.0);
     gl_Position = uProj * uView * worldPos;
     vEyeVector = normalize(worldPos.xyz - uCameraPos);
     vWorldNormal = normalize(transpose(inverse(mat3(uModel))) * aNormal);

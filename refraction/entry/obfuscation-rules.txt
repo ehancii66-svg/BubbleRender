@@ -1,0 +1,2 @@
+# Obfuscation is disabled in entry/build-profile.json5.
+# This file is kept so Hvigor can resolve the configured rule path.

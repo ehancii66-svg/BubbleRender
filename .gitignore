@@ -23,5 +23,9 @@ refraction/entry/oh_modules/
 *.har
 *.app
 
+# Local build/test artifacts
+windows/build-ninja/
+bubble-current.jpeg
+
 # Local presentation source
 /beamer.tex

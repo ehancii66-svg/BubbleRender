@@ -5,6 +5,9 @@ declare namespace libentry {
     /** Render one frame. */
     function renderFrame(): void;
 
+    /** Current averaged render frame rate. */
+    function getFps(): number;
+
     /** Forward touch event to native, type: 0=Down, 1=Up, 2=Move. */
     function onTouch(x: number, y: number, type: number): void;
 
