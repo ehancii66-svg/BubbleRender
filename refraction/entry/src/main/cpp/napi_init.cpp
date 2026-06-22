@@ -22,7 +22,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 #include <fstream>
 #include <filesystem>
@@ -56,6 +58,8 @@ Shader* backgroundShader = nullptr;
 Shader* skyboxShader = nullptr;
 
 GLuint backgroundFBO = 0, backgroundTexture = 0;
+GLuint sceneBehindFBO = 0, sceneBehindTexture = 0;
+GLuint mainSceneFBO = 0, mainSceneTexture = 0;
 GLuint backFaceFBO = 0, backFaceTexture = 0;
 GLuint depthRB = 0;
 GLuint cubemapTexture = 0;
@@ -223,35 +227,26 @@ void InitFBO(int w, int h) {
     glBindRenderbuffer(GL_RENDERBUFFER, depthRB);
     glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, fboW, fboH);
 
-    // ---------- backgroundFBO ----------
-    glGenTextures(1, &backgroundTexture);
-    glBindTexture(GL_TEXTURE_2D, backgroundTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenFramebuffers(1, &backgroundFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, backgroundFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, backgroundTexture, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        OH_LOG_ERROR(LOG_APP, "Background FBO incomplete!");
+    auto CreateColorTarget = [&](GLuint& fbo, GLuint& texture, const char* name) {
+        glGenTextures(1, &texture);
+        glBindTexture(GL_TEXTURE_2D, texture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            OH_LOG_ERROR(LOG_APP, "%{public}s FBO incomplete!", name);
+    };
 
-    // ---------- backFaceFBO ----------
-    glGenTextures(1, &backFaceTexture);
-    glBindTexture(GL_TEXTURE_2D, backFaceTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fboW, fboH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glGenFramebuffers(1, &backFaceFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, backFaceFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, backFaceTexture, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRB);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-        OH_LOG_ERROR(LOG_APP, "BackFace FBO incomplete!");
+    CreateColorTarget(backgroundFBO, backgroundTexture, "Background");
+    CreateColorTarget(sceneBehindFBO, sceneBehindTexture, "Scene-behind");
+    CreateColorTarget(mainSceneFBO, mainSceneTexture, "Main-scene");
+    CreateColorTarget(backFaceFBO, backFaceTexture, "Back-face");
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -492,7 +487,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glm::mat4 proj = g_camera.getProjectionMatrix();
 
     // ---- SetRefractUniforms: per-bubble with individual model matrix ----
-    auto SetRefractUniforms = [&](const glm::mat4& model, float localRadius, bool isBackFace, bool renderToFBO, bool interactive) {
+    auto SetRefractUniforms = [&](const glm::mat4& model, float localRadius, bool isBackFace,
+                                  bool renderToFBO, bool interactive, int iridescenceMode,
+                                  float outputAlpha) {
         glm::vec3 center = glm::vec3(model * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
         float dist = glm::length(cameraPos - center);
         float fovVert = glm::radians(g_camera.getFov());
@@ -515,7 +512,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetFloat("uSpherePixelRadius", spherePixelRadius);
         refractionShader->SetInt("uIsBackFace", isBackFace ? 1 : 0);
         refractionShader->SetInt("uRenderToFBO", renderToFBO ? 1 : 0);
-        refractionShader->SetInt("uIridescenceMode", g_IridescenceMode);
+        refractionShader->SetInt("uIridescenceMode", iridescenceMode);
         refractionShader->SetInt("uBackgroundTexture", 0);
         refractionShader->SetInt("uEnvironmentMap", 1);
         refractionShader->SetInt("uThinFilmLUT", 2);
@@ -525,30 +522,63 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetFloat("uThickness", CurrentThickness());
         refractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         refractionShader->SetFloat("uTime", (float)g_Time);
+        refractionShader->SetFloat("uOutputAlpha", outputAlpha);
         refractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
         refractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
         refractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
     };
 
-    // ---- DrawRefractiveBubbles: decorative bubbles + main interactive bubble ----
-    auto DrawRefractiveBubbles = [&](bool isBackFace, GLuint backgroundTex) {
+    auto BindRefractionInputs = [&](GLuint backgroundTex) {
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, backgroundTex);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
+    };
 
-        // Draw 18 decorative (non-interactive) bubbles
+    auto DrawDisplayBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTex,
+                                  bool straightComposite) {
+        BindRefractionInputs(backgroundTex);
+
+        std::vector<std::pair<float, const DisplayBubble*>> sortedBubbles;
+        sortedBubbles.reserve(g_DisplayBubbles.size());
         for (const auto& bubble : g_DisplayBubbles) {
+            glm::vec3 center = glm::vec3(BubbleModelMatrix(bubble, (float)g_Time)
+                * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+            glm::vec3 toCamera = center - cameraPos;
+            sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), &bubble);
+        }
+        std::sort(sortedBubbles.begin(), sortedBubbles.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        if (straightComposite) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        for (const auto& item : sortedBubbles) {
+            const auto& bubble = *item.second;
             glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
-            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, isBackFace, false);
+            float alpha = straightComposite ? 0.72f : 1.0f;
+            SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO,
+                               false, 2, alpha);
             g_DecorativeBubbleModel->Draw(*refractionShader);
         }
 
-        // Draw the main interactive bubble
+        if (straightComposite) {
+            glDepthMask(GL_TRUE);
+            if (!blendWasEnabled) glDisable(GL_BLEND);
+        }
+    };
+
+    auto DrawMainBubble = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTex) {
+        BindRefractionInputs(backgroundTex);
         glm::mat4 mainModel = glm::mat4(1.0f);
-        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, isBackFace, true);
+        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO,
+                           true, g_IridescenceMode, 1.0f);
         g_RefractModel->Draw(*refractionShader);
     };
 
@@ -587,14 +617,38 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
 
-    // ===== Pass 2: Back faces → backFaceFBO =====
+    // ===== Pass 2: Render scene behind main bubble =====
+    glBindFramebuffer(GL_FRAMEBUFFER, sceneBehindFBO);
+    glViewport(0, 0, fboW, fboH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_BACK);
+    glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
+    DrawSkybox();
+    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
+    SetBackgroundUniforms();
+    DrawDisplayBubbles(false, true, backgroundTexture, true);
+
+    // ===== Pass 3: Render main bubble back faces =====
+    // The main bubble samples the scene behind it, including decorative bubbles.
     glBindFramebuffer(GL_FRAMEBUFFER, backFaceFBO);
     glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_FRONT);
-    DrawRefractiveBubbles(true, backgroundTexture);
+    DrawMainBubble(true, true, sceneBehindTexture);
 
-    // ===== Pass 3: Front faces → screen =====
+    // ===== Pass 4: Render main-only scene =====
+    // Foreground decorative bubbles sample the main-only scene.
+    glBindFramebuffer(GL_FRAMEBUFFER, mainSceneFBO);
+    glViewport(0, 0, fboW, fboH);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glCullFace(GL_BACK);
+    glDepthFunc(GL_LEQUAL); glDepthMask(GL_FALSE);
+    DrawSkybox();
+    glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
+    SetBackgroundUniforms();
+    DrawMainBubble(false, true, backFaceTexture);
+
+    // ===== Pass 5: Composite front faces to screen =====
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, surfW, surfH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -604,7 +658,8 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     DrawSkybox();
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
-    DrawRefractiveBubbles(false, backFaceTexture);
+    DrawMainBubble(false, false, backFaceTexture);
+    DrawDisplayBubbles(false, false, mainSceneTexture, true);
 
     eglSwapBuffers(display, surface);
     return nullptr;
@@ -793,6 +848,10 @@ static napi_value ReleaseResource(napi_env env, napi_callback_info info) {
 
     if (backgroundFBO) glDeleteFramebuffers(1, &backgroundFBO);
     if (backgroundTexture) glDeleteTextures(1, &backgroundTexture);
+    if (sceneBehindFBO) glDeleteFramebuffers(1, &sceneBehindFBO);
+    if (sceneBehindTexture) glDeleteTextures(1, &sceneBehindTexture);
+    if (mainSceneFBO) glDeleteFramebuffers(1, &mainSceneFBO);
+    if (mainSceneTexture) glDeleteTextures(1, &mainSceneTexture);
     if (backFaceFBO) glDeleteFramebuffers(1, &backFaceFBO);
     if (backFaceTexture) glDeleteTextures(1, &backFaceTexture);
     if (depthRB) glDeleteRenderbuffers(1, &depthRB);

@@ -57,6 +57,7 @@ uniform sampler2D uBackgroundTexture;
 uniform samplerCube uEnvironmentMap;
 uniform sampler2D uThinFilmLUT;
 uniform float uEnvironmentReflectionStrength;
+uniform float uOutputAlpha;
 
 uniform float uThickness;
 uniform float uThicknessVar;
@@ -363,7 +364,7 @@ void main() {
         vec3 airyColor = transmitted + reflected * 1.8;
         airyColor += specularLight * 0.08 * surfaceColorScale;
         airyColor = mix(airyColor, vec3(1.0), fresnelTerm * 0.035 * surfaceColorScale);
-        FragColor = vec4(airyColor, 1.0);
+        FragColor = vec4(airyColor, uOutputAlpha);
         return;
     }
 
@@ -378,7 +379,7 @@ void main() {
     color += specularLight * 0.35 * surfaceColorScale;
     color = mix(color, vec3(1.0), fresnelTerm * 0.06 * surfaceColorScale);
 
-    FragColor = vec4(color, 1.0);
+    FragColor = vec4(color, uOutputAlpha);
 }
 )";
 
