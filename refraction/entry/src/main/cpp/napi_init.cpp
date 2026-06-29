@@ -556,8 +556,8 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
 
     // ---- SetRefractUniforms: per-bubble with individual model matrix ----
     auto SetRefractUniforms = [&](const glm::mat4& model, float localRadius, bool isBackFace,
-                                  bool renderToFBO, bool interactive, int iridescenceMode,
-                                  float outputAlpha) {
+                                  bool renderToFBO, bool interactive, float geometryWobbleStrength,
+                                  int iridescenceMode, float outputAlpha) {
         float targetW = renderToFBO ? static_cast<float>(g_FBOWidth) : w;
         float targetH = renderToFBO ? static_cast<float>(g_FBOHeight) : h;
         glm::vec3 center = glm::vec3(model * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
@@ -572,7 +572,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetMat4("uView", view);
         refractionShader->SetMat4("uProj", proj);
         refractionShader->SetVec3("uCameraPos", cameraPos);
-        refractionShader->SetFloat("uGeometryWobbleStrength", interactive ? 0.085f : 0.0f);
+        refractionShader->SetFloat("uGeometryWobbleStrength", geometryWobbleStrength);
         refractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         refractionShader->SetFloat("uShininess", g_Shininess);
         refractionShader->SetFloat("uDiffuseness", g_Diffuseness);
@@ -635,7 +635,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
             float alpha = straightComposite ? 0.72f : 1.0f;
             SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO,
-                               false, 2, alpha);
+                               false, 0.055f, 2, alpha);
             g_DecorativeBubbleModel->Draw(*refractionShader);
         }
 
@@ -649,7 +649,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         BindRefractionInputs(backgroundTex);
         glm::mat4 mainModel = glm::mat4(1.0f);
         SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO,
-                           true, g_IridescenceMode, 1.0f);
+                           true, 0.085f, g_IridescenceMode, 1.0f);
         g_RefractModel->Draw(*refractionShader);
     };
 

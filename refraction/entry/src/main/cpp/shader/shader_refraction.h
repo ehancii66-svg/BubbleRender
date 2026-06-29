@@ -27,9 +27,10 @@ out mat4 vProj;
 
 void main() {
     vec3 localNormal = normalize(aNormal);
-    float wobble = sin(dot(localNormal, vec3(1.7, 0.6, 1.1)) * 3.4 + uTime * 1.15) * 0.45;
-    wobble += sin(dot(localNormal, vec3(-0.4, 1.8, 0.7)) * 4.1 - uTime * 0.82) * 0.35;
-    wobble += sin((localNormal.x - localNormal.y + localNormal.z) * 5.2 + uTime * 0.56) * 0.20;
+    float phase = dot(uModel[3].xyz, vec3(0.73, 1.37, 0.51));
+    float wobble = sin(dot(localNormal, vec3(1.7, 0.6, 1.1)) * 3.4 + uTime * 1.15 + phase) * 0.45;
+    wobble += sin(dot(localNormal, vec3(-0.4, 1.8, 0.7)) * 4.1 - uTime * 0.82 + phase * 1.7) * 0.35;
+    wobble += sin((localNormal.x - localNormal.y + localNormal.z) * 5.2 + uTime * 0.56 - phase * 0.6) * 0.20;
     vec3 deformedPos = aPos + localNormal * wobble * uGeometryWobbleStrength;
     vec4 worldPos = uModel * vec4(deformedPos, 1.0);
     gl_Position = uProj * uView * worldPos;

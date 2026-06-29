@@ -20,6 +20,8 @@ basePosition, radius, phase, windAmplitude, floatAmplitude, speed
 
 Decorative bubble animation is intentionally cheap on the CPU. Their positions are updated with low-cost `sin`/`cos` motion in `BubbleModelMatrix`. The expensive part is not the movement itself, but drawing each bubble with the refraction fragment shader.
 
+Decorative bubbles also use the lightweight vertex-shader wobble path. They do not run DBSTT CPU simulation. This keeps the soft deformation visible without multiplying the expensive vortex-sheet simulation by the number of decorative bubbles.
+
 ## Main Bubble Deformation
 
 The original high-cost path was full CPU-side DBSTT/vortex-sheet deformation:
@@ -37,7 +39,7 @@ The current version keeps the deformation visible while lowering CPU cost:
 - `g_Sim.substepsPerFrame = 1`
 - `kSimFrameInterval = 6`
 - CPU simulation and vertex upload run once every 6 rendered frames
-- the vertex shader adds a lightweight low-frequency wobble only to the main bubble
+- the vertex shader adds a lightweight low-frequency wobble to the main bubble and decorative bubbles
 
 This combines slow physical deformation with continuous visual wobble.
 
