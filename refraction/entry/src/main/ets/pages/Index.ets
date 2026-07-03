@@ -42,6 +42,7 @@ struct Index {
     private touchMoved: boolean = false
     private pinchDistance: number = 0
     private pinchCameraDistance: number = 7.0
+    private suppressSingleTouchAfterPinch: boolean = false
 
     private distanceBetweenTouches(a: TouchObject, b: TouchObject): number {
         const dx = a.x - b.x
@@ -189,6 +190,7 @@ struct Index {
         }
 
         if (points.length >= 2) {
+            this.suppressSingleTouchAfterPinch = true
             const currentPinch = this.distanceBetweenTouches(points[0], points[1])
             if (event.type === TouchType.Down || this.pinchDistance <= 1) {
                 this.pinchDistance = currentPinch
@@ -206,6 +208,7 @@ struct Index {
         let touchType = 2
         switch (event.type) {
             case TouchType.Down:
+                this.suppressSingleTouchAfterPinch = false
                 touchType = 0
                 this.lastTouchX = touch.x
                 this.lastTouchY = touch.y
@@ -218,6 +221,9 @@ struct Index {
             case TouchType.Move:
                 touchType = 2
                 break
+        }
+        if (this.suppressSingleTouchAfterPinch) {
+            return
         }
         const hasArea = this.compW > 0 && this.compH > 0
         const localX = hasArea ? (touch.x - this.compX) : touch.x
