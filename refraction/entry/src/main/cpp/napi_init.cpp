@@ -120,6 +120,7 @@ static float g_BubbleRadius = 1.5f;
 static int   g_SimSubdivs  = 3;
 static float g_SimPerturb  = 0.16f;
 static bool  g_SimPaused   = false;
+static bool  g_VisualPaused = false;
 static constexpr int kSimFrameInterval = 6;
 static int g_SimFrameCounter = 0;
 
@@ -285,58 +286,205 @@ void InitFBO(int w, int h) {
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static napi_value MakeBool(napi_env env, bool value) {
+    napi_value result;
+    napi_get_boolean(env, value, &result);
+    return result;
+}
+
+static void ReleaseGraphicsResources() {
+    delete g_RefractModel;
+    delete g_DecorativeBubbleModel;
+    delete g_SkyboxModel;
+    g_RefractModel = nullptr;
+    g_DecorativeBubbleModel = nullptr;
+    g_SkyboxModel = nullptr;
+    for (auto* sphere : g_BackgroundModels){
+        delete sphere;
+    }
+    g_BackgroundModels.clear();
+    g_SpherePositions.clear();
+    g_DisplayBubbles.clear();
+
+    if (cubemapTexture) glDeleteTextures(1, &cubemapTexture);
+    if (g_ThinFilmLUTTexture) glDeleteTextures(1, &g_ThinFilmLUTTexture);
+
+    if (backgroundFBO) glDeleteFramebuffers(1, &backgroundFBO);
+    if (backgroundTexture) glDeleteTextures(1, &backgroundTexture);
+    if (sceneBehindFBO) glDeleteFramebuffers(1, &sceneBehindFBO);
+    if (sceneBehindTexture) glDeleteTextures(1, &sceneBehindTexture);
+    if (mainSceneFBO) glDeleteFramebuffers(1, &mainSceneFBO);
+    if (mainSceneTexture) glDeleteTextures(1, &mainSceneTexture);
+    if (finalSceneFBO) glDeleteFramebuffers(1, &finalSceneFBO);
+    if (finalSceneTexture) glDeleteTextures(1, &finalSceneTexture);
+    if (backFaceFBO) glDeleteFramebuffers(1, &backFaceFBO);
+    if (backFaceTexture) glDeleteTextures(1, &backFaceTexture);
+    if (depthRB) glDeleteRenderbuffers(1, &depthRB);
+    if (quadVBO) glDeleteBuffers(1, &quadVBO);
+    if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
+
+    cubemapTexture = 0;
+    g_ThinFilmLUTTexture = 0;
+    backgroundFBO = backgroundTexture = 0;
+    sceneBehindFBO = sceneBehindTexture = 0;
+    mainSceneFBO = mainSceneTexture = 0;
+    finalSceneFBO = finalSceneTexture = 0;
+    backFaceFBO = backFaceTexture = 0;
+    depthRB = 0;
+    quadVBO = quadVAO = 0;
+    g_FBOWidth = 0;
+    g_FBOHeight = 0;
+
+    delete refractionShader;
+    delete backgroundShader;
+    delete skyboxShader;
+    delete quadShader;
+    refractionShader = nullptr;
+    backgroundShader = nullptr;
+    skyboxShader = nullptr;
+    quadShader = nullptr;
+
+    if (display != EGL_NO_DISPLAY) {
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (surface != EGL_NO_SURFACE) eglDestroySurface(display, surface);
+        if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
+        eglTerminate(display);
+    }
+    display = EGL_NO_DISPLAY;
+    surface = EGL_NO_SURFACE;
+    context = EGL_NO_CONTEXT;
+
+    if (nativeWindow) {
+        OH_NativeWindow_DestroyNativeWindow(nativeWindow);
+        nativeWindow = nullptr;
+    }
+
+    if (g_ResourceManager) {
+        OH_ResourceManager_ReleaseNativeResourceManager(g_ResourceManager);
+        g_ResourceManager = nullptr;
+    }
+
+    width = 100.0f;
+    height = 100.0f;
+    g_InputViewportWidth = 0.0f;
+    g_InputViewportHeight = 0.0f;
+    g_LastFrameTime = 0.0;
+    g_CurrentFps = 0.0;
+    g_FpsLogWindowStart = 0.0;
+    g_FpsLogFrameCount = 0;
+}
+
 static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     size_t argc = 3;
     napi_value args[3];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
 
+    if (display != EGL_NO_DISPLAY && surface != EGL_NO_SURFACE && context != EGL_NO_CONTEXT) {
+        OH_LOG_INFO(LOG_APP, "InitGraphics skipped because graphics is already initialized");
+        return MakeBool(env, true);
+    }
+    ReleaseGraphicsResources();
+
     g_ResourceManager = OH_ResourceManager_InitNativeResourceManager(env, args[0]);
-    if (g_ResourceManager == nullptr) return nullptr;
+    if (g_ResourceManager == nullptr) return MakeBool(env, false);
 
     size_t strSize = 0;
     char strBuf[256] = {0};
-    if (napi_get_value_string_utf8(env, args[1], strBuf, sizeof(strBuf), &strSize) != napi_ok) return nullptr;
+    if (napi_get_value_string_utf8(env, args[1], strBuf, sizeof(strBuf), &strSize) != napi_ok) {
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
     std::string surfaceIdStr(strBuf);
-    if (surfaceIdStr.empty()) return nullptr;
+    if (surfaceIdStr.empty()) {
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
     uint64_t surfaceId = std::stoull(surfaceIdStr);
     OH_NativeWindow_CreateNativeWindowFromSurfaceId(surfaceId, &nativeWindow);
-    if (nativeWindow == nullptr) return nullptr;
+    if (nativeWindow == nullptr) {
+        OH_LOG_ERROR(LOG_APP, "CreateNativeWindowFromSurfaceId failed, surfaceId=%{public}s", surfaceIdStr.c_str());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
+    int32_t oldFormat = 0;
+    int32_t getFormatRet = OH_NativeWindow_NativeWindowHandleOpt(nativeWindow, GET_FORMAT, &oldFormat);
+    int32_t setFormatRet = OH_NativeWindow_NativeWindowHandleOpt(nativeWindow, SET_FORMAT,
+        NATIVEBUFFER_PIXEL_FMT_RGBA_8888);
+    int32_t newFormat = 0;
+    OH_NativeWindow_NativeWindowHandleOpt(nativeWindow, GET_FORMAT, &newFormat);
+    OH_LOG_INFO(LOG_APP,
+        "native window format getRet=%{public}d old=%{public}d setRet=%{public}d new=%{public}d",
+        getFormatRet, oldFormat, setFormatRet, newFormat);
     
     char filesDirBuf[512] = {0};
-    if (napi_get_value_string_utf8(env, args[2], filesDirBuf, sizeof(filesDirBuf), &strSize) != napi_ok) return nullptr;
+    if (napi_get_value_string_utf8(env, args[2], filesDirBuf, sizeof(filesDirBuf), &strSize) != napi_ok) {
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
     std::string filesDir(filesDirBuf);
     OH_LOG_INFO(LOG_APP, "filesDir = %{public}s", filesDir.c_str());
 
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) return nullptr;
+    if (display == EGL_NO_DISPLAY) {
+        OH_LOG_ERROR(LOG_APP, "eglGetDisplay failed, error=0x%{public}x", eglGetError());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
 
-    eglInitialize(display, nullptr, nullptr);
+    if (eglInitialize(display, nullptr, nullptr) == EGL_FALSE) {
+        OH_LOG_ERROR(LOG_APP, "eglInitialize failed, error=0x%{public}x", eglGetError());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
 
     EGLConfig config;
     EGLint numConfig = 0;
     EGLint attribs[] = {
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
         EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
         EGL_DEPTH_SIZE, 24,
         EGL_NONE
     };
-    eglChooseConfig(display, attribs, &config, 1, &numConfig);
+    if (eglChooseConfig(display, attribs, &config, 1, &numConfig) == EGL_FALSE || numConfig <= 0) {
+        OH_LOG_ERROR(LOG_APP, "eglChooseConfig failed, error=0x%{public}x, numConfig=%{public}d", eglGetError(), numConfig);
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
 
     EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     context = eglCreateContext(display, config, EGL_NO_CONTEXT, contextAttribs);
+    if (context == EGL_NO_CONTEXT) {
+        OH_LOG_ERROR(LOG_APP, "eglCreateContext failed, error=0x%{public}x", eglGetError());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
     surface = eglCreateWindowSurface(display, config, (EGLNativeWindowType)nativeWindow, nullptr);
-    if (eglMakeCurrent(display, surface, surface, context) == EGL_FALSE) return nullptr;
+    if (surface == EGL_NO_SURFACE) {
+        OH_LOG_ERROR(LOG_APP, "eglCreateWindowSurface failed, error=0x%{public}x", eglGetError());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
+    if (eglMakeCurrent(display, surface, surface, context) == EGL_FALSE) {
+        OH_LOG_ERROR(LOG_APP, "eglMakeCurrent failed, error=0x%{public}x", eglGetError());
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
+    }
 
     EGLint surfW = 0, surfH = 0;
     eglQuerySurface(display, surface, EGL_WIDTH, &surfW);
     eglQuerySurface(display, surface, EGL_HEIGHT, &surfH);
-    if (surfW > 0 && surfH > 0) {
-        width = static_cast<float>(surfW);
-        height = static_cast<float>(surfH);
-        OH_LOG_INFO(LOG_APP, "surface size = %{public}dx%{public}d", surfW, surfH);
+    if (surfW <= 1 || surfH <= 1) {
+        OH_LOG_ERROR(LOG_APP, "surface size invalid = %{public}dx%{public}d", surfW, surfH);
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
+    width = static_cast<float>(surfW);
+    height = static_cast<float>(surfH);
+    OH_LOG_INFO(LOG_APP, "surface size = %{public}dx%{public}d", surfW, surfH);
 
     const GLubyte* glVendor = glGetString(GL_VENDOR);
     const GLubyte* glRenderer = glGetString(GL_RENDERER);
@@ -357,7 +505,8 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     if (refractionShader->m_id == 0 || backgroundShader->m_id == 0 ||
         skyboxShader->m_id == 0 || quadShader->m_id == 0){
         OH_LOG_ERROR(LOG_APP, "create shader failed");
-        return nullptr;
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
 
     // ---- Cubemap ----
@@ -369,7 +518,8 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     cubemapTexture = LoadCubemapTexture(g_ResourceManager, cubemapFaces);
     if (cubemapTexture == 0) {
         OH_LOG_ERROR(LOG_APP, "Failed to load cubemap texture");
-        return nullptr;
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
 
     // ---- Thin-film LUT texture ----
@@ -402,14 +552,16 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     g_SkyboxModel = Model::CreateSkyboxCube();
     if (!g_SkyboxModel) {
         OH_LOG_ERROR(LOG_APP, "create skybox failed");
-        return nullptr;
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
 
     // ---- Decorative bubble model (smooth sphere) ----
     g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
     if (!g_DecorativeBubbleModel) {
         OH_LOG_ERROR(LOG_APP, "create decorative bubble model failed");
-        return nullptr;
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
 
     // 15 display bubbles distributed around the scene.
@@ -449,7 +601,8 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     }
     if (!g_RefractModel) {
         OH_LOG_ERROR(LOG_APP, "create refract model failed");
-        return nullptr;
+        ReleaseGraphicsResources();
+        return MakeBool(env, false);
     }
 
     // ---- Background spheres ----
@@ -496,7 +649,8 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     if (g_LastFrameTime == 0.0) g_LastFrameTime = now;
     double dt = now - g_LastFrameTime;
     g_LastFrameTime = now;
-    g_Time += dt;
+    const double visualDt = g_VisualPaused ? 0.0 : dt;
+    g_Time += visualDt;
     if (dt > 1e-6) {
         double instantFps = 1.0 / dt;
         g_CurrentFps = (g_CurrentFps <= 0.0)
@@ -520,9 +674,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     }
 
     // ---- Touch decay ----
-    if (!g_TouchPressed) {
-        g_TouchStrength *= expf(-3.2f * (float)dt);
-        g_TouchVelocity  *= expf(-5.0f * (float)dt);
+    if (!g_TouchPressed && !g_VisualPaused) {
+        g_TouchStrength *= expf(-3.2f * (float)visualDt);
+        g_TouchVelocity  *= expf(-5.0f * (float)visualDt);
         if (g_TouchStrength < 0.01f) {
             g_TouchStrength = 0.0f;
             g_TouchPoint = glm::vec2(-10.0f, -10.0f);
@@ -542,7 +696,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     g_camera.setTarget(glm::vec3(0.0f, 0.0f, 0.0f));
 
     // ---- DBSTT simulation ----
-    if (!g_SimPaused && g_RefractModel && g_RefractModel->getMeshCount() > 0) {
+    if (!g_SimPaused && !g_VisualPaused && g_RefractModel && g_RefractModel->getMeshCount() > 0) {
         if ((g_SimFrameCounter++ % kSimFrameInterval) == 0) {
             g_Sim.update(1.0f / 60.0f);
             auto verts = buildVerticesFromSim(g_Sim);
@@ -750,7 +904,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glEnable(GL_DEPTH_TEST);
 
     eglSwapBuffers(display, surface);
-    return nullptr;
+    return MakeBool(env, true);
 }
 
 static napi_value SetInputViewport(napi_env env, napi_callback_info info)
@@ -892,7 +1046,8 @@ static napi_value SetCameraDistance(napi_env env, napi_callback_info info) {
 }
 static napi_value ToggleSimulation(napi_env env, napi_callback_info info) {
     g_SimPaused = !g_SimPaused;
-    OH_LOG_INFO(LOG_APP, "Simulation %{public}s", g_SimPaused ? "PAUSED" : "RUNNING");
+    g_VisualPaused = g_SimPaused;
+    OH_LOG_INFO(LOG_APP, "Visual simulation %{public}s", g_VisualPaused ? "PAUSED" : "RUNNING");
     return nullptr;
 }
 static napi_value SetThickness(napi_env env, napi_callback_info info) {
@@ -925,65 +1080,23 @@ static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_Sim.timeStep = 0.001f;
     g_Sim.substepsPerFrame = 1;
     g_SimFrameCounter = 0;
+    g_SimPaused = false;
+    g_VisualPaused = false;
     g_Sim.surfaceTensionStrength = 15.0f;
     g_Sim.circulationDiffusion = 0.0005f;
     g_Sim.flipSurfaceTensionSign = true;
+    g_AiryThickness = 740.0f;
+    g_KimLutThickness = 740.0f;
+    g_ThicknessVar = 160.0f;
+    g_RefractionStrength = 0.35f;
+    g_EdgeDistortionBoost = 2.2f;
+    g_EnvironmentReflectionStrength = 0.65f;
+    g_CameraDistance = 7.0f;
     return nullptr;
 }
 
 static napi_value ReleaseResource(napi_env env, napi_callback_info info) {
-    delete g_RefractModel;
-    delete g_DecorativeBubbleModel;
-    delete g_SkyboxModel;
-    g_RefractModel = nullptr;
-    g_DecorativeBubbleModel = nullptr;
-    g_SkyboxModel = nullptr;
-    for (auto* sphere : g_BackgroundModels){
-        delete sphere;
-    }
-    g_BackgroundModels.clear();
-    
-    if (cubemapTexture) glDeleteTextures(1, &cubemapTexture);
-    if (g_ThinFilmLUTTexture) glDeleteTextures(1, &g_ThinFilmLUTTexture);
-
-    if (backgroundFBO) glDeleteFramebuffers(1, &backgroundFBO);
-    if (backgroundTexture) glDeleteTextures(1, &backgroundTexture);
-    if (sceneBehindFBO) glDeleteFramebuffers(1, &sceneBehindFBO);
-    if (sceneBehindTexture) glDeleteTextures(1, &sceneBehindTexture);
-    if (mainSceneFBO) glDeleteFramebuffers(1, &mainSceneFBO);
-    if (mainSceneTexture) glDeleteTextures(1, &mainSceneTexture);
-    if (finalSceneFBO) glDeleteFramebuffers(1, &finalSceneFBO);
-    if (finalSceneTexture) glDeleteTextures(1, &finalSceneTexture);
-    if (backFaceFBO) glDeleteFramebuffers(1, &backFaceFBO);
-    if (backFaceTexture) glDeleteTextures(1, &backFaceTexture);
-    if (depthRB) glDeleteRenderbuffers(1, &depthRB);
-    if (quadVBO) glDeleteBuffers(1, &quadVBO);
-    if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
-
-    delete refractionShader;
-    delete backgroundShader;
-    delete skyboxShader;
-    delete quadShader;
-    refractionShader = backgroundShader = skyboxShader = quadShader = nullptr;
-
-    if (display != EGL_NO_DISPLAY) {
-        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (surface != EGL_NO_SURFACE) eglDestroySurface(display, surface);
-        if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
-        eglTerminate(display);
-        display = EGL_NO_DISPLAY;
-    }
-
-    if (nativeWindow) {
-        OH_NativeWindow_DestroyNativeWindow(nativeWindow);
-        nativeWindow = nullptr;
-    }
-
-    if (g_ResourceManager) {
-        OH_ResourceManager_ReleaseNativeResourceManager(g_ResourceManager);
-        g_ResourceManager = nullptr;
-    }
-
+    ReleaseGraphicsResources();
     return nullptr;
 }
 

@@ -1,6 +1,6 @@
 declare namespace libentry {
     /** Initialize OpenGL/EGL rendering context. */
-    function initGraphics(resourceManager: object, surfaceId: string, fileDir: string): void;
+    function initGraphics(resourceManager: object, surfaceId: string, fileDir: string): boolean;
 
     /** Render one frame. */
     function renderFrame(): void;
