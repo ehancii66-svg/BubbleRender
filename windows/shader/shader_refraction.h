@@ -15,6 +15,9 @@ uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec3 uCameraPos;
+uniform float uTime;
+uniform float uGeometryWobbleStrength;
+uniform float uContactDeformStrength;
 
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
@@ -22,16 +25,48 @@ out vec3 vWorldPos;
 out vec2 vUV;
 out mat4 vView;
 out mat4 vProj;
+out float vContactMask;
+out float vContactRim;
+out float vSharedFilmMask;
 
 void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
+    vec3 localNormal = normalize(aNormal);
+    float phase = dot(uModel[3].xyz, vec3(0.73, 1.37, 0.51));
+    float t = uTime + phase;
+
+    // Low-order surface modes: broad, slow deformations similar to
+    // surface-tension-damped bubble oscillation, not high-frequency noise.
+    float quadrupoleY = localNormal.y * localNormal.y - 0.333333;
+    float quadrupoleXZ = localNormal.x * localNormal.x - localNormal.z * localNormal.z;
+    float saddle = localNormal.x * localNormal.z;
+    float skew = localNormal.y * (localNormal.x - localNormal.z);
+    float wobble = 0.95 * quadrupoleY * sin(t * 0.42);
+    wobble += 0.72 * quadrupoleXZ * sin(t * 0.31 + 1.7);
+    wobble += 0.58 * saddle * cos(t * 0.37 + 0.9);
+    wobble += 0.38 * skew * sin(t * 0.26 + 2.4);
+
+    // A very small capillary ripple rides on top of the large-scale shape.
+    wobble += 0.10 * sin(dot(localNormal, vec3(1.7, 0.6, 1.1)) * 3.0 + t * 0.18);
+    vec3 deformedPos = aPos + localNormal * wobble * uGeometryWobbleStrength;
+
+    // Contact-side deformation. The C++ model matrix aligns local +X with
+    // the direction toward the other bubble, so this flattens only the side
+    // that is actually touching and slightly bulges the surrounding rim.
+    float contactMask = exp(-pow((1.0 - localNormal.x) / 0.34, 2.0)) * uContactDeformStrength;
+    float rimMask = exp(-pow((localNormal.x - 0.62) / 0.20, 2.0)) * uContactDeformStrength;
+    deformedPos.x -= contactMask * 0.280;
+    deformedPos.yz += localNormal.yz * rimMask * 0.070;
+    vec4 worldPos = uModel * vec4(deformedPos, 1.0);
+    gl_Position = uProj * uView * worldPos;
     vEyeVector = normalize(worldPos.xyz - uCameraPos);
     vWorldNormal = normalize(transpose(inverse(mat3(uModel))) * aNormal);
     vWorldPos = worldPos.xyz;
     vUV = aTexCoord;
     vView = uView;
     vProj = uProj;
+    vContactMask = contactMask;
+    vContactRim = rimMask;
+    vSharedFilmMask = 1.0 - smoothstep(-0.98, -0.92, aTexCoord.x);
 }
 )";
 
@@ -70,6 +105,9 @@ in vec3 vWorldPos;
 in vec2 vUV;
 in mat4 vView;
 in mat4 vProj;
+in float vContactMask;
+in float vContactRim;
+in float vSharedFilmMask;
 
 out vec4 FragColor;
 
@@ -370,6 +408,9 @@ void main() {
         + (drainage - 0.5) * 0.46;
     float dynamicThickness = uThickness
         + thicknessPattern * uThicknessVar
+        - vContactMask * 70.0
+        + vContactRim * 85.0
+        - vSharedFilmMask * 15.0
         + touchMask * 190.0
         + touchRipple * 95.0;
     vec3 kimReflectance = kim2012Iridescence(NdotV, dynamicThickness);
@@ -463,7 +504,8 @@ void main() {
         airyColor += specularLight * 0.08 * surfaceColorScale;
         airyColor = mix(airyColor, vec3(1.0), fresnelTerm * 0.035 * surfaceColorScale);
 
-        FragColor = vec4(airyColor, uOutputAlpha);
+        float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask);
+        FragColor = vec4(airyColor, localAlpha);
         return;
     }
 
@@ -484,7 +526,8 @@ void main() {
     // Fresnel white edge glow (environment reflection at grazing angles)
     color = mix(color, vec3(1.0), fresnelTerm * 0.06 * surfaceColorScale);
 
-    FragColor = vec4(color, uOutputAlpha);
+    float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask);
+    FragColor = vec4(color, localAlpha);
 }
 )";
 
