@@ -18,6 +18,12 @@ uniform vec3 uCameraPos;
 uniform float uTime;
 uniform float uGeometryWobbleStrength;
 uniform float uContactDeformStrength;
+uniform int uVisualContactCount;
+uniform vec3 uVisualContactPlanePoints[4];
+uniform vec3 uVisualContactPlaneNormals[4];
+uniform float uVisualContactBlendWidths[4];
+uniform float uVisualContactStrengths[4];
+uniform int uForceSharedFilm;
 
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
@@ -28,6 +34,7 @@ out mat4 vProj;
 out float vContactMask;
 out float vContactRim;
 out float vSharedFilmMask;
+out float vShellCoverage;
 
 void main() {
     vec3 localNormal = normalize(aNormal);
@@ -66,7 +73,22 @@ void main() {
     vProj = uProj;
     vContactMask = contactMask;
     vContactRim = rimMask;
-    vSharedFilmMask = 1.0 - smoothstep(-0.98, -0.92, aTexCoord.x);
+    vSharedFilmMask = max(1.0 - smoothstep(-0.98, -0.92, aTexCoord.x),
+                          float(uForceSharedFilm));
+    float shellCoverage = 1.0;
+    for (int i = 0; i < 4; ++i) {
+        if (i >= uVisualContactCount) {
+            break;
+        }
+        float signedDistance = dot(worldPos.xyz - uVisualContactPlanePoints[i],
+                                   normalize(uVisualContactPlaneNormals[i]));
+        float blendWidth = max(uVisualContactBlendWidths[i], 0.0001);
+        float clippedCoverage = 1.0 - smoothstep(-blendWidth, blendWidth,
+                                                 signedDistance);
+        shellCoverage *= mix(1.0, clippedCoverage,
+                             uVisualContactStrengths[i]);
+    }
+    vShellCoverage = clamp(shellCoverage, 0.0, 1.0);
 }
 )";
 
@@ -108,6 +130,7 @@ in mat4 vProj;
 in float vContactMask;
 in float vContactRim;
 in float vSharedFilmMask;
+in float vShellCoverage;
 
 out vec4 FragColor;
 
@@ -504,7 +527,7 @@ void main() {
         airyColor += specularLight * 0.08 * surfaceColorScale;
         airyColor = mix(airyColor, vec3(1.0), fresnelTerm * 0.035 * surfaceColorScale);
 
-        float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask);
+        float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask) * vShellCoverage;
         FragColor = vec4(airyColor, localAlpha);
         return;
     }
@@ -526,7 +549,7 @@ void main() {
     // Fresnel white edge glow (environment reflection at grazing angles)
     color = mix(color, vec3(1.0), fresnelTerm * 0.06 * surfaceColorScale);
 
-    float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask);
+    float localAlpha = uOutputAlpha * mix(1.0, 0.65, vSharedFilmMask) * vShellCoverage;
     FragColor = vec4(color, localAlpha);
 }
 )";
