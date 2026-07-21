@@ -110,8 +110,8 @@ struct DiscMeshData {
 struct DisplayBubble {
     struct SurfaceControl {
         glm::vec3 localDir;
-        float offset;
-        float velocity;
+        glm::vec3 displacement;
+        glm::vec3 velocity;
     };
 
     int id;
@@ -407,45 +407,209 @@ static int BubbleActiveContactCount(int bubbleIndex)
 static std::vector<DisplayBubble::SurfaceControl> MakeSurfaceControls(float phase)
 {
     std::vector<DisplayBubble::SurfaceControl> controls;
-    controls.reserve(14);
+    controls.reserve(26);
 
-    const glm::vec3 dirs[] = {
-        { 1.0f,  0.0f,  0.0f}, {-1.0f,  0.0f,  0.0f},
-        { 0.0f,  1.0f,  0.0f}, { 0.0f, -1.0f,  0.0f},
-        { 0.0f,  0.0f,  1.0f}, { 0.0f,  0.0f, -1.0f},
-        { 1.0f,  1.0f,  0.0f}, {-1.0f,  1.0f,  0.0f},
-        { 1.0f, -1.0f,  0.0f}, {-1.0f, -1.0f,  0.0f},
-        { 1.0f,  0.0f,  1.0f}, {-1.0f,  0.0f,  1.0f},
-        { 0.0f,  1.0f, -1.0f}, { 0.0f, -1.0f, -1.0f}
-    };
-
-    for (int i = 0; i < 14; ++i) {
-        DisplayBubble::SurfaceControl control{};
-        control.localDir = glm::normalize(dirs[i]);
-        control.offset = std::sin(phase + (float)i * 1.37f) * 0.006f;
-        control.velocity = 0.0f;
-        controls.push_back(control);
+    int index = 0;
+    for (int z = -1; z <= 1; ++z) {
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                if (x == 0 && y == 0 && z == 0) {
+                    continue;
+                }
+                DisplayBubble::SurfaceControl control{};
+                control.localDir = glm::normalize(glm::vec3((float)x, (float)y, (float)z));
+                float initialOffset = std::sin(phase + (float)index * 1.37f) * 0.0035f;
+                control.displacement = control.localDir * initialOffset;
+                control.velocity = glm::vec3(0.0f);
+                controls.push_back(control);
+                ++index;
+            }
+        }
     }
 
     return controls;
 }
 
-static void UpdateSurfaceControls(DisplayBubble& bubble, const glm::vec3& contactAxis, float contactStrength, float dt)
+static void UpdatePersistentSurfaceDynamics(float dt)
 {
-    for (auto& control : bubble.surfaceControls) {
-        float directionalMask = std::max(glm::dot(control.localDir, contactAxis), 0.0f);
-        float target = directionalMask * contactStrength * -0.055f;
-        float acceleration = (target - control.offset) * 18.0f - control.velocity * 5.2f;
-        control.velocity += acceleration * dt;
-        control.offset += control.velocity * dt;
-        control.offset = glm::clamp(control.offset, -0.075f, 0.035f);
+    if (dt <= 0.0f) {
+        return;
+    }
+
+    std::vector<std::vector<glm::vec3>> targets(g_DisplayBubbles.size());
+    std::vector<std::vector<float>> contactWeights(g_DisplayBubbles.size());
+    for (size_t bubbleIndex = 0; bubbleIndex < g_DisplayBubbles.size(); ++bubbleIndex) {
+        DisplayBubble& bubble = g_DisplayBubbles[bubbleIndex];
+        targets[bubbleIndex].resize(bubble.surfaceControls.size(), glm::vec3(0.0f));
+        contactWeights[bubbleIndex].resize(bubble.surfaceControls.size(), 0.0f);
+        for (size_t controlIndex = 0; controlIndex < bubble.surfaceControls.size(); ++controlIndex) {
+            const auto& control = bubble.surfaceControls[controlIndex];
+            float freeWave = std::sin((float)g_Time * (0.72f + bubble.speed * 0.12f) +
+                                      bubble.phase + (float)controlIndex * 1.17f);
+            targets[bubbleIndex][controlIndex] = control.localDir * (freeWave * 0.0035f);
+        }
+    }
+
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if ((!pair.candidate && !pair.bonded) ||
+            pair.a < 0 || pair.b < 0 ||
+            pair.a >= (int)g_DisplayBubbles.size() ||
+            pair.b >= (int)g_DisplayBubbles.size()) {
+            continue;
+        }
+
+        const DisplayBubble& a = g_DisplayBubbles[(size_t)pair.a];
+        const DisplayBubble& b = g_DisplayBubbles[(size_t)pair.b];
+        glm::vec3 axis = b.position - a.position;
+        float distance = glm::length(axis);
+        if (distance <= 1e-5f) {
+            continue;
+        }
+        axis /= distance;
+        float pairStrength = glm::clamp(std::max(pair.contactActivation,
+                                                 pair.bonded ? 0.25f + 0.75f * pair.interactionCompression : 0.0f),
+                                        0.0f, 1.0f);
+        float radiusRatioA = glm::clamp(pair.contactRadius / std::max(a.radius, 0.001f), 0.0f, 0.90f);
+        float radiusRatioB = glm::clamp(pair.contactRadius / std::max(b.radius, 0.001f), 0.0f, 0.90f);
+
+        auto accumulateContact = [&](int bubbleIndex, const glm::vec3& contactAxis,
+                                     float radiusRatio) {
+            const DisplayBubble& bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+            float coneCos = glm::mix(0.90f,
+                                     std::sqrt(std::max(1.0f - radiusRatio * radiusRatio, 0.0f)),
+                                     pairStrength);
+            coneCos = glm::clamp(coneCos, 0.28f, 0.94f);
+            for (size_t controlIndex = 0; controlIndex < bubble.surfaceControls.size(); ++controlIndex) {
+                const glm::vec3 direction = bubble.surfaceControls[controlIndex].localDir;
+                float alignment = glm::dot(direction, contactAxis);
+                float capMask = Smooth01((alignment - coneCos) /
+                                         std::max(1.0f - coneCos, 0.001f));
+                float rimMask = std::exp(-std::pow((alignment - (coneCos - 0.08f)) / 0.10f, 2.0f));
+                float weight = pairStrength * std::max(capMask, 0.32f * rimMask);
+                if (weight <= 0.0001f) {
+                    continue;
+                }
+
+                glm::vec3 radial = direction - contactAxis * alignment;
+                if (glm::length(radial) > 1e-5f) {
+                    radial = glm::normalize(radial);
+                }
+                glm::vec3 contactTarget =
+                    -contactAxis * (0.018f + 0.070f * pairStrength) * capMask +
+                    radial * (0.004f + 0.014f * pairStrength) * rimMask;
+                float oldWeight = contactWeights[(size_t)bubbleIndex][controlIndex];
+                float newWeight = oldWeight + weight;
+                targets[(size_t)bubbleIndex][controlIndex] =
+                    (targets[(size_t)bubbleIndex][controlIndex] * std::max(1.0f - oldWeight, 0.0f) +
+                     contactTarget * weight) /
+                    std::max(std::max(1.0f - oldWeight, 0.0f) + weight, 0.001f);
+                contactWeights[(size_t)bubbleIndex][controlIndex] = glm::clamp(newWeight, 0.0f, 1.0f);
+            }
+        };
+
+        accumulateContact(pair.a, axis, radiusRatioA);
+        accumulateContact(pair.b, -axis, radiusRatioB);
+    }
+
+    // Match the material velocity of the two surface caps. This is a low-cost
+    // analogue of multi-MELP's matching-velocity/contact coupling condition.
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if ((!pair.candidate && !pair.bonded) ||
+            pair.a < 0 || pair.b < 0 ||
+            pair.a >= (int)g_DisplayBubbles.size() ||
+            pair.b >= (int)g_DisplayBubbles.size()) {
+            continue;
+        }
+        DisplayBubble& a = g_DisplayBubbles[(size_t)pair.a];
+        DisplayBubble& b = g_DisplayBubbles[(size_t)pair.b];
+        float coupling = glm::clamp(pair.contactActivation, 0.0f, 1.0f);
+        if (coupling <= 0.001f) {
+            continue;
+        }
+
+        glm::vec3 pairAxis = b.position - a.position;
+        float pairDistance = glm::length(pairAxis);
+        if (pairDistance <= 1e-5f) {
+            continue;
+        }
+        pairAxis /= pairDistance;
+        auto pairControlWeight = [&](const DisplayBubble& bubble,
+                                     const DisplayBubble::SurfaceControl& control,
+                                     const glm::vec3& contactAxis) {
+            float radiusRatio = glm::clamp(pair.contactRadius /
+                                           std::max(bubble.radius, 0.001f),
+                                           0.0f, 0.90f);
+            float coneCos = glm::mix(0.90f,
+                                     std::sqrt(std::max(1.0f - radiusRatio * radiusRatio, 0.0f)),
+                                     coupling);
+            coneCos = glm::clamp(coneCos, 0.28f, 0.94f);
+            float alignment = glm::dot(control.localDir, contactAxis);
+            return Smooth01((alignment - coneCos) /
+                            std::max(1.0f - coneCos, 0.001f));
+        };
+
+        glm::vec3 averageA(0.0f), averageB(0.0f);
+        float weightA = 0.0f, weightB = 0.0f;
+        for (size_t i = 0; i < a.surfaceControls.size(); ++i) {
+            float w = pairControlWeight(a, a.surfaceControls[i], pairAxis);
+            averageA += (a.velocity + a.surfaceControls[i].velocity * a.radius) * w;
+            weightA += w;
+        }
+        for (size_t i = 0; i < b.surfaceControls.size(); ++i) {
+            float w = pairControlWeight(b, b.surfaceControls[i], -pairAxis);
+            averageB += (b.velocity + b.surfaceControls[i].velocity * b.radius) * w;
+            weightB += w;
+        }
+        averageA = weightA > 1e-5f ? averageA / weightA : a.velocity;
+        averageB = weightB > 1e-5f ? averageB / weightB : b.velocity;
+        float invMassA = BubbleInvMass(a);
+        float invMassB = BubbleInvMass(b);
+        glm::vec3 sharedVelocity = (averageA * invMassB + averageB * invMassA) /
+                                   std::max(invMassA + invMassB, 0.001f);
+        float velocityBlend = 1.0f - std::exp(-dt * glm::mix(6.0f, 32.0f, coupling));
+
+        for (size_t i = 0; i < a.surfaceControls.size(); ++i) {
+            float w = pairControlWeight(a, a.surfaceControls[i], pairAxis) * coupling;
+            glm::vec3 desired = (sharedVelocity - a.velocity) / std::max(a.radius, 0.001f);
+            a.surfaceControls[i].velocity = glm::mix(a.surfaceControls[i].velocity,
+                                                     desired, velocityBlend * w);
+        }
+        for (size_t i = 0; i < b.surfaceControls.size(); ++i) {
+            float w = pairControlWeight(b, b.surfaceControls[i], -pairAxis) * coupling;
+            glm::vec3 desired = (sharedVelocity - b.velocity) / std::max(b.radius, 0.001f);
+            b.surfaceControls[i].velocity = glm::mix(b.surfaceControls[i].velocity,
+                                                     desired, velocityBlend * w);
+        }
+    }
+
+    for (size_t bubbleIndex = 0; bubbleIndex < g_DisplayBubbles.size(); ++bubbleIndex) {
+        DisplayBubble& bubble = g_DisplayBubbles[bubbleIndex];
+        if (bubble.state == DisplayBubble::State::Dead) {
+            continue;
+        }
+        for (size_t controlIndex = 0; controlIndex < bubble.surfaceControls.size(); ++controlIndex) {
+            auto& control = bubble.surfaceControls[controlIndex];
+            float contactWeight = contactWeights[bubbleIndex][controlIndex];
+            float stiffness = glm::mix(14.0f, 48.0f, contactWeight);
+            float damping = glm::mix(5.0f, 7.2f, contactWeight);
+            glm::vec3 acceleration =
+                (targets[bubbleIndex][controlIndex] - control.displacement) * stiffness -
+                control.velocity * damping;
+            control.velocity += acceleration * dt;
+            control.displacement += control.velocity * dt;
+            float displacementLength = glm::length(control.displacement);
+            if (displacementLength > 0.115f) {
+                control.displacement *= 0.115f / displacementLength;
+                control.velocity *= 0.65f;
+            }
+        }
     }
 }
 
 static DiscMeshData BuildContactFilmDisc(int segments = 80, int rings = 10)
 {
     DiscMeshData disc;
-    const float curvature = 0.06f;
+    const float curvature = 0.0f;
     const size_t vertexCount = 1 + (size_t)segments * (size_t)rings;
     disc.positions.reserve(vertexCount);
     disc.normals.reserve(vertexCount);
@@ -494,6 +658,68 @@ static DiscMeshData BuildContactFilmDisc(int segments = 80, int rings = 10)
     }
 
     return disc;
+}
+
+static std::vector<Vertex> BuildCurvedContactFilmVertices(float normalizedCurvature,
+                                                          int segments = 72,
+                                                          int rings = 10)
+{
+    std::vector<Vertex> vertices;
+    vertices.reserve(1 + (size_t)segments * (size_t)rings);
+    normalizedCurvature = glm::clamp(normalizedCurvature, -0.85f, 0.85f);
+
+    auto makeVertex = [&](float x, float y, float radial) {
+        Vertex vertex{};
+        float z = 0.0f;
+        glm::vec3 normal(0.0f, 0.0f, 1.0f);
+        float curvatureMagnitude = std::abs(normalizedCurvature);
+        if (curvatureMagnitude > 1e-4f) {
+            float sign = normalizedCurvature >= 0.0f ? 1.0f : -1.0f;
+            float sphereRadius = 1.0f / curvatureMagnitude;
+            float boundaryHeight = std::sqrt(std::max(sphereRadius * sphereRadius - 1.0f,
+                                                       1e-6f));
+            float localHeight = std::sqrt(std::max(sphereRadius * sphereRadius -
+                                                   radial * radial, 1e-6f));
+            z = sign * (localHeight - boundaryHeight);
+            normal = glm::normalize(glm::vec3(sign * x / localHeight,
+                                              sign * y / localHeight,
+                                              1.0f));
+        }
+        vertex.Position = glm::vec3(x, y, z);
+        vertex.Normal = normal;
+        vertex.TexCoords = glm::vec2(x * 0.5f + 0.5f, y * 0.5f + 0.5f);
+        vertex.Tangent = glm::vec3(0.0f);
+        vertex.Bitangent = glm::vec3(0.0f);
+        return vertex;
+    };
+
+    vertices.push_back(makeVertex(0.0f, 0.0f, 0.0f));
+    for (int ring = 1; ring <= rings; ++ring) {
+        float radial = (float)ring / (float)rings;
+        for (int i = 0; i < segments; ++i) {
+            float angle = 2.0f * 3.14159265358979323846f *
+                          (float)i / (float)segments;
+            float x = std::cos(angle) * radial;
+            float y = std::sin(angle) * radial;
+            vertices.push_back(makeVertex(x, y, radial));
+        }
+    }
+    return vertices;
+}
+
+static float ContactFilmWorldCurvature(const DisplayBubble& a,
+                                       const DisplayBubble& b,
+                                       const BubbleContactPair& pair)
+{
+    float radiusA = std::max(a.radius, 0.001f);
+    float radiusB = std::max(b.radius, 0.001f);
+    // Young-Laplace pressure gives k_partition = 1/rA - 1/rB for a
+    // normal directed from A to B. The sign bends the film toward the
+    // larger, lower-pressure bubble. Equal radii naturally give a plane.
+    float curvature = 1.0f / radiusA - 1.0f / radiusB;
+    float filmRadius = std::max(pair.contactRadius, 0.002f);
+    float maximumCurvature = 0.85f / filmRadius;
+    return glm::clamp(curvature, -maximumCurvature, maximumCurvature);
 }
 
 static std::vector<unsigned int> BuildContactBubblePatchIndices(int segments = kContactBubbleSegments,
@@ -1178,7 +1404,6 @@ static glm::mat4 MakeContactFilmModel(const DisplayBubble& a, const DisplayBubbl
 
     float pulse = 1.0f + sinf(time * 0.70f + (float)(pair.a * 1.7f + pair.b)) * 0.008f;
     float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
-    float filmSag = filmRadius * 0.012f;
     glm::vec3 filmCenter = pair.contactFrameInitialized
         ? pair.filteredPlaneCenter
         : (pa + pb) * 0.5f;
@@ -1188,7 +1413,7 @@ static glm::mat4 MakeContactFilmModel(const DisplayBubble& a, const DisplayBubbl
     basis[1] = glm::vec4(binormal, 0.0f);
     basis[2] = glm::vec4(axis, 0.0f);
     basis[3] = glm::vec4(filmCenter, 1.0f);
-    return basis * glm::scale(glm::mat4(1.0f), glm::vec3(filmRadius, filmRadius, filmSag));
+    return basis * glm::scale(glm::mat4(1.0f), glm::vec3(filmRadius));
 }
 
 static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
@@ -1210,7 +1435,8 @@ static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
     float scale = std::max(0.001f, bubble.radius) * (wobble + bridgePulse);
     for (const auto& control : bubble.surfaceControls) {
         float worldMask = std::max(glm::dot(control.localDir, bubble.contactAxis), 0.0f);
-        scale += bubble.radius * control.offset * worldMask * 0.20f;
+        float radialOffset = glm::dot(control.displacement, control.localDir);
+        scale += bubble.radius * radialOffset * worldMask * 0.08f;
     }
     glm::mat4 model = glm::translate(glm::mat4(1.0f), pos);
     if (bubble.contactStrength > 0.01f) {
@@ -1258,6 +1484,15 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
     float radialScale = 1.0f / std::sqrt(std::max(axialScale, 0.25f));
     float contactShare = 1.0f /
         std::sqrt((float)BubbleActiveContactCount(bubbleIndex));
+    float meanControlRadialOffset = 0.0f;
+    for (const auto& control : bubble.surfaceControls) {
+        meanControlRadialOffset += glm::dot(control.displacement, control.localDir);
+    }
+    if (!bubble.surfaceControls.empty()) {
+        meanControlRadialOffset /= (float)bubble.surfaceControls.size();
+    }
+    float persistentVolumeScale = glm::clamp(1.0f - meanControlRadialOffset,
+                                             0.94f, 1.06f);
 
     for (Vertex& vertex : vertices) {
         glm::vec3 direction = glm::normalize(vertex.Position);
@@ -1265,6 +1500,17 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
         glm::vec3 axial = motionAxis * alongMotion * axialScale;
         glm::vec3 radial = (direction - motionAxis * alongMotion) * radialScale;
         glm::vec3 position = axial + radial;
+        glm::vec3 persistentSurfaceOffset(0.0f);
+        float persistentWeight = 0.0f;
+        for (const auto& control : bubble.surfaceControls) {
+            float alignment = std::max(glm::dot(direction, control.localDir), 0.0f);
+            float weight = std::pow(alignment, 8.0f);
+            persistentSurfaceOffset += control.displacement * weight;
+            persistentWeight += weight;
+        }
+        if (persistentWeight > 1e-5f) {
+            position += persistentSurfaceOffset / persistentWeight;
+        }
         glm::vec3 contactOffset(0.0f);
         float vertexContactSum = 0.0f;
 
@@ -1318,8 +1564,11 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
                 radialDirection = glm::normalize(radialDirection);
             }
 
-            contactOffset -= contactDirection * (0.008f + 0.075f * deformationStrength) * contactMask;
-            contactOffset += radialDirection * (0.005f + 0.018f * deformationStrength) * rimMask;
+            // Keep only a small analytic correction for an exact seal against
+            // the contact plane. Most deformation now comes from persistent
+            // surface-control dynamics above.
+            contactOffset -= contactDirection * (0.006f + 0.040f * deformationStrength) * contactMask;
+            contactOffset += radialDirection * (0.003f + 0.010f * deformationStrength) * rimMask;
             vertexContactSum += deformationStrength * contactMask;
         }
 
@@ -1329,7 +1578,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
             contactOffset *= maxOffset / offsetLength;
         }
         float volumeCompensation = 1.0f + std::min(vertexContactSum, 2.0f) * 0.012f;
-        vertex.Position = position * volumeCompensation + contactOffset;
+        vertex.Position = position * (volumeCompensation * persistentVolumeScale) + contactOffset;
         vertex.Normal = glm::normalize(vertex.Position);
     }
 
@@ -1448,8 +1697,8 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         ? 0.82f * crowdingScale *
           Smooth01(std::max(pair.contactTime - kSharedFilmTime, 0.0f) / 2.0f)
         : 0.0f;
-    float compressionTarget = glm::clamp(std::max({normalizedOverlap,
-                                                   impactDrive,
+    float compressionTarget = glm::clamp(std::max({0.72f * normalizedOverlap,
+                                                   0.50f * impactDrive,
                                                    bondedCompressionDrive,
                                                    demoExternalDrive}),
                                          0.0f, 1.0f);
@@ -1461,13 +1710,13 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         pair.interactionCompression + pair.interactionVelocity * dt, 0.0f, 1.0f);
     float filmGrowth = std::max(
         std::pow(Smooth01(pair.contactTime / 1.05f), 0.55f),
-        0.32f * pair.contactActivation);
+        0.45f * pair.contactActivation);
     float crowdingRetention = std::pow(crowdingScale, 0.12f);
     float targetContactRatio = (0.52f + 0.22f * pair.interactionCompression) *
                                crowdingRetention;
     float targetContactRadius = minRadius * targetContactRatio * filmGrowth;
-    float radiusAcceleration = (targetContactRadius - pair.contactRadius) * 28.0f -
-                               pair.contactRadiusVelocity * 9.5f;
+    float radiusAcceleration = (targetContactRadius - pair.contactRadius) * 42.0f -
+                               pair.contactRadiusVelocity * 14.0f;
     pair.contactRadiusVelocity += radiusAcceleration * dt;
     pair.contactRadius = glm::clamp(pair.contactRadius + pair.contactRadiusVelocity * dt,
                                     0.0f, minRadius * 0.78f);
@@ -1527,9 +1776,6 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     b.filmThickness = pair.filmThickness;
     a.contactAxis = n;
     b.contactAxis = -n;
-    UpdateSurfaceControls(a, n, pair.bridgeStrength, dt);
-    UpdateSurfaceControls(b, -n, pair.bridgeStrength, dt);
-
     if (pair.bridgeStrength > g_BridgeStrength) {
         g_BridgeStrength = pair.bridgeStrength;
         g_BridgeDirection = glm::normalize((a.position + b.position) * 0.5f);
@@ -1611,7 +1857,6 @@ static void UpdateDisplayBubbleInteractions(float dt)
         }
         if (bubble.state == DisplayBubble::State::Free) {
             bubble.filmThickness += (1.0f - bubble.filmThickness) * std::min(1.0f, dt * 0.4f);
-            UpdateSurfaceControls(bubble, bubble.contactAxis, 0.0f, dt);
         }
     }
 
@@ -1711,11 +1956,18 @@ static void UpdateDisplayBubbleInteractions(float dt)
             pair.candidateExitTime = 0.0f;
             if (firstBondFrame) {
                 float inheritedContact = glm::clamp(pair.preContactProgress, 0.0f, 1.0f);
+                glm::vec3 bondNormal = delta / dist;
+                float incomingSpeed = std::max(-glm::dot(b.velocity - a.velocity,
+                                                         bondNormal), 0.0f);
                 pair.contactTime = std::max(pair.contactTime, 0.20f * inheritedContact);
                 pair.contactRadius = std::max(pair.contactRadius,
                     minRadius * 0.14f * inheritedContact);
+                pair.contactRadiusVelocity = std::max(pair.contactRadiusVelocity,
+                                                      incomingSpeed * 0.22f);
                 pair.interactionCompression = std::max(pair.interactionCompression,
                     0.10f * inheritedContact);
+                pair.interactionVelocity = std::max(pair.interactionVelocity,
+                    incomingSpeed / std::max(minRadius, 0.001f) * 0.06f);
             }
             pair.restDistance = contactDistance;
             pair.targetVolume = a.targetVolume + b.targetVolume;
@@ -1847,10 +2099,17 @@ static void UpdateDisplayBubbleInteractions(float dt)
             if (pair.bonded || relNormalSpeed < 0.0f) {
                 float invMassA = BubbleInvMass(a);
                 float invMassB = BubbleInvMass(b);
-                float dampingRate = glm::mix(1.5f, 22.0f,
-                                             glm::clamp(pair.contactActivation,
-                                                        0.0f, 1.0f));
+                float activation = glm::clamp(pair.contactActivation, 0.0f, 1.0f);
+                float dampingRate = pair.bonded
+                    ? glm::mix(1.2f, 6.2f, activation)
+                    : glm::mix(0.5f, 3.5f, activation);
                 float normalDamping = 1.0f - std::exp(-dampingRate * dt);
+                float absorbedClosingSpeed = std::max(-relNormalSpeed, 0.0f) * normalDamping;
+                if (absorbedClosingSpeed > 0.0f) {
+                    float minRadius = std::max(std::min(a.radius, b.radius), 0.001f);
+                    pair.contactRadiusVelocity += absorbedClosingSpeed * 0.25f;
+                    pair.interactionVelocity += absorbedClosingSpeed / minRadius * 0.05f;
+                }
                 float impulseMagnitude = (-relNormalSpeed * normalDamping) /
                                          (invMassA + invMassB);
                 glm::vec3 impulse = n * impulseMagnitude;
@@ -1882,8 +2141,6 @@ static void UpdateDisplayBubbleInteractions(float dt)
             bubble.filmThickness = std::max(0.32f, bubble.filmThickness - dt * 0.035f * strength);
             bubble.contactAxis = -n;
             bubble.state = strength > 0.65f ? DisplayBubble::State::SharedFilm : DisplayBubble::State::Touch;
-            UpdateSurfaceControls(bubble, -n, strength, dt);
-
             float relSpeed = glm::dot(bubble.velocity, n);
             if (relSpeed < 0.0f) {
                 bubble.velocity -= n * relSpeed * 0.72f;
@@ -1898,6 +2155,8 @@ static void UpdateDisplayBubbleInteractions(float dt)
             bubble.contactTime = std::max(0.0f, bubble.contactTime - dt * 1.2f);
         }
     }
+
+    UpdatePersistentSurfaceDynamics(dt);
 
     g_ContactPairs.erase(
         std::remove_if(g_ContactPairs.begin(), g_ContactPairs.end(), [](const BubbleContactPair& pair) {
@@ -2572,6 +2831,13 @@ static void RenderFrame()
             const DisplayBubble& b = g_DisplayBubbles[(size_t)pair.b];
             float visibility = pair.contactActivation * pair.contactActivation;
             float alpha = (straightComposite ? 0.16f : 0.24f) * visibility;
+            float pulse = 1.0f + std::sin((float)g_Time * 0.70f +
+                                          (float)(pair.a * 1.7f + pair.b)) * 0.008f;
+            float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
+            float normalizedCurvature = ContactFilmWorldCurvature(a, b, pair) * filmRadius;
+            if (Mesh* mesh = g_ContactFilmModel->getMesh(0)) {
+                mesh->updateVertices(BuildCurvedContactFilmVertices(normalizedCurvature));
+            }
             glm::mat4 filmModel = MakeContactFilmModel(a, b, pair, (float)g_Time);
             SetRefractUniforms(filmModel, std::max(pair.contactRadius, 0.01f),
                                isBackFace, renderToFBO, false,
