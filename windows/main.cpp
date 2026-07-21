@@ -24,6 +24,7 @@
 #include "render/shader.h"
 #include "render/contact_geometry.h"
 #include "simulation/display_bubble.h"
+#include "simulation/display_bubble_simulation.h"
 #include "simulation/vortex_sheet.h"
 #include "shader/shader_refraction.h"
 #include "shader/shader_background.h"
@@ -33,7 +34,6 @@
 #include <cstdio>
 #include <cmath>
 #include <iostream>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <string>
@@ -162,250 +162,9 @@ static float Smooth01(float x)
     return x * x * (3.0f - 2.0f * x);
 }
 
-static float BubbleVolume(float radius)
-{
-    static constexpr float kPi = 3.14159265358979323846f;
-    return (4.0f / 3.0f) * kPi * radius * radius * radius;
-}
-
-static float RadiusFromVolume(float volume)
-{
-    static constexpr float kPi = 3.14159265358979323846f;
-    return std::cbrt(std::max(volume, 0.0f) * 3.0f / (4.0f * kPi));
-}
-
-static float BubbleMass(const DisplayBubble& bubble)
-{
-    return std::max(BubbleVolume(std::max(bubble.radius, 0.001f)), 0.001f);
-}
-
-static float BubbleInvMass(const DisplayBubble& bubble)
-{
-    return 1.0f / BubbleMass(bubble);
-}
-
 static uint64_t AllocateBubbleId()
 {
     return g_NextBubbleId++;
-}
-
-static int FindBubbleIndexById(uint64_t id)
-{
-    if (id == 0) {
-        return -1;
-    }
-    for (size_t i = 0; i < g_DisplayBubbles.size(); ++i) {
-        if (g_DisplayBubbles[i].id == id) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static bool ResolveContactPairIndices(const BubbleContactPair& pair, int& aIndex, int& bIndex)
-{
-    aIndex = FindBubbleIndexById(pair.a);
-    bIndex = FindBubbleIndexById(pair.b);
-    return aIndex >= 0 && bIndex >= 0;
-}
-
-static bool PairContainsBubbleIndex(const BubbleContactPair& pair, int bubbleIndex, int* otherIndex = nullptr)
-{
-    if (bubbleIndex < 0 || bubbleIndex >= (int)g_DisplayBubbles.size()) {
-        return false;
-    }
-    int aIndex = -1;
-    int bIndex = -1;
-    if (!ResolveContactPairIndices(pair, aIndex, bIndex)) {
-        return false;
-    }
-    if (aIndex == bubbleIndex) {
-        if (otherIndex) {
-            *otherIndex = bIndex;
-        }
-        return true;
-    }
-    if (bIndex == bubbleIndex) {
-        if (otherIndex) {
-            *otherIndex = aIndex;
-        }
-        return true;
-    }
-    return false;
-}
-
-static int FindContactPair(uint64_t a, uint64_t b)
-{
-    if (a > b) {
-        std::swap(a, b);
-    }
-
-    for (size_t i = 0; i < g_ContactPairs.size(); ++i) {
-        const auto& pair = g_ContactPairs[i];
-        if (pair.a == a && pair.b == b) {
-            return (int)i;
-        }
-    }
-    return -1;
-}
-
-static int EnsureContactPairById(uint64_t a, uint64_t b)
-{
-    if (a == 0 || b == 0 || a == b) {
-        return -1;
-    }
-    if (a > b) {
-        std::swap(a, b);
-    }
-
-    int existing = FindContactPair(a, b);
-    if (existing >= 0) {
-        return existing;
-    }
-
-    BubbleContactPair pair;
-    pair.a = a;
-    pair.b = b;
-    pair.filmThickness = 1.0f;
-    pair.state = BubbleContactPair::State::Free;
-    pair.active = false;
-    g_ContactPairs.push_back(pair);
-    return (int)g_ContactPairs.size() - 1;
-}
-
-static int EnsureContactPairByIndex(int aIndex, int bIndex)
-{
-    if (aIndex < 0 || bIndex < 0 ||
-        aIndex >= (int)g_DisplayBubbles.size() ||
-        bIndex >= (int)g_DisplayBubbles.size()) {
-        return -1;
-    }
-    return EnsureContactPairById(g_DisplayBubbles[(size_t)aIndex].id,
-                                 g_DisplayBubbles[(size_t)bIndex].id);
-}
-
-struct BubbleGridCell {
-    int x;
-    int y;
-    int z;
-
-    bool operator==(const BubbleGridCell& other) const
-    {
-        return x == other.x && y == other.y && z == other.z;
-    }
-};
-
-struct BubbleGridCellHash {
-    size_t operator()(const BubbleGridCell& cell) const
-    {
-        size_t hx = std::hash<int>{}(cell.x);
-        size_t hy = std::hash<int>{}(cell.y);
-        size_t hz = std::hash<int>{}(cell.z);
-        return hx ^ (hy << 1) ^ (hz << 7);
-    }
-};
-
-static BubbleGridCell BubbleCellForPosition(const glm::vec3& position, float cellSize)
-{
-    return {
-        (int)std::floor(position.x / cellSize),
-        (int)std::floor(position.y / cellSize),
-        (int)std::floor(position.z / cellSize)
-    };
-}
-
-static std::vector<std::pair<int, int>> BuildBubbleBroadPhasePairs()
-{
-    std::vector<std::pair<int, int>> pairs;
-    if (g_DisplayBubbles.size() < 2) {
-        return pairs;
-    }
-
-    float maximumRadius = 0.001f;
-    for (const auto& bubble : g_DisplayBubbles) {
-        if (bubble.state != DisplayBubble::State::Dead) {
-            maximumRadius = std::max(maximumRadius, bubble.radius);
-        }
-    }
-    float cellSize = maximumRadius * 2.40f;
-
-    std::unordered_map<BubbleGridCell, std::vector<int>, BubbleGridCellHash> grid;
-    grid.reserve(g_DisplayBubbles.size() * 2);
-    for (size_t i = 0; i < g_DisplayBubbles.size(); ++i) {
-        const auto& bubble = g_DisplayBubbles[i];
-        if (bubble.state == DisplayBubble::State::Dead) {
-            continue;
-        }
-        grid[BubbleCellForPosition(bubble.position, cellSize)].push_back((int)i);
-    }
-
-    pairs.reserve(g_DisplayBubbles.size() * 4);
-    for (size_t i = 0; i < g_DisplayBubbles.size(); ++i) {
-        const auto& bubble = g_DisplayBubbles[i];
-        if (bubble.state == DisplayBubble::State::Dead) {
-            continue;
-        }
-        BubbleGridCell centerCell = BubbleCellForPosition(bubble.position, cellSize);
-        for (int dz = -1; dz <= 1; ++dz) {
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    BubbleGridCell neighbor{
-                        centerCell.x + dx,
-                        centerCell.y + dy,
-                        centerCell.z + dz
-                    };
-                    auto found = grid.find(neighbor);
-                    if (found == grid.end()) {
-                        continue;
-                    }
-                    for (int j : found->second) {
-                        if (j > (int)i) {
-                            pairs.emplace_back((int)i, j);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return pairs;
-}
-
-static int BubbleActiveContactCount(int bubbleIndex)
-{
-    int count = 0;
-    for (const BubbleContactPair& pair : g_ContactPairs) {
-        if ((pair.candidate || pair.bonded) &&
-            PairContainsBubbleIndex(pair, bubbleIndex)) {
-            ++count;
-        }
-    }
-    return std::max(count, 1);
-}
-
-static std::vector<DisplayBubble::SurfaceControl> MakeSurfaceControls(float phase)
-{
-    std::vector<DisplayBubble::SurfaceControl> controls;
-    controls.reserve(26);
-
-    int index = 0;
-    for (int z = -1; z <= 1; ++z) {
-        for (int y = -1; y <= 1; ++y) {
-            for (int x = -1; x <= 1; ++x) {
-                if (x == 0 && y == 0 && z == 0) {
-                    continue;
-                }
-                DisplayBubble::SurfaceControl control{};
-                control.localDir = glm::normalize(glm::vec3((float)x, (float)y, (float)z));
-                float initialOffset = std::sin(phase + (float)index * 1.37f) * 0.0035f;
-                control.displacement = control.localDir * initialOffset;
-                control.velocity = glm::vec3(0.0f);
-                controls.push_back(control);
-                ++index;
-            }
-        }
-    }
-
-    return controls;
 }
 
 static void UpdatePersistentSurfaceDynamics(float dt)
@@ -432,7 +191,7 @@ static void UpdatePersistentSurfaceDynamics(float dt)
         int aIndex = -1;
         int bIndex = -1;
         if ((!pair.candidate && !pair.bonded) ||
-            !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+            !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
             continue;
         }
 
@@ -495,7 +254,7 @@ static void UpdatePersistentSurfaceDynamics(float dt)
         int aIndex = -1;
         int bIndex = -1;
         if ((!pair.candidate && !pair.bonded) ||
-            !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+            !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
             continue;
         }
         DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
@@ -694,7 +453,7 @@ static uint64_t AddBubble(const glm::vec3& position,
 
 static bool RemoveBubble(uint64_t id)
 {
-    int bubbleIndex = FindBubbleIndexById(id);
+    int bubbleIndex = FindBubbleIndexById(g_DisplayBubbles, id);
     if (bubbleIndex < 0) {
         return false;
     }
@@ -1036,7 +795,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
     float axialScale = 1.0f + speedStretch + freeOscillation;
     float radialScale = 1.0f / std::sqrt(std::max(axialScale, 0.25f));
     float contactShare = 1.0f /
-        std::sqrt((float)BubbleActiveContactCount(bubbleIndex));
+        std::sqrt((float)BubbleActiveContactCount(g_DisplayBubbles, g_ContactPairs, bubbleIndex));
     float meanControlRadialOffset = 0.0f;
     for (const auto& control : bubble.surfaceControls) {
         meanControlRadialOffset += glm::dot(control.displacement, control.localDir);
@@ -1070,7 +829,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
         for (const BubbleContactPair& pair : g_ContactPairs) {
             int otherIndex = -1;
             if ((!pair.candidate && !pair.bonded) ||
-                !PairContainsBubbleIndex(pair, bubbleIndex, &otherIndex)) {
+                !PairContainsBubbleIndex(g_DisplayBubbles, pair, bubbleIndex, &otherIndex)) {
                 continue;
             }
             glm::vec3 contactDirection =
@@ -1159,7 +918,7 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
 {
     int aIndex = -1;
     int bIndex = -1;
-    if (!pair.active || !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+    if (!pair.active || !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
         pair.contactTime = std::max(0.0f, pair.contactTime - dt * 1.8f);
         pair.bridgeStrength = std::max(0.0f, pair.bridgeStrength - dt * 2.4f);
         pair.geometryBlend = std::max(0.0f, pair.geometryBlend - dt * 2.0f);
@@ -1232,7 +991,8 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
                              0.235f * fusionProgress;
     float actualOverlapRatio = (contactDistance - dist) / std::max(minRadius, 0.001f);
     float crowdingScale = 1.0f / std::sqrt((float)std::max(
-        BubbleActiveContactCount(aIndex), BubbleActiveContactCount(bIndex)));
+        BubbleActiveContactCount(g_DisplayBubbles, g_ContactPairs, aIndex),
+        BubbleActiveContactCount(g_DisplayBubbles, g_ContactPairs, bIndex)));
     float commandedOverlapRatio = baseOverlapRatio +
                                   0.240f * crowdingScale * pair.interactionCompression;
     float normalizedOverlap = Smooth01((actualOverlapRatio - commandedOverlapRatio) / 0.10f);
@@ -1360,7 +1120,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         int aIndex = -1;
         int bIndex = -1;
         if (pair.candidate && !pair.bonded &&
-            ResolveContactPairIndices(pair, aIndex, bIndex)) {
+            ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
             const DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
             const DisplayBubble& b = g_DisplayBubbles[(size_t)bIndex];
             float minRadius = std::min(a.radius, b.radius);
@@ -1381,7 +1141,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         for (auto& pair : g_ContactPairs) {
             int aIndex = -1;
             int bIndex = -1;
-            if (ResolveContactPairIndices(pair, aIndex, bIndex)) {
+            if (ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
                 pair.active = true;
             }
         }
@@ -1421,7 +1181,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
             int aIndex = -1;
             int bIndex = -1;
             if (!pair.active || pair.contactTime > 0.0f ||
-                !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+                !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
                 continue;
             }
             DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
@@ -1445,7 +1205,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         }
     }
 
-    std::vector<std::pair<int, int>> broadPhasePairs = BuildBubbleBroadPhasePairs();
+    std::vector<std::pair<int, int>> broadPhasePairs = BuildBubbleBroadPhasePairs(g_DisplayBubbles);
     for (const auto& candidatePair : broadPhasePairs) {
             int i = candidatePair.first;
             int j = candidatePair.second;
@@ -1467,7 +1227,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
                 a.velocity += n * capillaryPull * dt;
                 b.velocity -= n * capillaryPull * dt;
 
-                int pairIndex = EnsureContactPairByIndex(i, j);
+                int pairIndex = EnsureContactPairByIndex(g_DisplayBubbles, g_ContactPairs, i, j);
                 if (pairIndex < 0) {
                     continue;
                 }
@@ -1504,7 +1264,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
                 continue;
             }
 
-            int pairIndex = EnsureContactPairByIndex(i, j);
+            int pairIndex = EnsureContactPairByIndex(g_DisplayBubbles, g_ContactPairs, i, j);
             if (pairIndex < 0) {
                 continue;
             }
@@ -1539,7 +1299,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         for (auto& pair : g_ContactPairs) {
             int aIndex = -1;
             int bIndex = -1;
-            if (!pair.active || !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+            if (!pair.active || !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
                 continue;
             }
 
@@ -1642,7 +1402,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
     for (auto& pair : g_ContactPairs) {
         int aIndex = -1;
         int bIndex = -1;
-        if (!pair.active || !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+        if (!pair.active || !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
             UpdateBubblePair(pair, dt);
             continue;
         }
@@ -1730,7 +1490,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         const auto& pair = g_ContactPairs.front();
         int aIndex = -1;
         int bIndex = -1;
-        if (ResolveContactPairIndices(pair, aIndex, bIndex)) {
+        if (ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
             const auto& a = g_DisplayBubbles[(size_t)aIndex];
             const auto& b = g_DisplayBubbles[(size_t)bIndex];
             float dist = glm::length(b.position - a.position);
@@ -2095,7 +1855,7 @@ static void RenderFrame()
         for (const BubbleContactPair& pair : g_ContactPairs) {
             int otherIndex = -1;
             if ((!pair.candidate && !pair.bonded) || pair.contactRadius <= 0.001f ||
-                !PairContainsBubbleIndex(pair, bubbleIndex, &otherIndex) ||
+                !PairContainsBubbleIndex(g_DisplayBubbles, pair, bubbleIndex, &otherIndex) ||
                 visualContactCount >= 4) {
                 continue;
             }
@@ -2104,7 +1864,7 @@ static void RenderFrame()
             }
             int aIndex = -1;
             int bIndex = -1;
-            ResolveContactPairIndices(pair, aIndex, bIndex);
+            ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex);
             glm::vec3 planeNormal = aIndex == bubbleIndex
                 ? pair.filteredNormal
                 : -pair.filteredNormal;
@@ -2212,7 +1972,7 @@ static void RenderFrame()
             int aIndex = -1;
             int bIndex = -1;
             if ((!pair.candidate && !pair.bonded) || pair.contactRadius <= 0.002f ||
-                !ResolveContactPairIndices(pair, aIndex, bIndex)) {
+                !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
                 continue;
             }
             const DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
