@@ -1,0 +1,97 @@
+#ifndef WINDOWS_SIMULATION_DISPLAY_BUBBLE_H
+#define WINDOWS_SIMULATION_DISPLAY_BUBBLE_H
+
+#include <cstdint>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+class Model;
+
+struct DisplayBubble {
+    struct SurfaceControl {
+        glm::vec3 localDir;
+        glm::vec3 displacement;
+        glm::vec3 velocity;
+    };
+
+    uint64_t id = 0;
+    glm::vec3 basePosition = glm::vec3(0.0f);
+    glm::vec3 position = glm::vec3(0.0f);
+    glm::vec3 velocity = glm::vec3(0.0f);
+    float radius = 0.0f;
+    float initialRadius = 0.0f;
+    float targetVolume = 0.0f;
+    float phase = 0.0f;
+    float windAmplitude = 0.0f;
+    float floatAmplitude = 0.0f;
+    float speed = 0.0f;
+    float alpha = 1.0f;
+    float contactTime = 0.0f;
+    float mergeProgress = 0.0f;
+    float filmThickness = 1.0f;
+    float contactStrength = 0.0f;
+    glm::vec3 contactAxis = glm::vec3(1.0f, 0.0f, 0.0f);
+    bool volumeTransferred = false;
+
+    enum class State {
+        Free,
+        Touch,
+        SharedFilm,
+        NeckForming,
+        Merged,
+        Pinching,
+        Separated,
+        Burst,
+        Dead
+    } state = State::Free;
+
+    std::vector<SurfaceControl> surfaceControls;
+};
+
+struct BubbleContactPair {
+    enum class State {
+        Free,
+        Touch,
+        SharedFilm,
+        NeckForming,
+        Merged,
+        Pinching,
+        Separated,
+        Burst
+    };
+
+    uint64_t a = 0;
+    uint64_t b = 0;
+    float contactTime = 0.0f;
+    float visualTransitionTime = 0.0f;
+    float preContactProgress = 0.0f;
+    float contactActivation = 0.0f;
+    float interactionCompression = 0.0f;
+    float interactionVelocity = 0.0f;
+    float bridgeStrength = 0.0f;
+    float geometryBlend = 0.0f;
+    float neckRadius = 0.0f;
+    float contactRadius = 0.0f;
+    float contactRadiusVelocity = 0.0f;
+    glm::vec3 filteredNormal = glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec3 filteredPlaneCenter = glm::vec3(0.0f);
+    bool contactFrameInitialized = false;
+    float filmThickness = 1.0f;
+    float ruptureRisk = 0.0f;
+    float restDistance = 0.0f;
+    float targetVolume = 0.0f;
+    State state = State::Free;
+    bool active = false;
+    bool bonded = false;
+    bool candidate = false;
+    bool persistentRenderPair = false;
+    float candidateExitTime = 0.0f;
+};
+
+struct DisplayBubbleModelSlot {
+    uint64_t bubbleId = 0;
+    Model *model = nullptr;
+};
+
+#endif

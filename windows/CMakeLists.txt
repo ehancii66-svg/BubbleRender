@@ -14,9 +14,11 @@ set(RENDER_SOURCES
     render/model.cpp
     render/shader.cpp
     render/camera.cpp
+    render/contact_geometry.cpp
 )
 
 set(RENDER_HEADERS
+    render/contact_geometry.h
     render/model.h
     render/mesh.h
     render/shader.h
@@ -33,6 +35,7 @@ set(SIM_SOURCES
 )
 
 set(SIM_HEADERS
+    simulation/display_bubble.h
     simulation/vortex_sheet.h
 )
 
