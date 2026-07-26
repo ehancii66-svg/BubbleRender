@@ -123,7 +123,20 @@ static constexpr float kContactVisualTransitionTime = 0.35f;
 static constexpr float kFusionFilmThickness = 0.18f;
 static constexpr float kShellCutDelay = 0.42f;
 static constexpr size_t kDefaultDisplayBubbleCount = 3;
-static constexpr size_t kMaxDisplayBubbleCount = 16;
+static constexpr size_t kHardMaxDisplayBubbleCount = 16;
+static constexpr float kDefaultBubbleSpawnPlaneZ = 1.10f;
+static constexpr float kMinBubbleSpawnPlaneZ = 0.25f;
+static constexpr float kMaxBubbleSpawnPlaneZ = 2.60f;
+static constexpr float kBubbleSpawnPlaneStep = 0.12f;
+static constexpr float kMinSpawnRadius = 0.22f;
+static constexpr float kMaxSpawnRadius = 0.72f;
+static float g_BubbleSpawnPlaneZ = kDefaultBubbleSpawnPlaneZ;
+static float g_SpawnRadius = 0.40f;
+static size_t g_MaxLiveBubbleCount = 8;
+static bool g_WindEnabled = true;
+static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
+static float g_GlobalWindStrength = 0.16f;
+static bool g_LogContactDebug = false;
 
 static GLuint g_BackgroundTexture = 0;
 static GLuint g_SceneBehindTexture = 0;
@@ -156,10 +169,43 @@ static float &CurrentThickness()
     return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
 }
 
+static void UpdateCamera();
+static size_t LiveDisplayBubbleCount();
+
 static float Smooth01(float x)
 {
     x = glm::clamp(x, 0.0f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
+}
+
+static void SetGlobalWindDirection(const glm::vec3& direction)
+{
+    glm::vec3 planar(direction.x, direction.y, 0.0f);
+    if (glm::length(planar) < 1e-5f) {
+        return;
+    }
+    g_GlobalWindDirection = glm::normalize(planar);
+    std::cout << "[BubbleWind] direction=("
+              << g_GlobalWindDirection.x << ", "
+              << g_GlobalWindDirection.y << ", "
+              << g_GlobalWindDirection.z << ")"
+              << " enabled=" << (g_WindEnabled ? "on" : "off")
+              << " strength=" << g_GlobalWindStrength << std::endl;
+}
+
+static void SetMaxLiveBubbleCount(size_t count)
+{
+    g_MaxLiveBubbleCount = glm::clamp(count,
+                                      kDefaultDisplayBubbleCount,
+                                      kHardMaxDisplayBubbleCount);
+    std::cout << "[BubbleSpawn] maxLive=" << g_MaxLiveBubbleCount
+              << " live=" << LiveDisplayBubbleCount() << std::endl;
+}
+
+static void SetBubbleSpawnPlaneZ(float z)
+{
+    g_BubbleSpawnPlaneZ = glm::clamp(z, kMinBubbleSpawnPlaneZ, kMaxBubbleSpawnPlaneZ);
+    std::cout << "[BubbleSpawn] planeZ=" << g_BubbleSpawnPlaneZ << std::endl;
 }
 
 static uint64_t AllocateBubbleId()
@@ -183,7 +229,43 @@ static void UpdatePersistentSurfaceDynamics(float dt)
             const auto& control = bubble.surfaceControls[controlIndex];
             float freeWave = std::sin((float)g_Time * (0.72f + bubble.speed * 0.12f) +
                                       bubble.phase + (float)controlIndex * 1.17f);
-            targets[bubbleIndex][controlIndex] = control.localDir * (freeWave * 0.0035f);
+            glm::vec3 target = control.localDir * (freeWave * 0.0035f);
+
+            glm::vec3 windShapeAxis = bubble.velocity;
+            if (g_WindEnabled) {
+                windShapeAxis += g_GlobalWindDirection * (g_GlobalWindStrength * 1.85f);
+            }
+            float windShapeSpeed = glm::length(windShapeAxis);
+            if (windShapeSpeed > 1e-5f) {
+                windShapeAxis /= windShapeSpeed;
+                float radiusResponse = glm::clamp(
+                    std::sqrt(0.40f / std::max(bubble.radius, 0.08f)),
+                    0.62f, 1.35f);
+                float windDrive = g_WindEnabled ? g_GlobalWindStrength : 0.0f;
+                float shapeAmplitude = glm::clamp(
+                    (windDrive * 0.075f + glm::length(bubble.velocity) * 0.030f) * radiusResponse,
+                    0.0f, 0.052f);
+                float alignment = glm::dot(control.localDir, windShapeAxis);
+                float axialRadial = (alignment * alignment - 0.333f) * shapeAmplitude;
+                float windwardMask = Smooth01((-alignment - 0.10f) / 0.90f);
+                float leewardMask = Smooth01((alignment - 0.05f) / 0.95f);
+                float sideRipple = std::sin((float)g_Time * (1.30f + bubble.speed * 0.18f) +
+                                            bubble.phase * 0.73f + (float)controlIndex * 0.91f);
+                glm::vec3 sideDir = control.localDir - windShapeAxis * alignment;
+                if (glm::length(sideDir) > 1e-5f) {
+                    sideDir = glm::normalize(sideDir);
+                } else {
+                    sideDir = glm::vec3(0.0f);
+                }
+
+                target += control.localDir * axialRadial;
+                target -= windShapeAxis * (0.026f * shapeAmplitude / 0.052f) * windwardMask;
+                target += windShapeAxis * (0.016f * shapeAmplitude / 0.052f) * leewardMask;
+                target += sideDir * (sideRipple * shapeAmplitude * 0.18f) *
+                          (1.0f - std::abs(alignment));
+            }
+
+            targets[bubbleIndex][controlIndex] = target;
         }
     }
 
@@ -488,20 +570,66 @@ static size_t LiveDisplayBubbleCount()
     return count;
 }
 
-static uint64_t SpawnInteractiveBubble()
+struct BubbleSpawnRequest {
+    glm::vec3 position = glm::vec3(0.0f, 0.0f, kDefaultBubbleSpawnPlaneZ);
+    glm::vec3 basePosition = glm::vec3(0.0f, 0.0f, kDefaultBubbleSpawnPlaneZ);
+    glm::vec3 initialVelocity = glm::vec3(0.0f);
+    float radius = 0.40f;
+    float shapePerturbation = 1.0f;
+    float filmThickness = 1.0f;
+    float phase = 0.0f;
+    float windAmplitude = 0.010f;
+    float floatAmplitude = 0.009f;
+    float speed = 0.56f;
+};
+
+static uint64_t SpawnBubble(const BubbleSpawnRequest& request)
 {
-    if (LiveDisplayBubbleCount() >= kMaxDisplayBubbleCount) {
+    if (LiveDisplayBubbleCount() >= g_MaxLiveBubbleCount) {
         std::cout << "[BubbleSpawn] maximum live bubbles reached: "
-                  << kMaxDisplayBubbleCount << std::endl;
+                  << g_MaxLiveBubbleCount
+                  << " (hard cap " << kHardMaxDisplayBubbleCount << ")"
+                  << std::endl;
         return 0;
     }
 
+    float radius = glm::clamp(request.radius, kMinSpawnRadius, kMaxSpawnRadius);
     g_InteractionDemoActive = false;
     g_ShowMainBubble = false;
 
+    uint64_t id = AddBubble(request.position,
+                            radius,
+                            request.initialVelocity,
+                            request.basePosition,
+                            request.phase,
+                            request.windAmplitude,
+                            request.floatAmplitude,
+                            request.speed,
+                            true);
+    int bubbleIndex = FindBubbleIndexById(g_DisplayBubbles, id);
+    if (bubbleIndex >= 0) {
+        DisplayBubble& bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+        bubble.filmThickness = glm::clamp(request.filmThickness, 0.2f, 1.6f);
+        float perturbation = glm::clamp(request.shapePerturbation, 0.0f, 2.0f);
+        for (auto& control : bubble.surfaceControls) {
+            control.displacement *= perturbation;
+        }
+    }
+
+    std::cout << "[BubbleSpawn] add id=" << id
+              << " live=" << LiveDisplayBubbleCount()
+              << " radius=" << radius
+              << " position=(" << request.position.x << ", "
+              << request.position.y << ", " << request.position.z << ")"
+              << std::endl;
+    return id;
+}
+
+static uint64_t SpawnInteractiveBubble()
+{
     float spawnIndex = (float)std::max<uint64_t>(g_NextBubbleId, 1);
     float angle = spawnIndex * 2.3999632f + (float)g_Time * 0.17f;
-    float radius = 0.34f + 0.10f * Smooth01(0.5f + 0.5f * std::sin(spawnIndex * 1.71f));
+    float radius = g_SpawnRadius;
     glm::vec3 clusterCenter(0.0f, 0.05f, 1.10f);
     glm::vec3 radial(std::cos(angle), std::sin(angle), 0.18f * std::sin(angle * 0.7f));
     radial = glm::normalize(radial);
@@ -521,11 +649,62 @@ static uint64_t SpawnInteractiveBubble()
     float lift = 0.008f + 0.003f * Smooth01(0.5f + 0.5f * std::cos(spawnIndex * 0.47f));
     float speed = 0.52f + 0.18f * Smooth01(0.5f + 0.5f * std::sin(spawnIndex * 0.81f));
 
-    uint64_t id = AddBubble(position, radius, velocity, home, phase, wind, lift, speed, true);
-    std::cout << "[BubbleSpawn] add id=" << id
-              << " live=" << LiveDisplayBubbleCount()
-              << " radius=" << radius << std::endl;
-    return id;
+    BubbleSpawnRequest request;
+    request.position = position;
+    request.basePosition = home;
+    request.initialVelocity = velocity;
+    request.radius = radius;
+    request.phase = phase;
+    request.windAmplitude = wind;
+    request.floatAmplitude = lift;
+    request.speed = speed;
+    request.shapePerturbation = 1.0f;
+    return SpawnBubble(request);
+}
+
+static bool BubblePlanePointFromScreen(double screenX, double screenY, glm::vec3& worldPoint)
+{
+    UpdateCamera();
+    glm::vec3 origin = g_Camera.getPosition();
+    glm::vec3 direction = g_Camera.getRayDirectionFromScreen((float)screenX, (float)screenY);
+    if (std::abs(direction.z) < 1e-5f) {
+        return false;
+    }
+
+    float t = (g_BubbleSpawnPlaneZ - origin.z) / direction.z;
+    if (t <= 0.0f) {
+        return false;
+    }
+    worldPoint = origin + direction * t;
+    return true;
+}
+
+static uint64_t SpawnBubbleAtScreenPoint(double screenX, double screenY)
+{
+    glm::vec3 position;
+    if (!BubblePlanePointFromScreen(screenX, screenY, position)) {
+        std::cout << "[BubbleSpawn] screen ray did not hit activity plane" << std::endl;
+        return 0;
+    }
+
+    float spawnIndex = (float)std::max<uint64_t>(g_NextBubbleId, 1);
+    glm::vec3 windDir = glm::normalize(glm::vec3(0.75f, 0.22f, 0.0f));
+    glm::vec3 tangent(-windDir.y, windDir.x, 0.0f);
+    tangent = glm::normalize(tangent);
+
+    BubbleSpawnRequest request;
+    request.position = position;
+    request.basePosition = position;
+    request.initialVelocity =
+        windDir * (0.070f + 0.020f * std::sin(spawnIndex * 0.51f)) +
+        tangent * (0.020f * std::cos(spawnIndex * 0.83f));
+    request.radius = g_SpawnRadius;
+    request.phase = spawnIndex * 1.37f;
+    request.windAmplitude = 0.010f;
+    request.floatAmplitude = 0.009f;
+    request.speed = 0.54f + 0.12f * Smooth01(0.5f + 0.5f * std::sin(spawnIndex));
+    request.shapePerturbation = 0.85f;
+    return SpawnBubble(request);
 }
 
 static bool RemoveLastInteractiveBubble()
@@ -1160,7 +1339,12 @@ static void UpdateDisplayBubbleInteractions(float dt)
             sinf((float)g_Time * bubble.speed + bubble.phase),
             cosf((float)g_Time * bubble.speed * 0.7f + bubble.phase * 1.3f),
             sinf((float)g_Time * bubble.speed * 0.5f + bubble.phase * 0.8f)) * (0.018f * driftScale);
-        bubble.velocity += (homePull + slowDrift) * dt;
+        float windRadiusResponse = glm::clamp(std::sqrt(0.40f / std::max(bubble.radius, 0.08f)),
+                                              0.58f, 1.35f);
+        glm::vec3 globalWind = g_WindEnabled
+            ? g_GlobalWindDirection * (g_GlobalWindStrength * windRadiusResponse)
+            : glm::vec3(0.0f);
+        bubble.velocity += (homePull + slowDrift + globalWind) * dt;
         bubble.velocity *= expf(dt * -0.48f);
         bubble.position += bubble.velocity * dt;
         bubble.contactStrength *= expf(dt * -3.0f);
@@ -1486,7 +1670,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
         }),
         g_ContactPairs.end());
 
-    if (!g_ContactPairs.empty() && g_Time - s_LastContactLogTime >= 1.0) {
+    if (g_LogContactDebug && !g_ContactPairs.empty() && g_Time - s_LastContactLogTime >= 1.0) {
         const auto& pair = g_ContactPairs.front();
         int aIndex = -1;
         int bIndex = -1;
@@ -2176,6 +2360,14 @@ static void MouseButtonCallback(GLFWwindow *window, int button, int action, int 
 {
     if (button == GLFW_MOUSE_BUTTON_LEFT)
     {
+        if (action == GLFW_PRESS && (mods & GLFW_MOD_SHIFT)) {
+            double x, y;
+            glfwGetCursorPos(window, &x, &y);
+            SpawnBubbleAtScreenPoint(x, y);
+            g_MousePressed = false;
+            return;
+        }
+
         g_MousePressed = (action == GLFW_PRESS);
         if (g_MousePressed)
         {
@@ -2232,6 +2424,15 @@ static void CursorPosCallback(GLFWwindow *window, double xpos, double ypos)
 
 static void ScrollCallback(GLFWwindow *window, double xoffset, double yoffset)
 {
+    (void)xoffset;
+    bool shiftDown =
+        glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+    if (shiftDown) {
+        SetBubbleSpawnPlaneZ(g_BubbleSpawnPlaneZ + (float)yoffset * kBubbleSpawnPlaneStep);
+        return;
+    }
+
     g_CameraDistance -= (float)yoffset * 0.5f;
     g_CameraDistance = glm::clamp(g_CameraDistance, kCameraMinDistance, kCameraMaxDistance);
 }
@@ -2265,7 +2466,7 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_EdgeDistortionBoost = std::max(1.0f, g_EdgeDistortionBoost - 0.1f);
         std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
         break;
-    case GLFW_KEY_J:
+    case GLFW_KEY_8:
         g_EdgeDistortionBoost = std::min(3.0f, g_EdgeDistortionBoost + 0.1f);
         std::cout << "EdgeDistortionBoost: " << g_EdgeDistortionBoost << std::endl;
         break;
@@ -2277,7 +2478,7 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         g_EnvironmentReflectionStrength = std::min(1.5f, g_EnvironmentReflectionStrength + 0.05f);
         std::cout << "EnvironmentReflectionStrength: " << g_EnvironmentReflectionStrength << std::endl;
         break;
-    case GLFW_KEY_L:
+    case GLFW_KEY_SEMICOLON:
         g_IridescenceMode = (g_IridescenceMode + 1) % 3;
         std::cout << "IridescenceMode: "
                   << (g_IridescenceMode == 0 ? "Kim2012" : (g_IridescenceMode == 1 ? "Spectral LUT" : "Belcour Airy"))
@@ -2333,7 +2534,47 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
             RemoveLastInteractiveBubble();
         }
         break;
+    case GLFW_KEY_LEFT_BRACKET:
+        g_SpawnRadius = std::max(kMinSpawnRadius, g_SpawnRadius - 0.03f);
+        std::cout << "[BubbleSpawn] radius=" << g_SpawnRadius << std::endl;
+        break;
+    case GLFW_KEY_RIGHT_BRACKET:
+        g_SpawnRadius = std::min(kMaxSpawnRadius, g_SpawnRadius + 0.03f);
+        std::cout << "[BubbleSpawn] radius=" << g_SpawnRadius << std::endl;
+        break;
+    case GLFW_KEY_COMMA:
+        SetMaxLiveBubbleCount(g_MaxLiveBubbleCount > kDefaultDisplayBubbleCount
+            ? g_MaxLiveBubbleCount - 1
+            : kDefaultDisplayBubbleCount);
+        break;
+    case GLFW_KEY_PERIOD:
+        SetMaxLiveBubbleCount(g_MaxLiveBubbleCount + 1);
+        break;
+    case GLFW_KEY_F:
+        g_WindEnabled = !g_WindEnabled;
+        std::cout << "[BubbleWind] " << (g_WindEnabled ? "enabled" : "disabled")
+                  << " direction=(" << g_GlobalWindDirection.x << ", "
+                  << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
+                  << " strength=" << g_GlobalWindStrength << std::endl;
+        break;
+    case GLFW_KEY_C:
+        g_LogContactDebug = !g_LogContactDebug;
+        std::cout << "[BubbleContact] debug log "
+                  << (g_LogContactDebug ? "enabled" : "disabled") << std::endl;
+        break;
     case GLFW_KEY_I:
+        SetGlobalWindDirection(glm::vec3(0.0f, 1.0f, 0.0f));
+        break;
+    case GLFW_KEY_J:
+        SetGlobalWindDirection(glm::vec3(-1.0f, 0.0f, 0.0f));
+        break;
+    case GLFW_KEY_K:
+        SetGlobalWindDirection(glm::vec3(0.0f, -1.0f, 0.0f));
+        break;
+    case GLFW_KEY_L:
+        SetGlobalWindDirection(glm::vec3(1.0f, 0.0f, 0.0f));
+        break;
+    case GLFW_KEY_G:
         StartBubbleInteractionDemo();
         break;
     case GLFW_KEY_ESCAPE:
@@ -2556,23 +2797,30 @@ int main()
     std::cout << "  Left drag      Rotate camera" << std::endl;
     std::cout << "  Right drag     Touch ripple on bubble" << std::endl;
     std::cout << "  Mouse wheel    Zoom in / out" << std::endl;
+    std::cout << "  Shift+Wheel    Adjust bubble spawn depth" << std::endl;
     std::cout << std::endl;
     std::cout << "Appearance" << std::endl;
     std::cout << "  R / T          Fresnel edge power       - / +" << std::endl;
     std::cout << "  Y / H          Refraction strength      - / +" << std::endl;
-    std::cout << "  U / J          Edge distortion          - / +" << std::endl;
+    std::cout << "  U / 8          Edge distortion          - / +" << std::endl;
     std::cout << "  O / P          Environment reflection   - / +" << std::endl;
     std::cout << std::endl;
     std::cout << "Thin Film" << std::endl;
-    std::cout << "  L              Cycle mode: Kim2012 / LUT / Belcour Airy" << std::endl;
+    std::cout << "  ;              Cycle mode: Kim2012 / LUT / Belcour Airy" << std::endl;
     std::cout << "  N / M          Film thickness (nm)      - / +" << std::endl;
     std::cout << "  1 / 2          Thickness variation      - / +" << std::endl;
     std::cout << std::endl;
     std::cout << "Simulation" << std::endl;
     std::cout << "  Z              Pause / resume" << std::endl;
     std::cout << "  X              Reset synced bubble scene" << std::endl;
-    std::cout << "  I              Replay bubble contact / bridge demo" << std::endl;
+    std::cout << "  G              Replay bubble contact / bridge demo" << std::endl;
     std::cout << "  B / V          Add / remove interactive bubble" << std::endl;
+    std::cout << "  Shift+Left     Spawn bubble at cursor plane" << std::endl;
+    std::cout << "  [ / ]          Spawn radius               - / +" << std::endl;
+    std::cout << "  , / .          Max live bubbles           - / +" << std::endl;
+    std::cout << "  F              Toggle global wind" << std::endl;
+    std::cout << "  I / J / K / L  Wind direction: up / left / down / right" << std::endl;
+    std::cout << "  C              Toggle contact debug log" << std::endl;
     std::cout << "  3 / 4          Surface tension          - / +" << std::endl;
     std::cout << std::endl;
     std::cout << "  ESC            Quit" << std::endl;
@@ -2583,6 +2831,13 @@ int main()
               << ", refraction=" << g_RefractionStrength
               << ", edge=" << g_EdgeDistortionBoost
               << ", reflection=" << g_EnvironmentReflectionStrength
+              << ", spawnRadius=" << g_SpawnRadius
+              << ", spawnPlaneZ=" << g_BubbleSpawnPlaneZ
+              << ", maxLive=" << g_MaxLiveBubbleCount
+              << ", wind=" << (g_WindEnabled ? "on" : "off")
+              << " dir=(" << g_GlobalWindDirection.x << ", "
+              << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
+              << ", contactLog=" << (g_LogContactDebug ? "on" : "off")
               << std::endl;
     std::cout << "Scene: three persistent bubbles with wind drift and multi-contact deformation" << std::endl;
     std::cout << "==================================================" << std::endl;
