@@ -136,6 +136,9 @@ static size_t g_MaxLiveBubbleCount = 8;
 static bool g_WindEnabled = true;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static float g_GlobalWindStrength = 0.16f;
+static constexpr float kMinGlobalWindStrength = 0.0f;
+static constexpr float kMaxGlobalWindStrength = 0.45f;
+static constexpr float kGlobalWindStrengthStep = 0.025f;
 static bool g_LogContactDebug = false;
 
 static GLuint g_BackgroundTexture = 0;
@@ -191,6 +194,16 @@ static void SetGlobalWindDirection(const glm::vec3& direction)
               << g_GlobalWindDirection.z << ")"
               << " enabled=" << (g_WindEnabled ? "on" : "off")
               << " strength=" << g_GlobalWindStrength << std::endl;
+}
+
+static void SetGlobalWindStrength(float strength)
+{
+    g_GlobalWindStrength = glm::clamp(strength, kMinGlobalWindStrength, kMaxGlobalWindStrength);
+    std::cout << "[BubbleWind] strength=" << g_GlobalWindStrength
+              << " enabled=" << (g_WindEnabled ? "on" : "off")
+              << " direction=(" << g_GlobalWindDirection.x << ", "
+              << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
+              << std::endl;
 }
 
 static void SetMaxLiveBubbleCount(size_t count)
@@ -2205,6 +2218,53 @@ static void RenderFrame()
         g_RefractModel->Draw(*g_RefractionShader);
     };
 
+    auto DrawSpawnPreview = [&](GLuint backgroundTexture)
+    {
+        GLFWwindow* window = glfwGetCurrentContext();
+        if (!window || !g_DecorativeBubbleModel) {
+            return;
+        }
+        bool shiftDown =
+            glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+            glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS;
+        if (!shiftDown) {
+            return;
+        }
+
+        double cursorX = 0.0;
+        double cursorY = 0.0;
+        glfwGetCursorPos(window, &cursorX, &cursorY);
+        glm::vec3 previewCenter;
+        if (!BubblePlanePointFromScreen(cursorX, cursorY, previewCenter)) {
+            return;
+        }
+
+        BindRefractionInputs(backgroundTexture);
+        glm::mat4 previewModel = glm::translate(glm::mat4(1.0f), previewCenter);
+        previewModel = glm::scale(previewModel, glm::vec3(g_SpawnRadius));
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        GLboolean depthWriteWasEnabled = GL_TRUE;
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasEnabled);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+
+        float pulse = 0.82f + 0.18f * std::sin((float)g_Time * 3.2f);
+        SetRefractUniforms(previewModel, g_SpawnRadius, false, false,
+                           false, 0.0f, 0.0f, 2,
+                           0.18f + 0.08f * pulse, 0.85f);
+        g_RefractionShader->SetFloat("uRefractionStrength", g_RefractionStrength * 0.35f);
+        g_RefractionShader->SetFloat("uEnvironmentReflectionStrength",
+                                     g_EnvironmentReflectionStrength * 0.55f);
+        g_DecorativeBubbleModel->Draw(*g_RefractionShader);
+
+        glDepthMask(depthWriteWasEnabled);
+        if (!blendWasEnabled) {
+            glDisable(GL_BLEND);
+        }
+    };
+
     auto SetBackgroundUniforms = [&]()
     {
         if (g_InteractionDemoActive) {
@@ -2322,6 +2382,7 @@ static void RenderFrame()
 
     DrawDisplayBubbles(false, false, g_MainSceneTexture, true);
     DrawContactBridges(false, false, g_MainSceneTexture, true);
+    DrawSpawnPreview(g_MainSceneTexture);
 }
 
 // ============================================================
@@ -2556,6 +2617,12 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
                   << " direction=(" << g_GlobalWindDirection.x << ", "
                   << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
                   << " strength=" << g_GlobalWindStrength << std::endl;
+        break;
+    case GLFW_KEY_Q:
+        SetGlobalWindStrength(g_GlobalWindStrength - kGlobalWindStrengthStep);
+        break;
+    case GLFW_KEY_E:
+        SetGlobalWindStrength(g_GlobalWindStrength + kGlobalWindStrengthStep);
         break;
     case GLFW_KEY_C:
         g_LogContactDebug = !g_LogContactDebug;
@@ -2798,6 +2865,7 @@ int main()
     std::cout << "  Right drag     Touch ripple on bubble" << std::endl;
     std::cout << "  Mouse wheel    Zoom in / out" << std::endl;
     std::cout << "  Shift+Wheel    Adjust bubble spawn depth" << std::endl;
+    std::cout << "  Hold Shift     Preview spawn bubble" << std::endl;
     std::cout << std::endl;
     std::cout << "Appearance" << std::endl;
     std::cout << "  R / T          Fresnel edge power       - / +" << std::endl;
@@ -2819,6 +2887,7 @@ int main()
     std::cout << "  [ / ]          Spawn radius               - / +" << std::endl;
     std::cout << "  , / .          Max live bubbles           - / +" << std::endl;
     std::cout << "  F              Toggle global wind" << std::endl;
+    std::cout << "  Q / E          Wind strength             - / +" << std::endl;
     std::cout << "  I / J / K / L  Wind direction: up / left / down / right" << std::endl;
     std::cout << "  C              Toggle contact debug log" << std::endl;
     std::cout << "  3 / 4          Surface tension          - / +" << std::endl;
@@ -2835,6 +2904,7 @@ int main()
               << ", spawnPlaneZ=" << g_BubbleSpawnPlaneZ
               << ", maxLive=" << g_MaxLiveBubbleCount
               << ", wind=" << (g_WindEnabled ? "on" : "off")
+              << " strength=" << g_GlobalWindStrength
               << " dir=(" << g_GlobalWindDirection.x << ", "
               << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
               << ", contactLog=" << (g_LogContactDebug ? "on" : "off")
