@@ -61,6 +61,12 @@ struct BubbleContactPair {
         Burst
     };
 
+    enum class CoalescenceOutcome {
+        Undecided,
+        StayDoubleBubble,
+        WillCoalesce
+    };
+
     uint64_t a = 0;
     uint64_t b = 0;
     float contactTime = 0.0f;
@@ -79,9 +85,12 @@ struct BubbleContactPair {
     bool contactFrameInitialized = false;
     float filmThickness = 1.0f;
     float ruptureRisk = 0.0f;
+    float coalescenceScore = 0.0f;
+    float coalescenceRandom = 0.0f;
     float restDistance = 0.0f;
     float targetVolume = 0.0f;
     State state = State::Free;
+    CoalescenceOutcome outcome = CoalescenceOutcome::Undecided;
     bool active = false;
     bool bonded = false;
     bool candidate = false;
