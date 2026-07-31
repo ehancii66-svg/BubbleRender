@@ -109,6 +109,7 @@ static uint64_t g_NextBubbleId = 1;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = true;
 static Model *g_ContactFilmModel = nullptr;
+static Model *g_FusionSurfaceModel = nullptr;
 static std::vector<DisplayBubbleModelSlot> g_DisplayBubbleModels;
 static glm::vec3 g_BridgeDirection = glm::vec3(0.0f, 0.0f, 1.0f);
 static float g_BridgeStrength = 0.0f;
@@ -121,6 +122,12 @@ static constexpr float kNeckFormationTime = 1.15f;
 static constexpr float kFusionTime = 3.45f;
 static constexpr float kContactVisualTransitionTime = 0.35f;
 static constexpr float kFusionFilmThickness = 0.18f;
+static constexpr float kFilmRuptureDuration = 0.24f;
+static constexpr float kNeckExpansionDelay = 0.10f;
+static constexpr float kNeckExpansionDuration = 1.20f;
+static constexpr float kRelaxationDelay = 0.95f;
+static constexpr float kRelaxationDuration = 1.45f;
+static constexpr float kFusionCompletionHold = 0.12f;
 static constexpr float kShellCutDelay = 0.42f;
 static constexpr size_t kDefaultDisplayBubbleCount = 3;
 static constexpr size_t kHardMaxDisplayBubbleCount = 16;
@@ -203,6 +210,39 @@ static const char* CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome 
     default:
         return "undecided";
     }
+}
+
+static float FusionSurfaceVisibility(const BubbleContactPair& pair)
+{
+    if (!pair.fusionActive || pair.fusionComplete) {
+        return 0.0f;
+    }
+    return Smooth01((pair.ruptureProgress - 0.62f) / 0.38f);
+}
+
+static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)
+{
+    float visibility = 0.0f;
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if (pair.a == bubbleId || pair.b == bubbleId) {
+            visibility = std::max(visibility, FusionSurfaceVisibility(pair));
+        }
+    }
+    return visibility;
+}
+
+static bool PairCanBeginExclusiveFusion(const BubbleContactPair& pair)
+{
+    for (const BubbleContactPair& other : g_ContactPairs) {
+        if (&other == &pair || !other.fusionActive) {
+            continue;
+        }
+        if (other.a == pair.a || other.a == pair.b ||
+            other.b == pair.a || other.b == pair.b) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void SetGlobalWindDirection(const glm::vec3& direction)
@@ -648,6 +688,60 @@ static bool RemoveBubble(uint64_t id)
         g_DisplayBubbleModels.erase(modelIt);
     }
     return true;
+}
+
+static void FinalizeCompletedFusions()
+{
+    std::vector<std::pair<uint64_t, uint64_t>> completedPairs;
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if (pair.fusionComplete) {
+            completedPairs.emplace_back(pair.a, pair.b);
+        }
+    }
+
+    for (const auto& ids : completedPairs) {
+        int survivorIndex = FindBubbleIndexById(g_DisplayBubbles, ids.first);
+        int absorbedIndex = FindBubbleIndexById(g_DisplayBubbles, ids.second);
+        if (survivorIndex < 0 || absorbedIndex < 0) {
+            continue;
+        }
+
+        DisplayBubble& survivor = g_DisplayBubbles[(size_t)survivorIndex];
+        const DisplayBubble& absorbed = g_DisplayBubbles[(size_t)absorbedIndex];
+        float volumeA = survivor.targetVolume > 0.0f
+            ? survivor.targetVolume
+            : BubbleVolume(survivor.radius);
+        float volumeB = absorbed.targetVolume > 0.0f
+            ? absorbed.targetVolume
+            : BubbleVolume(absorbed.radius);
+        float mergedVolume = std::max(volumeA + volumeB, 0.001f);
+        glm::vec3 mergedCenter = (survivor.position * volumeA + absorbed.position * volumeB) /
+                                 mergedVolume;
+        glm::vec3 mergedVelocity = (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
+                                   mergedVolume;
+        float mergedRadius = RadiusFromVolume(mergedVolume);
+
+        survivor.position = mergedCenter;
+        survivor.basePosition = mergedCenter;
+        survivor.velocity = mergedVelocity;
+        survivor.radius = mergedRadius;
+        survivor.initialRadius = mergedRadius;
+        survivor.targetVolume = mergedVolume;
+        survivor.alpha = std::max(survivor.alpha, absorbed.alpha);
+        survivor.contactTime = 0.0f;
+        survivor.mergeProgress = 1.0f;
+        survivor.filmThickness = std::min(survivor.filmThickness,
+                                          absorbed.filmThickness);
+        survivor.contactStrength = 0.0f;
+        survivor.volumeTransferred = true;
+        survivor.state = DisplayBubble::State::Merged;
+        survivor.surfaceControls = MakeSurfaceControls(survivor.phase);
+
+        std::cout << "[BubbleFusion] pair=(" << ids.first << ", " << ids.second
+                  << ") survivor=" << survivor.id
+                  << " radius=" << mergedRadius << std::endl;
+        RemoveBubble(ids.second);
+    }
 }
 
 static size_t LiveDisplayBubbleCount()
@@ -1260,20 +1354,39 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     }
     float sharedFilmProgress = Smooth01(std::max(pair.contactTime - kSharedFilmTime, 0.0f) /
                                         std::max(kNeckFormationTime - kSharedFilmTime, 0.001f));
-    float fusionProgress = Smooth01(std::max(pair.contactTime - kNeckFormationTime, 0.0f) /
-                                    std::max(kFusionTime - kNeckFormationTime, 0.001f));
     float bondBlend = Smooth01(pair.contactTime / 0.30f);
     bool canCoalesce =
         pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce ||
         (g_InteractionDemoActive && pair.outcome == BubbleContactPair::CoalescenceOutcome::Undecided);
-    bool reachedFusionCritical = canCoalesce &&
-                                 (pair.contactTime >= kFusionTime ||
-                                  pair.filmThickness <= kFusionFilmThickness);
+    if (canCoalesce && pair.contactTime >= kNeckFormationTime &&
+        !pair.fusionActive && PairCanBeginExclusiveFusion(pair)) {
+        pair.fusionActive = true;
+        pair.fusionElapsed = 0.0f;
+        pair.ruptureProgress = 0.0f;
+        pair.neckProgress = 0.0f;
+        pair.relaxationProgress = 0.0f;
+        pair.fusionCompletionHold = 0.0f;
+    }
+    if (pair.fusionActive && !pair.fusionComplete) {
+        pair.fusionElapsed += dt;
+        pair.ruptureProgress = Smooth01(pair.fusionElapsed / kFilmRuptureDuration);
+        pair.neckProgress = Smooth01(
+            (pair.fusionElapsed - kNeckExpansionDelay) / kNeckExpansionDuration);
+        pair.relaxationProgress = Smooth01(
+            (pair.fusionElapsed - kRelaxationDelay) / kRelaxationDuration);
+        pair.filmThickness = std::min(pair.filmThickness,
+                                      glm::mix(kFusionFilmThickness, 0.08f,
+                                               pair.ruptureProgress));
+        pair.fusionCompletionHold = pair.relaxationProgress >= 0.999f
+            ? pair.fusionCompletionHold + dt
+            : 0.0f;
+        pair.fusionComplete = pair.fusionCompletionHold >= kFusionCompletionHold;
+    }
 
     // Film creation is history-dependent, while compression remains a
     // reversible response to current overlap, impact, and continuing forces.
     float baseFilmCompression = Smooth01(pair.contactTime / kNeckFormationTime);
-    float effectiveFusionProgress = keepStableDouble ? fusionProgress * 0.30f : fusionProgress;
+    float effectiveFusionProgress = pair.fusionActive ? pair.neckProgress : 0.0f;
     float baseOverlapRatio = 0.020f * bondBlend + 0.105f * baseFilmCompression +
                              0.235f * effectiveFusionProgress;
     float actualOverlapRatio = (contactDistance - dist) / std::max(minRadius, 0.001f);
@@ -1285,8 +1398,8 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     float normalizedOverlap = Smooth01((actualOverlapRatio - commandedOverlapRatio) / 0.10f);
     float impactDrive = Smooth01(std::max(-relNormalSpeed, 0.0f) / 0.32f);
     float demoExternalDrive = 0.0f;
-    if (g_InteractionDemoActive && pair.contactTime > kFusionTime) {
-        float postMergeTime = pair.contactTime - kFusionTime;
+    if (g_InteractionDemoActive && pair.fusionActive) {
+        float postMergeTime = pair.fusionElapsed;
         float forceEnvelope = Smooth01(postMergeTime / 1.6f);
         float forcePulse = 0.80f + 0.20f * std::sin(postMergeTime * 1.15f);
         demoExternalDrive = forceEnvelope * forcePulse;
@@ -1346,9 +1459,9 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     pair.geometryBlend = glm::clamp(geometryTarget, 0.0f, 1.0f);
     if (pair.contactTime < kSharedFilmTime || contactAmount < 0.10f) {
         pair.state = BubbleContactPair::State::Touch;
-    } else if (pair.contactTime < kNeckFormationTime) {
+    } else if (keepStableDouble || !pair.fusionActive) {
         pair.state = BubbleContactPair::State::SharedFilm;
-    } else if (!reachedFusionCritical) {
+    } else if (pair.relaxationProgress <= 0.001f) {
         pair.state = BubbleContactPair::State::NeckForming;
     } else {
         pair.state = BubbleContactPair::State::Merged;
@@ -1356,7 +1469,10 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         pair.geometryBlend = 1.0f;
         pair.filmThickness = std::min(pair.filmThickness, kFusionFilmThickness);
     }
-    pair.neckRadius = PlateauContactRadius(pair, a, b);
+    pair.neckRadius = pair.fusionActive
+        ? minRadius * glm::mix(0.025f, 0.78f,
+                               std::pow(Smooth01(pair.neckProgress), 0.65f))
+        : PlateauContactRadius(pair, a, b);
 
     if (pair.state == BubbleContactPair::State::Touch) {
         a.state = DisplayBubble::State::Touch;
@@ -1368,8 +1484,10 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         a.state = DisplayBubble::State::Merged;
     }
     b.state = a.state;
-    a.mergeProgress = effectiveFusionProgress;
-    b.mergeProgress = effectiveFusionProgress;
+    float visualMergeProgress = std::max(pair.neckProgress * 0.55f,
+                                         pair.relaxationProgress);
+    a.mergeProgress = visualMergeProgress;
+    b.mergeProgress = visualMergeProgress;
     a.contactTime = pair.contactTime;
     b.contactTime = pair.contactTime;
     float visibleContact = glm::clamp(pair.bridgeStrength * (0.55f + 0.65f * pair.geometryBlend), 0.0f, 1.0f);
@@ -1776,6 +1894,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
     }
 
     UpdatePersistentSurfaceDynamics(dt);
+    FinalizeCompletedFusions();
 
     g_ContactPairs.erase(
         std::remove_if(g_ContactPairs.begin(), g_ContactPairs.end(), [](const BubbleContactPair& pair) {
@@ -2225,9 +2344,14 @@ static void RenderFrame()
         {
             const auto &bubble = g_DisplayBubbles[item.second];
             glm::mat4 bubbleModel = PersistentBubbleModelMatrix(bubble, (float)g_Time);
+            float fusionSurfaceVisibility = BubbleFusionSurfaceVisibility(bubble.id);
             float alpha = straightComposite
                 ? (g_InteractionDemoActive ? 0.62f : 0.72f) * bubble.alpha * independentBubbleAlphaScale
                 : bubble.alpha * independentBubbleAlphaScale;
+            alpha *= 1.0f - fusionSurfaceVisibility;
+            if (alpha <= 0.005f) {
+                continue;
+            }
             SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO,
                                false, 0.0f, 0.0f, 2, alpha, 1.0f);
             SetBubbleContactUniforms((int)item.second);
@@ -2248,6 +2372,136 @@ static void RenderFrame()
             glDepthMask(GL_TRUE);
             if (!blendWasEnabled)
                 glDisable(GL_BLEND);
+        }
+    };
+
+    auto DrawFusionSurfaces = [&](bool isBackFace, bool renderToFBO,
+                                  GLuint backgroundTexture, bool straightComposite)
+    {
+        if (!g_FusionSurfaceModel) {
+            return;
+        }
+        BindRefractionInputs(backgroundTexture);
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        GLboolean depthWriteWasEnabled = GL_TRUE;
+        GLint blendSrcRgb = GL_ONE;
+        GLint blendDstRgb = GL_ZERO;
+        GLint blendSrcAlpha = GL_ONE;
+        GLint blendDstAlpha = GL_ZERO;
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasEnabled);
+        glGetIntegerv(GL_BLEND_SRC_RGB, &blendSrcRgb);
+        glGetIntegerv(GL_BLEND_DST_RGB, &blendDstRgb);
+        glGetIntegerv(GL_BLEND_SRC_ALPHA, &blendSrcAlpha);
+        glGetIntegerv(GL_BLEND_DST_ALPHA, &blendDstAlpha);
+        if (straightComposite) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        std::vector<std::pair<float, const BubbleContactPair*>> sortedPairs;
+        sortedPairs.reserve(g_ContactPairs.size());
+        for (const BubbleContactPair& pair : g_ContactPairs) {
+            float visibility = FusionSurfaceVisibility(pair);
+            int aIndex = -1;
+            int bIndex = -1;
+            if (visibility <= 0.001f ||
+                !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
+                continue;
+            }
+            const DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
+            const DisplayBubble& b = g_DisplayBubbles[(size_t)bIndex];
+            float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
+            float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
+            glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
+                                     std::max(volumeA + volumeB, 0.001f);
+            glm::vec3 cameraForward = glm::normalize(g_Camera.getTarget() -
+                                                     g_Camera.getPosition());
+            float cameraDepth = glm::dot(targetCenter - g_Camera.getPosition(),
+                                         cameraForward);
+            sortedPairs.emplace_back(cameraDepth, &pair);
+        }
+        std::sort(sortedPairs.begin(), sortedPairs.end(),
+                  [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        for (const auto& sortedPair : sortedPairs) {
+            const BubbleContactPair& pair = *sortedPair.second;
+            float visibility = FusionSurfaceVisibility(pair);
+            int aIndex = -1;
+            int bIndex = -1;
+            if (!ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex)) {
+                continue;
+            }
+
+            const DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
+            const DisplayBubble& b = g_DisplayBubbles[(size_t)bIndex];
+            float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
+            float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
+            float targetVolume = std::max(volumeA + volumeB, 0.001f);
+            float targetRadius = RadiusFromVolume(targetVolume);
+            glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
+                                     targetVolume;
+
+            glm::vec3 axis = b.position - a.position;
+            if (glm::length(axis) <= 1e-5f) {
+                axis = pair.contactFrameInitialized
+                    ? pair.filteredNormal
+                    : glm::vec3(1.0f, 0.0f, 0.0f);
+            }
+            axis = glm::normalize(axis);
+            glm::vec3 reference = std::abs(axis.z) < 0.90f
+                ? glm::vec3(0.0f, 0.0f, 1.0f)
+                : glm::vec3(0.0f, 1.0f, 0.0f);
+            glm::vec3 side = glm::normalize(glm::cross(reference, axis));
+            glm::vec3 binormal = glm::normalize(glm::cross(axis, side));
+            float centerA = glm::dot(a.position - targetCenter, axis);
+            float centerB = glm::dot(b.position - targetCenter, axis);
+
+            float oscillationEnvelope = (1.0f - pair.relaxationProgress) *
+                                        pair.relaxationProgress;
+            float oscillation = std::sin(pair.relaxationProgress * 3.0f * 3.14159265f) *
+                                oscillationEnvelope * 0.12f;
+            if (Mesh* mesh = g_FusionSurfaceModel->getMesh(0)) {
+                FusionSurfaceParameters parameters;
+                parameters.centerA = centerA;
+                parameters.radiusA = a.radius;
+                parameters.centerB = centerB;
+                parameters.radiusB = b.radius;
+                parameters.targetRadius = targetRadius;
+                parameters.neckProgress = pair.neckProgress;
+                parameters.relaxationProgress = pair.relaxationProgress;
+                parameters.oscillation = oscillation;
+                mesh->updateVertices(BuildFusionSurfaceVertices(parameters));
+            }
+
+            glm::mat4 fusionModel(1.0f);
+            fusionModel[0] = glm::vec4(axis, 0.0f);
+            fusionModel[1] = glm::vec4(side, 0.0f);
+            fusionModel[2] = glm::vec4(binormal, 0.0f);
+            fusionModel[3] = glm::vec4(targetCenter, 1.0f);
+
+            float pairAlpha = std::max(a.alpha, b.alpha);
+            float alpha = (straightComposite
+                ? (g_InteractionDemoActive ? 0.62f : 0.72f)
+                : 1.0f) * pairAlpha * visibility;
+            SetRefractUniforms(fusionModel, targetRadius * 1.15f,
+                               isBackFace, renderToFBO, false,
+                               0.0f, 0.0f, 2, alpha,
+                               glm::mix(0.82f, 1.0f, pair.relaxationProgress));
+            g_RefractionShader->SetInt("uVisualContactCount", 0);
+            g_FusionSurfaceModel->Draw(*g_RefractionShader);
+        }
+
+        if (straightComposite) {
+            glDepthMask(depthWriteWasEnabled);
+            glBlendFuncSeparate(blendSrcRgb, blendDstRgb,
+                                blendSrcAlpha, blendDstAlpha);
+            if (!blendWasEnabled) {
+                glDisable(GL_BLEND);
+            } else {
+                glEnable(GL_BLEND);
+            }
         }
     };
 
@@ -2277,13 +2531,22 @@ static void RenderFrame()
             const DisplayBubble& a = g_DisplayBubbles[(size_t)aIndex];
             const DisplayBubble& b = g_DisplayBubbles[(size_t)bIndex];
             float visibility = pair.contactActivation * pair.contactActivation;
+            float ruptureFade = pair.fusionActive ? 1.0f - pair.ruptureProgress : 1.0f;
             float alpha = (straightComposite ? 0.16f : 0.24f) * visibility;
+            alpha *= ruptureFade;
+            if (alpha <= 0.002f) {
+                continue;
+            }
             float pulse = 1.0f + std::sin((float)g_Time * 0.70f +
                                           (float)(pair.a * 0.37f + pair.b * 0.19f)) * 0.008f;
             float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
             float normalizedCurvature = ContactFilmWorldCurvature(a, b, pair) * filmRadius;
             if (Mesh* mesh = g_ContactFilmModel->getMesh(0)) {
-                mesh->updateVertices(BuildCurvedContactFilmVertices(normalizedCurvature));
+                float holeRadius = pair.fusionActive
+                    ? Smooth01(pair.ruptureProgress) * 0.98f
+                    : 0.0f;
+                mesh->updateVertices(BuildCurvedContactFilmVertices(normalizedCurvature,
+                                                                     holeRadius));
             }
             glm::mat4 filmModel = MakeContactFilmModel(a, b, pair, (float)g_Time);
             SetRefractUniforms(filmModel, std::max(pair.contactRadius, 0.01f),
@@ -2436,6 +2699,7 @@ static void RenderFrame()
     SetBackgroundUniforms();
 
     DrawDisplayBubbles(false, true, g_BackgroundTexture, true);
+    DrawFusionSurfaces(false, true, g_BackgroundTexture, true);
     DrawContactBridges(false, true, g_BackgroundTexture, true);
 
     // ========== Pass 3: Render main bubble back faces to backFaceFBO ==========
@@ -2483,6 +2747,7 @@ static void RenderFrame()
     DrawMainBubble(false, false, g_BackFaceTexture);
 
     DrawDisplayBubbles(false, false, g_MainSceneTexture, true);
+    DrawFusionSurfaces(false, false, g_MainSceneTexture, true);
     DrawContactBridges(false, false, g_MainSceneTexture, true);
     DrawSpawnPreview(g_MainSceneTexture);
 }
@@ -2762,9 +3027,10 @@ static void Cleanup()
     delete g_RefractModel;
     delete g_DecorativeBubbleModel;
     delete g_ContactFilmModel;
+    delete g_FusionSurfaceModel;
     delete g_SkyboxModel;
     g_RefractModel = g_DecorativeBubbleModel = g_SkyboxModel = nullptr;
-    g_ContactFilmModel = nullptr;
+    g_ContactFilmModel = g_FusionSurfaceModel = nullptr;
 
     for (auto& slot : g_DisplayBubbleModels) {
         delete slot.model;
@@ -2926,6 +3192,18 @@ int main()
     {
         DiscMeshData disc = BuildContactFilmDisc(72);
         g_ContactFilmModel = Model::CreateFromVertices(disc.positions, disc.normals, disc.indices);
+    }
+    {
+        FusionSurfaceParameters parameters;
+        std::vector<Vertex> vertices = BuildFusionSurfaceVertices(parameters);
+        std::vector<glm::vec3> positions(vertices.size());
+        std::vector<glm::vec3> normals(vertices.size());
+        for (size_t i = 0; i < vertices.size(); ++i) {
+            positions[i] = vertices[i].Position;
+            normals[i] = vertices[i].Normal;
+        }
+        g_FusionSurfaceModel = Model::CreateFromVertices(
+            positions, normals, BuildFusionSurfaceIndices());
     }
     ResetDisplayBubbles();
 

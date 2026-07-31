@@ -87,6 +87,11 @@ struct BubbleContactPair {
     float ruptureRisk = 0.0f;
     float coalescenceScore = 0.0f;
     float coalescenceRandom = 0.0f;
+    float fusionElapsed = 0.0f;
+    float ruptureProgress = 0.0f;
+    float neckProgress = 0.0f;
+    float relaxationProgress = 0.0f;
+    float fusionCompletionHold = 0.0f;
     float restDistance = 0.0f;
     float targetVolume = 0.0f;
     State state = State::Free;
@@ -95,6 +100,8 @@ struct BubbleContactPair {
     bool bonded = false;
     bool candidate = false;
     bool persistentRenderPair = false;
+    bool fusionActive = false;
+    bool fusionComplete = false;
     float candidateExitTime = 0.0f;
 };
 

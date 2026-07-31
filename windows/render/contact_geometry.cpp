@@ -18,16 +18,13 @@ float Smooth01Local(float x)
 DiscMeshData BuildContactFilmDisc(int segments, int rings)
 {
     DiscMeshData disc;
-    disc.positions.reserve(1 + (size_t)segments * (size_t)rings);
-    disc.normals.reserve(1 + (size_t)segments * (size_t)rings);
-    disc.indices.reserve((size_t)segments * (size_t)(1 + (rings - 1) * 6));
+    disc.positions.reserve((size_t)(segments + 1) * (size_t)(rings + 1));
+    disc.normals.reserve((size_t)(segments + 1) * (size_t)(rings + 1));
+    disc.indices.reserve((size_t)segments * (size_t)rings * 6);
 
-    disc.positions.push_back(glm::vec3(0.0f));
-    disc.normals.push_back(glm::vec3(0.0f, 0.0f, 1.0f));
-
-    for (int ring = 1; ring <= rings; ++ring) {
+    for (int ring = 0; ring <= rings; ++ring) {
         float radial = (float)ring / (float)rings;
-        for (int i = 0; i < segments; ++i) {
+        for (int i = 0; i <= segments; ++i) {
             float angle = 2.0f * kPi * (float)i / (float)segments;
             disc.positions.push_back(glm::vec3(std::cos(angle) * radial,
                                                std::sin(angle) * radial,
@@ -36,22 +33,14 @@ DiscMeshData BuildContactFilmDisc(int segments, int rings)
         }
     }
 
-    for (int i = 0; i < segments; ++i) {
-        unsigned int curr = 1u + (unsigned int)i;
-        unsigned int next = 1u + (unsigned int)((i + 1) % segments);
-        disc.indices.push_back(0);
-        disc.indices.push_back(curr);
-        disc.indices.push_back(next);
-    }
-
-    for (int ring = 2; ring <= rings; ++ring) {
-        unsigned int innerStart = 1u + (unsigned int)(ring - 2) * (unsigned int)segments;
-        unsigned int outerStart = 1u + (unsigned int)(ring - 1) * (unsigned int)segments;
+    for (int ring = 0; ring < rings; ++ring) {
+        unsigned int innerStart = (unsigned int)ring * (unsigned int)(segments + 1);
+        unsigned int outerStart = (unsigned int)(ring + 1) * (unsigned int)(segments + 1);
         for (int i = 0; i < segments; ++i) {
             unsigned int inner0 = innerStart + (unsigned int)i;
-            unsigned int inner1 = innerStart + (unsigned int)((i + 1) % segments);
+            unsigned int inner1 = innerStart + (unsigned int)i + 1u;
             unsigned int outer0 = outerStart + (unsigned int)i;
-            unsigned int outer1 = outerStart + (unsigned int)((i + 1) % segments);
+            unsigned int outer1 = outerStart + (unsigned int)i + 1u;
 
             disc.indices.push_back(inner0);
             disc.indices.push_back(outer0);
@@ -67,12 +56,14 @@ DiscMeshData BuildContactFilmDisc(int segments, int rings)
 }
 
 std::vector<Vertex> BuildCurvedContactFilmVertices(float normalizedCurvature,
+                                                   float innerRadius,
                                                    int segments,
                                                    int rings)
 {
     std::vector<Vertex> vertices;
-    vertices.reserve(1 + (size_t)segments * (size_t)rings);
+    vertices.reserve((size_t)(segments + 1) * (size_t)(rings + 1));
     normalizedCurvature = glm::clamp(normalizedCurvature, -0.85f, 0.85f);
+    innerRadius = glm::clamp(innerRadius, 0.0f, 0.98f);
 
     auto makeVertex = [&](float x, float y, float radial) {
         Vertex vertex{};
@@ -99,14 +90,140 @@ std::vector<Vertex> BuildCurvedContactFilmVertices(float normalizedCurvature,
         return vertex;
     };
 
-    vertices.push_back(makeVertex(0.0f, 0.0f, 0.0f));
-    for (int ring = 1; ring <= rings; ++ring) {
-        float radial = (float)ring / (float)rings;
-        for (int i = 0; i < segments; ++i) {
+    for (int ring = 0; ring <= rings; ++ring) {
+        float ringProgress = (float)ring / (float)rings;
+        float radial = glm::mix(innerRadius, 1.0f, ringProgress);
+        for (int i = 0; i <= segments; ++i) {
             float angle = 2.0f * kPi * (float)i / (float)segments;
             float x = std::cos(angle) * radial;
             float y = std::sin(angle) * radial;
             vertices.push_back(makeVertex(x, y, radial));
+        }
+    }
+    return vertices;
+}
+
+std::vector<unsigned int> BuildFusionSurfaceIndices(int segments, int rings)
+{
+    return BuildContactBubblePatchIndices(segments, rings);
+}
+
+std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& parameters,
+                                               int segments,
+                                               int rings)
+{
+    float centerA = parameters.centerA;
+    float radiusA = parameters.radiusA;
+    float centerB = parameters.centerB;
+    float radiusB = parameters.radiusB;
+    float targetRadius = parameters.targetRadius;
+    float neckProgress = parameters.neckProgress;
+    float relaxationProgress = parameters.relaxationProgress;
+    float oscillation = parameters.oscillation;
+    radiusA = std::max(radiusA, 0.001f);
+    radiusB = std::max(radiusB, 0.001f);
+    targetRadius = std::max(targetRadius, 0.001f);
+    neckProgress = Smooth01Local(neckProgress);
+    relaxationProgress = Smooth01Local(relaxationProgress);
+
+    if (centerA > centerB) {
+        std::swap(centerA, centerB);
+        std::swap(radiusA, radiusB);
+    }
+
+    float sourceLeft = std::min(centerA - radiusA, centerB - radiusB);
+    float sourceRight = std::max(centerA + radiusA, centerB + radiusB);
+    float left = glm::mix(sourceLeft, -targetRadius, relaxationProgress);
+    float right = glm::mix(sourceRight, targetRadius, relaxationProgress);
+    float minRadius = std::min(radiusA, radiusB);
+    float contactCenter = 0.5f * ((centerA + radiusA) + (centerB - radiusB));
+    float bridgeHalfWidth = minRadius * glm::mix(0.12f, 0.92f, neckProgress);
+    float neckRadius = minRadius * glm::mix(0.025f, 0.78f,
+                                            std::pow(neckProgress, 0.65f));
+
+    std::vector<float> axial((size_t)rings + 1u);
+    std::vector<float> radial((size_t)rings + 1u);
+    for (int ring = 0; ring <= rings; ++ring) {
+        float v = (float)ring / (float)rings;
+        float x = glm::mix(left, right, v);
+        float rhoASq = radiusA * radiusA - (x - centerA) * (x - centerA);
+        float rhoBSq = radiusB * radiusB - (x - centerB) * (x - centerB);
+        float sourceRho = std::max(std::sqrt(std::max(rhoASq, 0.0f)),
+                                   std::sqrt(std::max(rhoBSq, 0.0f)));
+
+        float bridgeDistance = std::abs(x - contactCenter) /
+                               std::max(bridgeHalfWidth, 0.001f);
+        float bridgeShape = bridgeDistance < 1.0f
+            ? 1.0f - Smooth01Local(bridgeDistance)
+            : 0.0f;
+        sourceRho = std::max(sourceRho, neckRadius * bridgeShape);
+
+        float targetRhoSq = targetRadius * targetRadius - x * x;
+        float targetRho = std::sqrt(std::max(targetRhoSq, 0.0f));
+        float rho = glm::mix(sourceRho, targetRho, relaxationProgress);
+
+        float normalizedX = x / std::max(targetRadius, 0.001f);
+        float quadrupole = 0.5f * (3.0f * normalizedX * normalizedX - 1.0f);
+        rho *= std::max(0.0f, 1.0f - oscillation * quadrupole);
+        x *= 1.0f + oscillation;
+
+        axial[(size_t)ring] = x;
+        radial[(size_t)ring] = ring == 0 || ring == rings ? 0.0f : rho;
+    }
+
+    float volumeIntegral = 0.0f;
+    for (int ring = 1; ring <= rings; ++ring) {
+        float dx = std::max(axial[(size_t)ring] - axial[(size_t)ring - 1u], 0.0f);
+        float rho0 = radial[(size_t)ring - 1u];
+        float rho1 = radial[(size_t)ring];
+        volumeIntegral += 0.5f * (rho0 * rho0 + rho1 * rho1) * dx;
+    }
+    if (volumeIntegral > 1e-6f) {
+        float targetIntegral = (4.0f / 3.0f) * targetRadius * targetRadius * targetRadius;
+        float radialVolumeScale = std::sqrt(targetIntegral / volumeIntegral);
+        for (int ring = 1; ring < rings; ++ring) {
+            radial[(size_t)ring] *= radialVolumeScale;
+        }
+    }
+
+    std::vector<Vertex> vertices;
+    vertices.reserve((size_t)(rings + 1) * (size_t)(segments + 1));
+    for (int ring = 0; ring <= rings; ++ring) {
+        float dx = 1.0f;
+        float dr = 0.0f;
+        if (ring == 0) {
+            dx = axial[1] - axial[0];
+            dr = radial[1] - radial[0];
+        } else if (ring == rings) {
+            dx = axial[(size_t)rings] - axial[(size_t)rings - 1u];
+            dr = radial[(size_t)rings] - radial[(size_t)rings - 1u];
+        } else {
+            dx = axial[(size_t)ring + 1u] - axial[(size_t)ring - 1u];
+            dr = radial[(size_t)ring + 1u] - radial[(size_t)ring - 1u];
+        }
+        float slope = dr / std::max(std::abs(dx), 1e-5f);
+
+        for (int segment = 0; segment <= segments; ++segment) {
+            float u = (float)segment / (float)segments;
+            float angle = 2.0f * kPi * u;
+            float cosine = std::cos(angle);
+            float sine = std::sin(angle);
+
+            Vertex vertex{};
+            vertex.Position = glm::vec3(axial[(size_t)ring],
+                                        radial[(size_t)ring] * cosine,
+                                        radial[(size_t)ring] * sine);
+            if (ring == 0) {
+                vertex.Normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+            } else if (ring == rings) {
+                vertex.Normal = glm::vec3(1.0f, 0.0f, 0.0f);
+            } else {
+                vertex.Normal = glm::normalize(glm::vec3(-slope, cosine, sine));
+            }
+            vertex.TexCoords = glm::vec2(u, (float)ring / (float)rings);
+            vertex.Tangent = glm::vec3(0.0f);
+            vertex.Bitangent = glm::vec3(0.0f);
+            vertices.push_back(vertex);
         }
     }
     return vertices;
