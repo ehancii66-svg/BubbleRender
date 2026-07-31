@@ -336,10 +336,6 @@ static void UpdatePersistentSurfaceDynamics(float dt)
             float sizeDeformScale = glm::clamp(
                 std::sqrt(std::max(other.radius, 0.001f) / std::max(bubble.radius, 0.001f)),
                 0.62f, 1.65f);
-            float engulfmentScale = bubble.radius < other.radius
-                ? 1.0f + pair.engulfment * 0.95f
-                : 1.0f - pair.engulfment * 0.18f;
-            sizeDeformScale = glm::clamp(sizeDeformScale * engulfmentScale, 0.54f, 2.15f);
             float coneCos = glm::mix(0.90f,
                                      std::sqrt(std::max(1.0f - radiusRatio * radiusRatio, 0.0f)),
                                      pairStrength);
@@ -535,119 +531,9 @@ static void DecideCoalescenceOutcome(BubbleContactPair& pair,
     }
 }
 
-static float BubbleSizeMismatch(const DisplayBubble& a, const DisplayBubble& b)
-{
-    float minRadius = std::max(std::min(a.radius, b.radius), 0.001f);
-    float maxRadius = std::max(std::max(a.radius, b.radius), minRadius);
-    return glm::clamp((maxRadius - minRadius) / maxRadius, 0.0f, 1.0f);
-}
-
-static float TargetPairEngulfment(const BubbleContactPair& pair,
-                                  const DisplayBubble& a,
-                                  const DisplayBubble& b)
-{
-    float mismatch = BubbleSizeMismatch(a, b);
-    if (mismatch <= 0.04f) {
-        return 0.0f;
-    }
-
-    // Unequal bubbles need a noticeably deeper contact patch before the
-    // smaller shell reads as being engulfed instead of merely touching the
-    // larger shell. Grow this promptly after bonding, but keep it smooth.
-    float age = Smooth01((pair.contactTime - 0.08f) / 1.45f);
-    float compression = glm::clamp(std::max(pair.interactionCompression,
-                                            pair.contactActivation),
-                                   0.0f, 1.0f);
-    float target = mismatch * age * (0.72f + 0.50f * compression);
-    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce) {
-        target *= 1.28f;
-    } else if (pair.outcome == BubbleContactPair::CoalescenceOutcome::StayDoubleBubble) {
-        target = std::min(target, 0.62f);
-    }
-    return glm::clamp(target, 0.0f, 0.90f);
-}
-
-static float EngulfedContactRestDistance(const BubbleContactPair& pair,
-                                         const DisplayBubble& a,
-                                         const DisplayBubble& b,
-                                         float contactRadius)
-{
-    float baseRestDistance =
-        std::sqrt(std::max(a.radius * a.radius - contactRadius * contactRadius, 0.0f)) +
-        std::sqrt(std::max(b.radius * b.radius - contactRadius * contactRadius, 0.0f));
-    float minRadius = std::min(a.radius, b.radius);
-    return std::max(baseRestDistance - minRadius * pair.engulfment * 0.66f,
-                    std::max(a.radius, b.radius) * 0.52f);
-}
-
-struct ContactPatchTargets {
-    glm::vec3 filmCenter = glm::vec3(0.0f);
-    glm::vec3 cutPlaneA = glm::vec3(0.0f);
-    glm::vec3 cutPlaneB = glm::vec3(0.0f);
-};
-
-static ContactPatchTargets ContactPatchTargetsForPair(const BubbleContactPair& pair,
-                                                       const DisplayBubble& a,
-                                                       const DisplayBubble& b,
-                                                       const glm::vec3& axisAToB)
-{
-    ContactPatchTargets targets;
-    float contactRadius = std::max(pair.contactRadius, 0.001f);
-    float centerDistance = glm::length(b.position - a.position);
-    float minRadius = std::max(std::min(a.radius, b.radius), 0.001f);
-    float actualOverlap = (a.radius + b.radius - centerDistance) / minRadius;
-    float overlapSupport = Smooth01((actualOverlap - 0.04f) / 0.58f);
-    float penetration = Smooth01(pair.engulfment / 0.72f) * overlapSupport;
-
-    auto sideCut = [&](const DisplayBubble& bubble, bool smallerSide) {
-        float radius = std::max(bubble.radius, 0.001f);
-        float baseCutRadius = glm::clamp(contactRadius, 0.0f, radius * 0.985f);
-        float baseAxial = std::sqrt(std::max(radius * radius -
-                                            baseCutRadius * baseCutRadius, 0.0f));
-        float axial = baseAxial;
-        if (smallerSide) {
-            // Cross the small bubble's centre at high engulfment. This leaves
-            // less than a hemisphere outside the shared film and is the
-            // geometric meaning of a 50%+ swallowed small bubble.
-            axial = glm::mix(baseAxial, -radius * 0.14f, penetration);
-        } else {
-            float enlargedCutRadius = glm::clamp(
-                baseCutRadius * glm::mix(1.0f, 1.12f, penetration),
-                baseCutRadius, radius * 0.94f);
-            axial = std::sqrt(std::max(radius * radius -
-                                      enlargedCutRadius * enlargedCutRadius, 0.0f));
-        }
-        float cutRadius = std::sqrt(std::max(radius * radius - axial * axial, 0.0f));
-        return glm::vec2(axial, cutRadius);
-    };
-
-    bool aSmaller = a.radius + 1e-4f < b.radius;
-    bool bSmaller = b.radius + 1e-4f < a.radius;
-    glm::vec2 cutA = sideCut(a, aSmaller);
-    glm::vec2 cutB = sideCut(b, bSmaller);
-    glm::vec3 rawCutPlaneA = a.position + axisAToB * cutA.x;
-    glm::vec3 rawCutPlaneB = b.position - axisAToB * cutB.x;
-
-    // The film owns one shared ring. Two explicit collars connect that ring
-    // to the independently cut A/B shells, so deep overlap no longer asks one
-    // impossible plane to intersect both spheres correctly.
-    targets.filmCenter = (rawCutPlaneA + rawCutPlaneB) * 0.5f;
-    float maxCollarSpan = contactRadius * glm::mix(0.18f, 0.38f, penetration);
-    float offsetA = glm::clamp(glm::dot(rawCutPlaneA - targets.filmCenter,
-                                        axisAToB),
-                               -maxCollarSpan, maxCollarSpan);
-    float offsetB = glm::clamp(glm::dot(rawCutPlaneB - targets.filmCenter,
-                                        axisAToB),
-                               -maxCollarSpan, maxCollarSpan);
-    targets.cutPlaneA = targets.filmCenter + axisAToB * offsetA;
-    targets.cutPlaneB = targets.filmCenter + axisAToB * offsetB;
-
-    return targets;
-}
-
 static float PlateauContactRadius(const BubbleContactPair& pair, const DisplayBubble& a, const DisplayBubble& b)
 {
-    float stableRadius = std::min(a.radius, b.radius) * (0.48f + 0.24f * pair.engulfment);
+    float stableRadius = std::min(a.radius, b.radius) * 0.44f;
     float formingRadius = stableRadius * 0.08f;
     float relaxedRadius = glm::mix(formingRadius, stableRadius, Smooth01(pair.geometryBlend));
     float breathing = 1.0f + std::sin((float)g_Time * 1.15f + (float)(pair.a + pair.b) * 0.71f) * 0.025f * pair.geometryBlend;
@@ -962,18 +848,18 @@ static void ResetDisplayBubbles()
     };
 
     const std::vector<BubbleSeed> seeds = {
-        {{-0.38f, -0.06f, 1.08f}, 0.68f, 0.2f, 0.008f, 0.008f, 0.50f, { 0.028f,  0.000f,  0.000f}},
-        {{ 0.59f, -0.06f, 1.11f}, 0.30f, 1.7f, 0.014f, 0.011f, 0.72f, {-0.065f,  0.000f,  0.000f}},
-        {{ 0.04f,  1.00f, 1.09f}, 0.42f, 2.8f, 0.011f, 0.010f, 0.62f, {-0.010f, -0.052f,  0.002f}}
+        {{-1.12f, -0.18f, 1.08f}, 0.48f, 0.2f, 0.010f, 0.009f, 0.55f, { 0.145f,  0.020f,  0.000f}},
+        {{ 1.10f, -0.16f, 1.12f}, 0.44f, 1.7f, 0.010f, 0.009f, 0.58f, {-0.140f,  0.018f,  0.000f}},
+        {{ 0.02f,  1.22f, 1.08f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.66f, {-0.004f, -0.130f,  0.004f}}
     };
 
     g_DisplayBubbles.clear();
     g_NextBubbleId = 1;
     g_DisplayBubbles.reserve(seeds.size());
     const glm::vec3 clusteredHomes[] = {
-        {-0.42f, -0.08f, 1.09f},
-        { 0.52f, -0.08f, 1.10f},
-        { 0.02f,  0.82f, 1.09f}
+        {-0.38f, -0.12f, 1.09f},
+        { 0.36f, -0.10f, 1.11f},
+        { 0.00f,  0.40f, 1.09f}
     };
     for (size_t i = 0; i < seeds.size(); ++i) {
         const auto& seed = seeds[i];
@@ -1100,7 +986,8 @@ static glm::mat4 MakeContactFilmModel(const DisplayBubble& a, const DisplayBubbl
     glm::vec3 side = glm::normalize(glm::cross(up, axis));
     glm::vec3 binormal = glm::cross(axis, side);
 
-    float filmRadius = std::max(0.002f, pair.contactRadius);
+    float pulse = 1.0f + sinf(time * 0.70f + (float)(pair.a * 1.7f + pair.b)) * 0.008f;
+    float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
     glm::vec3 filmCenter = pair.contactFrameInitialized
         ? pair.filteredPlaneCenter
         : (pa + pb) * 0.5f;
@@ -1190,11 +1077,8 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
     }
     float persistentVolumeScale = glm::clamp(1.0f - meanControlRadialOffset,
                                              0.94f, 1.06f);
-    std::vector<glm::vec3> boundaryNormalTargets(vertices.size(), glm::vec3(0.0f));
-    std::vector<float> boundaryNormalWeights(vertices.size(), 0.0f);
 
-    for (size_t vertexIndex = 0; vertexIndex < vertices.size(); ++vertexIndex) {
-        Vertex& vertex = vertices[vertexIndex];
+    for (Vertex& vertex : vertices) {
         glm::vec3 direction = glm::normalize(vertex.Position);
         float alongMotion = glm::dot(direction, motionAxis);
         glm::vec3 axial = motionAxis * alongMotion * axialScale;
@@ -1213,8 +1097,6 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
         }
         glm::vec3 contactOffset(0.0f);
         float vertexContactSum = 0.0f;
-        glm::vec3 collarTargetSum(0.0f);
-        float collarWeightSum = 0.0f;
 
         for (const BubbleContactPair& pair : g_ContactPairs) {
             int otherIndex = -1;
@@ -1223,18 +1105,13 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
                 continue;
             }
             const DisplayBubble& otherBubble = g_DisplayBubbles[(size_t)otherIndex];
-            glm::vec3 liveContactDirection = otherBubble.position - bubble.position;
-            float contactDistance = glm::length(liveContactDirection);
+            glm::vec3 contactDirection =
+                otherBubble.position - bubble.position;
+            float contactDistance = glm::length(contactDirection);
             if (contactDistance < 1e-5f) {
                 continue;
             }
-            liveContactDirection /= contactDistance;
-            int pairAIndex = -1;
-            int pairBIndex = -1;
-            ResolveContactPairIndices(g_DisplayBubbles, pair, pairAIndex, pairBIndex);
-            glm::vec3 contactDirection = pair.contactFrameInitialized
-                ? (pairAIndex == bubbleIndex ? pair.filteredNormal : -pair.filteredNormal)
-                : liveContactDirection;
+            contactDirection /= contactDistance;
 
             float pairStrength = pair.bonded
                 ? glm::clamp(0.20f + 0.80f * std::max(pair.interactionCompression,
@@ -1252,108 +1129,41 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
             float sizeDeformScale = glm::clamp(
                 std::sqrt(std::max(otherBubble.radius, 0.001f) / std::max(bubble.radius, 0.001f)),
                 0.62f, 1.65f);
-            float engulfmentScale = bubble.radius < otherBubble.radius
-                ? 1.0f + pair.engulfment * 0.95f
-                : 1.0f - pair.engulfment * 0.18f;
-            sizeDeformScale = glm::clamp(sizeDeformScale * engulfmentScale, 0.54f, 2.15f);
             float deformationStrength = pairStrength * contactShare * sizeDeformScale;
 
-            glm::vec3 shellCutPlane = pairAIndex == bubbleIndex
-                ? pair.filteredCutPlaneA
-                : pair.filteredCutPlaneB;
-            float shellCutCos = glm::clamp(
-                glm::dot(shellCutPlane - bubble.position, contactDirection) /
-                std::max(bubble.radius, 0.001f),
-                -0.96f, 0.98f);
+            float contactRatio = glm::clamp(pair.contactRadius /
+                                            std::max(bubble.radius, 0.001f),
+                                            0.0f, 0.92f);
+            float geometricConeCos = std::sqrt(std::max(1.0f - contactRatio * contactRatio,
+                                                        0.0f));
             float coneCos = pair.bonded
-                ? shellCutCos
+                ? geometricConeCos
                 : glm::mix(0.94f, 0.70f, deformationStrength);
             float alignment = glm::dot(direction, contactDirection);
             float contactMask = Smooth01((alignment - coneCos) /
                                          std::max(1.0f - coneCos, 0.001f));
-            float rimCenter = coneCos - 0.055f;
-            float rimMask = std::exp(-std::pow((alignment - rimCenter) / 0.050f, 2.0f));
-            bool largerBubbleSide = bubble.radius > otherBubble.radius;
-            bool smallerBubbleSide = bubble.radius < otherBubble.radius;
-            float rimSuppression = largerBubbleSide
-                ? glm::clamp(1.0f - pair.engulfment * 1.45f, 0.05f, 1.0f)
-                : smallerBubbleSide
-                    ? glm::clamp(1.0f - pair.engulfment * 1.10f, 0.08f, 1.0f)
-                    : 1.0f;
-            rimMask *= rimSuppression;
+            float rimCenter = coneCos - 0.045f;
+            float rimMask = std::exp(-std::pow((alignment - rimCenter) / 0.045f, 2.0f));
             glm::vec3 radialDirection = direction - contactDirection * alignment;
             if (glm::length(radialDirection) > 1e-5f) {
                 radialDirection = glm::normalize(radialDirection);
-            } else {
-                glm::vec3 reference = std::abs(contactDirection.y) < 0.92f
-                    ? glm::vec3(0.0f, 1.0f, 0.0f)
-                    : glm::vec3(1.0f, 0.0f, 0.0f);
-                glm::vec3 side = glm::normalize(glm::cross(reference, contactDirection));
-                glm::vec3 binormal = glm::cross(contactDirection, side);
-                float phi = vertex.TexCoords.x * 6.28318530718f;
-                radialDirection = side * std::cos(phi) + binormal * std::sin(phi);
             }
 
-            float collarWeight = 0.0f;
-            if (pair.bonded && pair.contactFrameInitialized) {
-                float collarWidth = glm::mix(0.07f, 0.15f, pair.engulfment);
-                float collarStartCos = glm::clamp(shellCutCos - collarWidth,
-                                                  -0.98f, 0.97f);
-                float collarProfile = Smooth01((alignment - collarStartCos) /
-                                               std::max(shellCutCos - collarStartCos,
-                                                        0.001f));
-                float transition = Smooth01(pair.visualTransitionTime /
-                                            std::max(kContactVisualTransitionTime, 0.001f));
-                collarWeight = collarProfile * transition;
-                float boundaryAxial = glm::dot(pair.filteredPlaneCenter - bubble.position,
-                                               contactDirection) /
-                                      std::max(bubble.radius, 0.001f);
-                float boundaryRadius = pair.contactRadius /
-                                       std::max(bubble.radius, 0.001f);
-                glm::vec3 boundaryPoint = contactDirection * boundaryAxial +
-                                          radialDirection * boundaryRadius;
-                if (alignment > shellCutCos) {
-                    float capInterior = Smooth01((alignment - shellCutCos) /
-                                                 std::max(1.0f - shellCutCos, 0.001f));
-                    // Keep collapsed cap vertices on the clipped side of the
-                    // shared plane. They are then discarded instead of
-                    // forming zero-area triangles exactly on the film ring.
-                    boundaryPoint += contactDirection * (0.025f + 0.055f * capInterior);
-                }
-                collarTargetSum += boundaryPoint * collarWeight;
-                collarWeightSum += collarWeight;
-
-                float ringDistance = std::abs(alignment - shellCutCos);
-                float normalWeight = std::exp(-std::pow(ringDistance / 0.050f, 2.0f)) *
-                                     transition;
-                glm::vec3 filmEdgeNormal = glm::normalize(contactDirection +
-                                                           radialDirection * 0.14f);
-                boundaryNormalTargets[vertexIndex] += filmEdgeNormal * normalWeight;
-                boundaryNormalWeights[vertexIndex] += normalWeight;
-            }
-
-            float flattenBoost = largerBubbleSide ? 1.0f + pair.engulfment * 0.45f : 1.0f;
-            contactOffset -= contactDirection * (0.006f + 0.040f * deformationStrength) *
-                             contactMask * flattenBoost * (1.0f - collarWeight);
-            contactOffset += radialDirection * (0.003f + 0.010f * deformationStrength) *
-                             rimMask * (1.0f - collarWeight);
+            // Keep only a small analytic correction for an exact seal against
+            // the contact plane. Most deformation now comes from persistent
+            // surface-control dynamics above.
+            contactOffset -= contactDirection * (0.006f + 0.040f * deformationStrength) * contactMask;
+            contactOffset += radialDirection * (0.003f + 0.010f * deformationStrength) * rimMask;
             vertexContactSum += deformationStrength * contactMask;
         }
 
-        float maxOffset = 0.22f;
+        float maxOffset = 0.18f;
         float offsetLength = glm::length(contactOffset);
         if (offsetLength > maxOffset) {
             contactOffset *= maxOffset / offsetLength;
         }
         float volumeCompensation = 1.0f + std::min(vertexContactSum, 2.0f) * 0.012f;
-        glm::vec3 shellPosition = position * (volumeCompensation * persistentVolumeScale) +
-                                  contactOffset;
-        if (collarWeightSum > 1e-5f) {
-            glm::vec3 collarTarget = collarTargetSum / collarWeightSum;
-            shellPosition = glm::mix(shellPosition, collarTarget,
-                                     glm::clamp(collarWeightSum, 0.0f, 1.0f));
-        }
-        vertex.Position = shellPosition;
+        vertex.Position = position * (volumeCompensation * persistentVolumeScale) + contactOffset;
         vertex.Normal = glm::normalize(vertex.Position);
     }
 
@@ -1376,14 +1186,6 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
         if (glm::length(normalSums[i]) > 1e-6f) {
             vertices[i].Normal = glm::normalize(normalSums[i]);
         }
-        if (boundaryNormalWeights[i] > 1e-5f) {
-            glm::vec3 targetNormal = glm::normalize(boundaryNormalTargets[i] /
-                                                    boundaryNormalWeights[i]);
-            vertices[i].Normal = glm::normalize(glm::mix(
-                vertices[i].Normal,
-                targetNormal,
-                glm::clamp(boundaryNormalWeights[i], 0.0f, 0.82f)));
-        }
     }
     return vertices;
 }
@@ -1403,7 +1205,6 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         pair.interactionVelocity *= std::exp(-dt * 6.0f);
         pair.interactionCompression = std::max(0.0f,
             pair.interactionCompression + pair.interactionVelocity * dt - dt * 0.9f);
-        pair.engulfment = std::max(0.0f, pair.engulfment - dt * 0.75f);
         pair.filmThickness += (1.0f - pair.filmThickness) * std::min(1.0f, dt * 1.6f);
         pair.ruptureRisk = 0.0f;
         pair.state = BubbleContactPair::State::Free;
@@ -1437,7 +1238,6 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         pair.interactionVelocity *= std::exp(-dt * 6.0f);
         pair.interactionCompression = std::max(0.0f,
             pair.interactionCompression + pair.interactionVelocity * dt - dt * 0.9f);
-        pair.engulfment = std::max(0.0f, pair.engulfment - dt * 0.75f);
         pair.filmThickness += (1.0f - pair.filmThickness) * std::min(1.0f, dt * 1.6f);
         pair.ruptureRisk = 0.0f;
         return;
@@ -1506,32 +1306,27 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     pair.interactionVelocity += compressionAcceleration * dt;
     pair.interactionCompression = glm::clamp(
         pair.interactionCompression + pair.interactionVelocity * dt, 0.0f, 1.0f);
-    float targetEngulfment = TargetPairEngulfment(pair, a, b);
-    pair.engulfment = glm::mix(pair.engulfment,
-                               targetEngulfment,
-                               1.0f - std::exp(-dt * 3.10f));
     float filmGrowth = std::max(
         std::pow(Smooth01(pair.contactTime / 1.05f), 0.55f),
         0.45f * pair.contactActivation);
     float crowdingRetention = std::pow(crowdingScale, 0.12f);
     float stableDoubleScale = keepStableDouble ? 0.82f : 1.0f;
-    float targetContactRatio = (0.54f + 0.22f * pair.interactionCompression) *
+    float targetContactRatio = (0.52f + 0.22f * pair.interactionCompression) *
                                stableDoubleScale *
-                               crowdingRetention +
-                               0.28f * pair.engulfment;
+                               crowdingRetention;
     float targetContactRadius = minRadius * targetContactRatio * filmGrowth;
     float radiusAcceleration = (targetContactRadius - pair.contactRadius) * 42.0f -
                                pair.contactRadiusVelocity * 14.0f;
     pair.contactRadiusVelocity += radiusAcceleration * dt;
     pair.contactRadius = glm::clamp(pair.contactRadius + pair.contactRadiusVelocity * dt,
-                                    0.0f, minRadius * glm::mix(0.82f, 0.985f, pair.engulfment));
+                                    0.0f, minRadius * 0.78f);
 
-    ContactPatchTargets patchTargets = ContactPatchTargetsForPair(pair, a, b, n);
+    float planeOffsetA = std::sqrt(std::max(a.radius * a.radius -
+                                           pair.contactRadius * pair.contactRadius, 0.0f));
+    glm::vec3 targetPlaneCenter = a.position + n * planeOffsetA;
     if (!pair.contactFrameInitialized) {
         pair.filteredNormal = n;
-        pair.filteredPlaneCenter = patchTargets.filmCenter;
-        pair.filteredCutPlaneA = patchTargets.cutPlaneA;
-        pair.filteredCutPlaneB = patchTargets.cutPlaneB;
+        pair.filteredPlaneCenter = targetPlaneCenter;
         pair.contactFrameInitialized = true;
     } else {
         float frameBlend = 1.0f - std::exp(-dt * 10.0f);
@@ -1540,11 +1335,7 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
             pair.filteredNormal = glm::normalize(blendedNormal);
         }
         pair.filteredPlaneCenter = glm::mix(pair.filteredPlaneCenter,
-                                            patchTargets.filmCenter, frameBlend);
-        pair.filteredCutPlaneA = glm::mix(pair.filteredCutPlaneA,
-                                          patchTargets.cutPlaneA, frameBlend);
-        pair.filteredCutPlaneB = glm::mix(pair.filteredCutPlaneB,
-                                          patchTargets.cutPlaneB, frameBlend);
+                                            targetPlaneCenter, frameBlend);
     }
 
     pair.bridgeStrength = Smooth01(pair.contactTime / 0.55f) * contactAmount;
@@ -1746,12 +1537,13 @@ static void UpdateDisplayBubbleInteractions(float dt)
                 float preContactRadius = minRadius * 0.10f *
                                          contactActivation * contactActivation;
                 pair.contactRadius = std::max(pair.contactRadius, preContactRadius);
-                ContactPatchTargets patchTargets = ContactPatchTargetsForPair(pair, a, b, n);
+                float planeOffsetA = std::sqrt(std::max(a.radius * a.radius -
+                                                       pair.contactRadius * pair.contactRadius,
+                                                       0.0f));
+                glm::vec3 targetPlaneCenter = a.position + n * planeOffsetA;
                 if (!pair.contactFrameInitialized) {
                     pair.filteredNormal = n;
-                    pair.filteredPlaneCenter = patchTargets.filmCenter;
-                    pair.filteredCutPlaneA = patchTargets.cutPlaneA;
-                    pair.filteredCutPlaneB = patchTargets.cutPlaneB;
+                    pair.filteredPlaneCenter = targetPlaneCenter;
                     pair.contactFrameInitialized = true;
                 } else {
                     float frameBlend = 1.0f - std::exp(-dt * 12.0f);
@@ -1760,11 +1552,7 @@ static void UpdateDisplayBubbleInteractions(float dt)
                         pair.filteredNormal = glm::normalize(blendedNormal);
                     }
                     pair.filteredPlaneCenter = glm::mix(pair.filteredPlaneCenter,
-                                                        patchTargets.filmCenter, frameBlend);
-                    pair.filteredCutPlaneA = glm::mix(pair.filteredCutPlaneA,
-                                                      patchTargets.cutPlaneA, frameBlend);
-                    pair.filteredCutPlaneB = glm::mix(pair.filteredCutPlaneB,
-                                                      patchTargets.cutPlaneB, frameBlend);
+                                                        targetPlaneCenter, frameBlend);
                 }
                 pair.restDistance = contactDistance;
                 pair.targetVolume = a.targetVolume + b.targetVolume;
@@ -1833,8 +1621,10 @@ static void UpdateDisplayBubbleInteractions(float dt)
             }
             float bondBlend = Smooth01(pair.contactTime / 0.30f);
             float contactRadius = glm::clamp(pair.contactRadius,
-                                             0.0f, minRadius * glm::mix(0.84f, 0.99f, pair.engulfment));
-            float restDistance = EngulfedContactRestDistance(pair, a, b, contactRadius);
+                                             0.0f, minRadius * 0.82f);
+            float restDistance =
+                std::sqrt(std::max(a.radius * a.radius - contactRadius * contactRadius, 0.0f)) +
+                std::sqrt(std::max(b.radius * b.radius - contactRadius * contactRadius, 0.0f));
             float constraint = dist - restDistance;
             if (constraint >= 0.0f) {
                 float contactMargin = minRadius * (pair.bonded ? 0.24f : 0.035f);
@@ -2011,7 +1801,6 @@ static void UpdateDisplayBubbleInteractions(float dt)
                       << " bridge=" << pair.bridgeStrength
                       << " geom=" << pair.geometryBlend
                       << " compression=" << pair.interactionCompression
-                      << " engulf=" << pair.engulfment
                       << " activation=" << pair.contactActivation
                       << " outcome=" << CoalescenceOutcomeName(pair.outcome)
                       << " coalesceScore=" << pair.coalescenceScore
@@ -2378,25 +2167,14 @@ static void RenderFrame()
             glm::vec3 planeNormal = aIndex == bubbleIndex
                 ? pair.filteredNormal
                 : -pair.filteredNormal;
-            const DisplayBubble& otherBubble = g_DisplayBubbles[(size_t)otherIndex];
-            bool largerBubbleSide = bubble.radius > otherBubble.radius;
-            bool smallerBubbleSide = bubble.radius < otherBubble.radius;
-            float transitionClip = Smooth01(pair.visualTransitionTime /
-                                            std::max(kContactVisualTransitionTime, 0.001f));
-            float strength = pair.bonded
-                ? transitionClip
-                : glm::clamp(pair.contactActivation, 0.0f, 1.0f);
+            float strength = glm::clamp(pair.contactActivation, 0.0f, 1.0f);
             std::string index = std::to_string(visualContactCount);
             g_RefractionShader->SetVec3("uVisualContactPlanePoints[" + index + "]",
                                         pair.filteredPlaneCenter);
             g_RefractionShader->SetVec3("uVisualContactPlaneNormals[" + index + "]",
                                         planeNormal);
             g_RefractionShader->SetFloat("uVisualContactBlendWidths[" + index + "]",
-                                         std::max(bubble.radius *
-                                                  (largerBubbleSide ? 0.012f :
-                                                   smallerBubbleSide ? 0.010f :
-                                                   0.018f),
-                                                  0.002f));
+                                         std::max(bubble.radius * 0.018f, 0.002f));
             g_RefractionShader->SetFloat("uVisualContactStrengths[" + index + "]", strength);
             ++visualContactCount;
         }
@@ -2500,12 +2278,14 @@ static void RenderFrame()
             const DisplayBubble& b = g_DisplayBubbles[(size_t)bIndex];
             float visibility = pair.contactActivation * pair.contactActivation;
             float alpha = (straightComposite ? 0.16f : 0.24f) * visibility;
-            float filmRadius = std::max(0.002f, pair.contactRadius);
+            float pulse = 1.0f + std::sin((float)g_Time * 0.70f +
+                                          (float)(pair.a * 0.37f + pair.b * 0.19f)) * 0.008f;
+            float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
             float normalizedCurvature = ContactFilmWorldCurvature(a, b, pair) * filmRadius;
-            glm::mat4 filmModel = MakeContactFilmModel(a, b, pair, (float)g_Time);
             if (Mesh* mesh = g_ContactFilmModel->getMesh(0)) {
                 mesh->updateVertices(BuildCurvedContactFilmVertices(normalizedCurvature));
             }
+            glm::mat4 filmModel = MakeContactFilmModel(a, b, pair, (float)g_Time);
             SetRefractUniforms(filmModel, std::max(pair.contactRadius, 0.01f),
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);

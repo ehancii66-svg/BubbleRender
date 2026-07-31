@@ -394,13 +394,6 @@ R"(
 // Main
 // ============================================================
 void main() {
-    // A fully removed contact cap must not participate in depth, refraction,
-    // or later transparent passes. Alpha-only clipping left a faint circular
-    // remnant of the smaller shell at deep unequal-bubble contacts.
-    if (vShellCoverage <= 0.015) {
-        discard;
-    }
-
     float iorRatio = 1.0 / 1.33;
 
     vec3 normal = normalize(vWorldNormal);
