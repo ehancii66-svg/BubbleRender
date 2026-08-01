@@ -111,9 +111,6 @@ bool BubbleSurfaceSystem::PromoteFusion(uint64_t bubbleA,
         float inverseRadius = 1.0f / std::max(survivorRadius, 0.001f);
         for (Vertex& vertex : normalizedVertices) {
             vertex.Position *= inverseRadius;
-            glm::vec3 radial = glm::normalize(vertex.Position);
-            vertex.Position = radial;
-            vertex.Normal = radial;
         }
         mesh->updateVertices(normalizedVertices);
         bubbleRestVertices_[survivorId] = normalizedVertices;

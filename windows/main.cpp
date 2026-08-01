@@ -1252,12 +1252,15 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
         surfaceDynamicsBlend);
 
     for (Vertex& vertex : vertices) {
-        glm::vec3 direction = glm::normalize(vertex.Position);
+        glm::vec3 restPosition = vertex.Position;
+        glm::vec3 restNormal = SafeNormalizeDirection(vertex.Normal, restPosition);
+        float restRadius = std::max(glm::length(restPosition), 0.001f);
+        glm::vec3 direction = restPosition / restRadius;
         vertex.FilmDirection = direction;
         float alongMotion = glm::dot(direction, motionAxis);
         glm::vec3 axial = motionAxis * alongMotion * axialScale;
         glm::vec3 radial = (direction - motionAxis * alongMotion) * radialScale;
-        glm::vec3 position = axial + radial;
+        glm::vec3 position = (axial + radial) * restRadius;
         glm::vec3 persistentSurfaceOffset(0.0f);
         float persistentWeight = 0.0f;
         for (const auto& control : bubble.surfaceControls) {
@@ -1335,7 +1338,10 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
         }
         float volumeCompensation = 1.0f + std::min(vertexContactSum, 2.0f) * 0.012f;
         vertex.Position = position * (volumeCompensation * persistentVolumeScale) + contactOffset;
-        vertex.Normal = glm::normalize(vertex.Position);
+        glm::vec3 deformedNormal = SafeNormalizeDirection(vertex.Position, restNormal);
+        vertex.Normal = SafeNormalizeDirection(
+            glm::mix(restNormal, deformedNormal, surfaceDynamicsBlend),
+            restNormal);
     }
 
     std::vector<unsigned int> indices = BuildContactBubblePatchIndices();
