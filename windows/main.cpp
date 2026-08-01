@@ -2487,8 +2487,7 @@ static void RenderFrame()
                 : 1.0f) * pairAlpha * visibility;
             SetRefractUniforms(fusionModel, targetRadius * 1.15f,
                                isBackFace, renderToFBO, false,
-                               0.0f, 0.0f, 2, alpha,
-                               glm::mix(0.82f, 1.0f, pair.relaxationProgress));
+                               0.0f, 0.0f, 2, alpha, 1.0f);
             g_RefractionShader->SetInt("uVisualContactCount", 0);
             g_FusionSurfaceModel->Draw(*g_RefractionShader);
         }
