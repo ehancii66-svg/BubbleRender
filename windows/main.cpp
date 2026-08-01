@@ -765,6 +765,9 @@ static void FinalizeCompletedFusions()
         float mergedVolume = std::max(volumeA + volumeB, 0.001f);
         glm::vec3 mergedCenter = (survivor.position * volumeA + absorbed.position * volumeB) /
                                  mergedVolume;
+        glm::vec3 mergedVelocity =
+            (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
+            mergedVolume;
         float mergedRadius = RadiusFromVolume(mergedVolume);
 
         if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
@@ -774,7 +777,7 @@ static void FinalizeCompletedFusions()
 
         survivor.position = mergedCenter;
         survivor.basePosition = mergedCenter;
-        survivor.velocity = glm::vec3(0.0f);
+        survivor.velocity = mergedVelocity;
         survivor.radius = mergedRadius;
         survivor.initialRadius = mergedRadius;
         survivor.targetVolume = mergedVolume;
@@ -1666,32 +1669,35 @@ static void UpdateDisplayBubbleInteractions(float dt)
             continue;
         }
 
-        if (bubble.volumeTransferred) {
-            bubble.state = DisplayBubble::State::Merged;
-            bubble.basePosition = bubble.position;
-            bubble.velocity = glm::vec3(0.0f);
-            bubble.contactStrength = 0.0f;
-            bubble.surfaceDynamicsBlend = 0.0f;
-            continue;
-        }
-
-        bubble.state = DisplayBubble::State::Free;
-        float driftScale = g_InteractionDemoActive ? 0.15f : 0.85f;
+        bool mergedBubble = bubble.volumeTransferred;
+        bubble.state = mergedBubble
+            ? DisplayBubble::State::Merged
+            : DisplayBubble::State::Free;
+        float driftScale = mergedBubble
+            ? 0.55f
+            : (g_InteractionDemoActive ? 0.15f : 0.85f);
         glm::vec3 homePull = (bubble.basePosition - bubble.position) *
-                             (g_InteractionDemoActive ? 0.020f : 0.340f);
+                             (mergedBubble
+                                  ? 0.10f
+                                  : (g_InteractionDemoActive ? 0.020f : 0.340f));
         glm::vec3 slowDrift = glm::vec3(
             sinf((float)g_Time * bubble.speed + bubble.phase),
             cosf((float)g_Time * bubble.speed * 0.7f + bubble.phase * 1.3f),
             sinf((float)g_Time * bubble.speed * 0.5f + bubble.phase * 0.8f)) * (0.018f * driftScale);
         float windRadiusResponse = glm::clamp(std::sqrt(0.40f / std::max(bubble.radius, 0.08f)),
                                               0.58f, 1.35f);
-        glm::vec3 globalWind = g_WindEnabled
+        glm::vec3 globalWind = g_WindEnabled && !mergedBubble
             ? g_GlobalWindDirection * (g_GlobalWindStrength * windRadiusResponse)
             : glm::vec3(0.0f);
         bubble.velocity += (homePull + slowDrift + globalWind) * dt;
-        bubble.velocity *= expf(dt * -0.48f);
+        bubble.velocity *= expf(dt * (mergedBubble ? -0.72f : -0.48f));
         bubble.position += bubble.velocity * dt;
-        bubble.contactStrength *= expf(dt * -3.0f);
+        if (mergedBubble) {
+            bubble.contactStrength = 0.0f;
+            bubble.surfaceDynamicsBlend = 0.0f;
+        } else {
+            bubble.contactStrength *= expf(dt * -3.0f);
+        }
         if (bubble.targetVolume > 0.0f) {
             float targetRadius = RadiusFromVolume(bubble.targetVolume);
             bubble.radius += (targetRadius - bubble.radius) * std::min(1.0f, dt * 1.8f);
