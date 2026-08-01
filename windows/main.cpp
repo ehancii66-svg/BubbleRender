@@ -140,7 +140,7 @@ static constexpr float kMaxSpawnRadius = 0.72f;
 static float g_BubbleSpawnPlaneZ = kDefaultBubbleSpawnPlaneZ;
 static float g_SpawnRadius = 0.40f;
 static size_t g_MaxLiveBubbleCount = 8;
-static bool g_WindEnabled = true;
+static bool g_WindEnabled = false;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static float g_GlobalWindStrength = 0.16f;
 static constexpr float kMinGlobalWindStrength = 0.0f;
@@ -266,6 +266,8 @@ static float PairHash01(uint64_t a, uint64_t b)
 static const char* CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome outcome)
 {
     switch (outcome) {
+    case BubbleContactPair::CoalescenceOutcome::SeparateAfterContact:
+        return "separate";
     case BubbleContactPair::CoalescenceOutcome::StayDoubleBubble:
         return "stay-double";
     case BubbleContactPair::CoalescenceOutcome::WillCoalesce:
@@ -602,34 +604,51 @@ static void DecideCoalescenceOutcome(BubbleContactPair& pair,
 
     float minRadius = std::max(std::min(a.radius, b.radius), 0.001f);
     float maxRadius = std::max(std::max(a.radius, b.radius), minRadius);
-    float sizeMismatch = glm::clamp((maxRadius - minRadius) / maxRadius, 0.0f, 1.0f);
+    float sizeRatio = glm::clamp(minRadius / maxRadius, 0.0f, 1.0f);
+    float sizeMismatch = 1.0f - sizeRatio;
     float contactAge = Smooth01((pair.contactTime - 0.65f) / 1.35f);
     float thinFilm = Smooth01((0.42f - pair.filmThickness) / 0.26f);
     float impact = Smooth01(std::max(-relNormalSpeed, 0.0f) / 0.52f);
     float contactSize = Smooth01((pair.contactRadius / minRadius - 0.18f) / 0.46f);
     float windInstability = Smooth01(g_GlobalWindStrength / std::max(kMaxGlobalWindStrength, 0.001f));
 
-    float stableEqualSizePenalty = (1.0f - sizeMismatch) * 0.34f * contactAge;
-    float score =
-        0.10f +
-        contactAge * 0.20f +
-        thinFilm * 0.24f +
-        impact * 0.15f +
-        contactSize * 0.12f +
-        sizeMismatch * 0.26f +
-        windInstability * 0.06f -
-        stableEqualSizePenalty;
-    pair.coalescenceScore = glm::clamp(score, 0.05f, 0.86f);
+    float separationProbability = glm::clamp(
+        0.08f +
+        (1.0f - contactSize) * 0.10f +
+        impact * 0.08f +
+        windInstability * 0.04f,
+        0.08f, 0.26f);
+    float fusionProbability = glm::clamp(
+        0.14f +
+        sizeMismatch * 0.68f +
+        thinFilm * 0.12f +
+        impact * 0.07f +
+        contactAge * 0.05f,
+        0.12f, 0.82f);
+    float probabilitySum = separationProbability + fusionProbability;
+    if (probabilitySum > 0.92f) {
+        float scale = 0.92f / probabilitySum;
+        separationProbability *= scale;
+        fusionProbability *= scale;
+    }
+    pair.coalescenceScore = fusionProbability;
     pair.coalescenceRandom = PairHash01(pair.a, pair.b);
-    pair.outcome = pair.coalescenceRandom < pair.coalescenceScore
-        ? BubbleContactPair::CoalescenceOutcome::WillCoalesce
-        : BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
+    if (pair.coalescenceRandom < separationProbability) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
+        pair.persistentRenderPair = true;
+    } else if (pair.coalescenceRandom < separationProbability + fusionProbability) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+    } else {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
+    }
 
     if (g_LogContactDebug) {
         std::cout << "[BubbleCoalescence] pair=(" << pair.a << ", " << pair.b << ")"
                   << " outcome=" << CoalescenceOutcomeName(pair.outcome)
                   << " score=" << pair.coalescenceScore
                   << " random=" << pair.coalescenceRandom
+                  << " separate=" << separationProbability
+                  << " sizeRatio=" << sizeRatio
                   << " mismatch=" << sizeMismatch
                   << " film=" << pair.filmThickness
                   << std::endl;
@@ -1031,21 +1050,37 @@ static void ResetDisplayBubbles()
 
 static void StartBubbleInteractionDemo()
 {
-    if (g_DisplayBubbles.size() < 2) {
-        return;
-    }
+    enum class DemoVariant {
+        StableDouble,
+        UnequalFusion,
+        Separate
+    };
+    static int s_NextVariant = 0;
+    DemoVariant variant = (DemoVariant)s_NextVariant;
+    s_NextVariant = (s_NextVariant + 1) % 3;
+
+    ResetDisplayBubbles();
 
     g_ContactPairs.clear();
     DisplayBubble& a = g_DisplayBubbles[0];
     DisplayBubble& b = g_DisplayBubbles[1];
     glm::vec3 center(0.0f, 0.0f, 1.10f);
     glm::vec3 axis = glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f));
-    float radiusA = 0.56f;
-    float radiusB = 0.56f;
+    float radiusA = variant == DemoVariant::UnequalFusion ? 0.64f : 0.56f;
+    float radiusB = variant == DemoVariant::UnequalFusion
+        ? 0.31f
+        : (variant == DemoVariant::Separate ? 0.50f : 0.56f);
     float finalFilmRadius = std::min(radiusA, radiusB) * 0.30f;
     float restDistance = std::sqrt(radiusA * radiusA - finalFilmRadius * finalFilmRadius)
         + std::sqrt(radiusB * radiusB - finalFilmRadius * finalFilmRadius);
     float centerDistance = radiusA + radiusB + std::min(radiusA, radiusB) * 0.065f;
+    float volumeA = BubbleVolume(radiusA);
+    float volumeB = BubbleVolume(radiusB);
+    float totalVolume = volumeA + volumeB;
+    float invMassA = 1.0f / std::max(volumeA, 0.001f);
+    float invMassB = 1.0f / std::max(volumeB, 0.001f);
+    float invMassSum = invMassA + invMassB;
+    float approachSpeed = variant == DemoVariant::Separate ? 0.13f : 0.10f;
 
     a.radius = radiusA;
     a.initialRadius = radiusA;
@@ -1060,9 +1095,9 @@ static void StartBubbleInteractionDemo()
     a.volumeTransferred = false;
     a.state = DisplayBubble::State::Free;
     a.surfaceControls = MakeSurfaceControls(a.phase);
-    a.position = center - axis * (centerDistance * 0.5f);
-    a.basePosition = center - axis * (restDistance * 0.5f);
-    a.velocity = axis * 0.085f;
+    a.position = center - axis * (centerDistance * volumeB / totalVolume);
+    a.basePosition = center - axis * (restDistance * volumeB / totalVolume);
+    a.velocity = axis * (approachSpeed * invMassA / invMassSum);
 
     b.radius = radiusB;
     b.initialRadius = radiusB;
@@ -1077,9 +1112,9 @@ static void StartBubbleInteractionDemo()
     b.volumeTransferred = false;
     b.state = DisplayBubble::State::Free;
     b.surfaceControls = MakeSurfaceControls(b.phase);
-    b.position = center + axis * (centerDistance * 0.5f);
-    b.basePosition = center + axis * (restDistance * 0.5f);
-    b.velocity = -axis * 0.085f;
+    b.position = center + axis * (centerDistance * volumeA / totalVolume);
+    b.basePosition = center + axis * (restDistance * volumeA / totalVolume);
+    b.velocity = -axis * (approachSpeed * invMassB / invMassSum);
 
     for (size_t i = 2; i < g_DisplayBubbles.size(); ++i) {
         g_DisplayBubbles[i].alpha = 0.0f;
@@ -1096,15 +1131,29 @@ static void StartBubbleInteractionDemo()
     pair.ruptureRisk = 0.0f;
     pair.targetVolume = a.targetVolume + b.targetVolume;
     pair.state = BubbleContactPair::State::Free;
-    pair.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
-    pair.coalescenceScore = 1.0f;
+    if (variant == DemoVariant::StableDouble) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
+        pair.coalescenceScore = 0.0f;
+    } else if (variant == DemoVariant::UnequalFusion) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+        pair.coalescenceScore = 1.0f;
+    } else {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
+        pair.coalescenceScore = 0.0f;
+    }
     pair.active = true;
     pair.persistentRenderPair = true;
     g_ContactPairs.push_back(pair);
 
     g_InteractionDemoActive = true;
     g_ShowMainBubble = false;
-    std::cout << "[BubbleInteraction] replay: two bubbles form a shared contact film" << std::endl;
+    const char* variantName = variant == DemoVariant::StableDouble
+        ? "equal-size stable figure-eight"
+        : (variant == DemoVariant::UnequalFusion
+               ? "small bubble absorbed by large bubble"
+               : "temporary contact then separation");
+    std::cout << "[BubbleInteraction] replay: " << variantName
+              << " (press G for next)" << std::endl;
 }
 
 static glm::vec3 BubbleVisualCenter(const DisplayBubble& bubble, float time)
@@ -1453,6 +1502,37 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
     pair.filmThickness = std::max(0.12f, pair.filmThickness - dt * (0.018f + 0.050f * contactAmount));
     pair.ruptureRisk = Smooth01((0.35f - pair.filmThickness) / 0.09f) * Smooth01((std::abs(relNormalSpeed) - 0.55f) / 0.55f);
     DecideCoalescenceOutcome(pair, a, b, relNormalSpeed);
+    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::SeparateAfterContact &&
+        pair.contactTime >= 0.72f) {
+        if (!pair.separationImpulseApplied) {
+            float invMassA = BubbleInvMass(a);
+            float invMassB = BubbleInvMass(b);
+            float invMassSum = std::max(invMassA + invMassB, 0.001f);
+            float separationSpeed = glm::mix(
+                0.10f, 0.18f,
+                Smooth01(std::abs(relNormalSpeed) / 0.45f));
+            a.velocity -= n * (separationSpeed * invMassA / invMassSum);
+            b.velocity += n * (separationSpeed * invMassB / invMassSum);
+            pair.separationImpulseApplied = true;
+        }
+
+        pair.separationElapsed += dt;
+        pair.bonded = false;
+        pair.candidate = pair.separationElapsed < 0.55f;
+        pair.persistentRenderPair = pair.separationElapsed < 0.95f;
+        pair.contactActivation *= std::exp(-dt * 3.8f);
+        pair.bridgeStrength *= std::exp(-dt * 3.2f);
+        pair.geometryBlend *= std::exp(-dt * 2.8f);
+        pair.contactRadius = std::max(0.0f, pair.contactRadius - dt * minRadius * 0.42f);
+        pair.filmThickness += (1.0f - pair.filmThickness) * std::min(1.0f, dt * 1.8f);
+        pair.state = BubbleContactPair::State::Separated;
+        a.state = DisplayBubble::State::Separated;
+        b.state = DisplayBubble::State::Separated;
+        if (!pair.persistentRenderPair) {
+            pair.active = false;
+        }
+        return;
+    }
     bool keepStableDouble =
         pair.outcome == BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
     if (keepStableDouble) {
@@ -1673,23 +1753,26 @@ static void UpdateDisplayBubbleInteractions(float dt)
         bubble.state = mergedBubble
             ? DisplayBubble::State::Merged
             : DisplayBubble::State::Free;
-        float driftScale = mergedBubble
-            ? 0.55f
-            : (g_InteractionDemoActive ? 0.15f : 0.85f);
-        glm::vec3 homePull = (bubble.basePosition - bubble.position) *
-                             (mergedBubble
-                                  ? 0.10f
-                                  : (g_InteractionDemoActive ? 0.020f : 0.340f));
-        glm::vec3 slowDrift = glm::vec3(
-            sinf((float)g_Time * bubble.speed + bubble.phase),
-            cosf((float)g_Time * bubble.speed * 0.7f + bubble.phase * 1.3f),
-            sinf((float)g_Time * bubble.speed * 0.5f + bubble.phase * 0.8f)) * (0.018f * driftScale);
+        float swayScale = mergedBubble
+            ? 0.90f
+            : (g_InteractionDemoActive ? 0.45f : 1.0f);
+        float swayAmplitude = (0.028f + bubble.floatAmplitude * 1.4f) * swayScale;
+        glm::vec3 swayOffset = glm::vec3(
+            sinf((float)g_Time * bubble.speed + bubble.phase) * 0.85f,
+            cosf((float)g_Time * bubble.speed * 0.73f + bubble.phase * 1.31f),
+            sinf((float)g_Time * bubble.speed * 0.57f + bubble.phase * 0.79f) * 0.48f) *
+            swayAmplitude;
+        float swayPullRate = mergedBubble
+            ? 0.22f
+            : (g_InteractionDemoActive ? 0.16f : 0.34f);
+        glm::vec3 swayPull =
+            (bubble.basePosition + swayOffset - bubble.position) * swayPullRate;
         float windRadiusResponse = glm::clamp(std::sqrt(0.40f / std::max(bubble.radius, 0.08f)),
                                               0.58f, 1.35f);
-        glm::vec3 globalWind = g_WindEnabled && !mergedBubble
+        glm::vec3 globalWind = g_WindEnabled
             ? g_GlobalWindDirection * (g_GlobalWindStrength * windRadiusResponse)
             : glm::vec3(0.0f);
-        bubble.velocity += (homePull + slowDrift + globalWind) * dt;
+        bubble.velocity += (swayPull + globalWind) * dt;
         bubble.velocity *= expf(dt * (mergedBubble ? -0.72f : -0.48f));
         bubble.position += bubble.velocity * dt;
         if (mergedBubble) {
@@ -1745,6 +1828,17 @@ static void UpdateDisplayBubbleInteractions(float dt)
             int j = candidatePair.second;
             auto& a = g_DisplayBubbles[(size_t)i];
             auto& b = g_DisplayBubbles[(size_t)j];
+
+            int existingPairIndex = FindContactPair(g_ContactPairs, a.id, b.id);
+            if (existingPairIndex >= 0) {
+                const BubbleContactPair& existingPair =
+                    g_ContactPairs[(size_t)existingPairIndex];
+                if (existingPair.outcome ==
+                        BubbleContactPair::CoalescenceOutcome::SeparateAfterContact &&
+                    existingPair.separationElapsed < 1.25f) {
+                    continue;
+                }
+            }
 
             glm::vec3 delta = b.position - a.position;
             float dist = glm::length(delta);
@@ -3415,7 +3509,7 @@ int main()
     std::cout << "Simulation" << std::endl;
     std::cout << "  Z              Pause / resume" << std::endl;
     std::cout << "  X              Reset synced bubble scene" << std::endl;
-    std::cout << "  G              Replay bubble contact / bridge demo" << std::endl;
+    std::cout << "  G              Cycle interaction outcome replay" << std::endl;
     std::cout << "  B / V          Add / remove interactive bubble" << std::endl;
     std::cout << "  Shift+Left     Spawn bubble at cursor plane" << std::endl;
     std::cout << "  [ / ]          Spawn radius               - / +" << std::endl;
@@ -3443,7 +3537,7 @@ int main()
               << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
               << ", contactLog=" << (g_LogContactDebug ? "on" : "off")
               << std::endl;
-    std::cout << "Scene: startup two-bubble fusion replay" << std::endl;
+    std::cout << "Scene: startup two-bubble interaction replay" << std::endl;
     std::cout << "==================================================" << std::endl;
 
     while (!glfwWindowShouldClose(window))

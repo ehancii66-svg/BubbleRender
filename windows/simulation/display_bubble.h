@@ -62,6 +62,7 @@ struct BubbleContactPair {
 
     enum class CoalescenceOutcome {
         Undecided,
+        SeparateAfterContact,
         StayDoubleBubble,
         WillCoalesce
     };
@@ -95,6 +96,7 @@ struct BubbleContactPair {
     float neckProgress = 0.0f;
     float relaxationProgress = 0.0f;
     float fusionCompletionHold = 0.0f;
+    float separationElapsed = 0.0f;
     float restDistance = 0.0f;
     float targetVolume = 0.0f;
     State state = State::Free;
@@ -105,6 +107,7 @@ struct BubbleContactPair {
     bool persistentRenderPair = false;
     bool fusionActive = false;
     bool fusionComplete = false;
+    bool separationImpulseApplied = false;
     float candidateExitTime = 0.0f;
 };
 
