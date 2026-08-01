@@ -142,8 +142,6 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
 
     float sourceLeft = std::min(centerA - radiusA, centerB - radiusB);
     float sourceRight = std::max(centerA + radiusA, centerB + radiusB);
-    float left = glm::mix(sourceLeft, -targetRadius, relaxationProgress);
-    float right = glm::mix(sourceRight, targetRadius, relaxationProgress);
     float minRadius = std::min(radiusA, radiusB);
     float contactCenter = 0.5f * ((centerA + radiusA) + (centerB - radiusB));
     float bridgeHalfWidth = minRadius * glm::mix(0.12f, 0.92f, neckProgress);
@@ -156,7 +154,9 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
     for (int ring = 0; ring <= rings; ++ring) {
         float v = (float)ring / (float)rings;
         float sourceX = glm::mix(sourceLeft, sourceRight, v);
-        float x = glm::mix(left, right, v);
+        float targetTheta = kPi * (1.0f - Smooth01Local(v));
+        float targetX = std::cos(targetTheta) * targetRadius;
+        float x = glm::mix(sourceX, targetX, relaxationProgress);
         float rhoASq = radiusA * radiusA - (x - centerA) * (x - centerA);
         float rhoBSq = radiusB * radiusB - (x - centerB) * (x - centerB);
         float sourceRho = std::max(std::sqrt(std::max(rhoASq, 0.0f)),
@@ -169,7 +169,7 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
             : 0.0f;
         sourceRho = std::max(sourceRho, neckRadius * bridgeShape);
 
-        float targetRhoSq = targetRadius * targetRadius - x * x;
+        float targetRhoSq = targetRadius * targetRadius - targetX * targetX;
         float targetRho = std::sqrt(std::max(targetRhoSq, 0.0f));
         float rho = glm::mix(sourceRho, targetRho, relaxationProgress);
 
@@ -192,7 +192,10 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
     }
     if (volumeIntegral > 1e-6f) {
         float targetIntegral = (4.0f / 3.0f) * targetRadius * targetRadius * targetRadius;
-        float radialVolumeScale = std::sqrt(targetIntegral / volumeIntegral);
+        float radialVolumeScale = glm::mix(
+            std::sqrt(targetIntegral / volumeIntegral),
+            1.0f,
+            relaxationProgress);
         for (int ring = 1; ring < rings; ++ring) {
             radial[(size_t)ring] *= radialVolumeScale;
         }
@@ -225,13 +228,18 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
             vertex.Position = glm::vec3(axial[(size_t)ring],
                                         radial[(size_t)ring] * cosine,
                                         radial[(size_t)ring] * sine);
+            glm::vec3 geometricNormal;
             if (ring == 0) {
-                vertex.Normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+                geometricNormal = glm::vec3(-1.0f, 0.0f, 0.0f);
             } else if (ring == rings) {
-                vertex.Normal = glm::vec3(1.0f, 0.0f, 0.0f);
+                geometricNormal = glm::vec3(1.0f, 0.0f, 0.0f);
             } else {
-                vertex.Normal = glm::normalize(glm::vec3(-slope, cosine, sine));
+                geometricNormal = glm::normalize(glm::vec3(-slope, cosine, sine));
             }
+            glm::vec3 targetNormal = SafeNormalize(vertex.Position, geometricNormal);
+            vertex.Normal = SafeNormalize(
+                glm::mix(geometricNormal, targetNormal, relaxationProgress),
+                targetNormal);
             vertex.TexCoords = glm::vec2(u, (float)ring / (float)rings);
             float materialX = sourceAxial[(size_t)ring];
             float sourceRhoA = std::sqrt(std::max(

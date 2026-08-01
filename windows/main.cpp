@@ -8,6 +8,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #ifdef _WIN32
@@ -187,6 +188,70 @@ static float Smooth01(float x)
 {
     x = glm::clamp(x, 0.0f, 1.0f);
     return x * x * (3.0f - 2.0f * x);
+}
+
+static bool IsFiniteDirection(const glm::vec3& direction)
+{
+    return std::isfinite(direction.x) &&
+           std::isfinite(direction.y) &&
+           std::isfinite(direction.z);
+}
+
+static glm::vec3 SafeNormalizeDirection(const glm::vec3& direction,
+                                        const glm::vec3& fallback)
+{
+    float lengthSquared = glm::dot(direction, direction);
+    if (!IsFiniteDirection(direction) || lengthSquared <= 1e-10f) {
+        return fallback;
+    }
+    return direction / std::sqrt(lengthSquared);
+}
+
+static void BuildStableOrthonormalFrame(const glm::vec3& axis,
+                                        glm::vec3& side,
+                                        glm::vec3& binormal)
+{
+    if (axis.z < -0.999999f) {
+        side = glm::vec3(0.0f, -1.0f, 0.0f);
+        binormal = glm::vec3(-1.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    float a = 1.0f / (1.0f + axis.z);
+    float b = -axis.x * axis.y * a;
+    side = glm::vec3(1.0f - axis.x * axis.x * a, b, -axis.x);
+    binormal = glm::vec3(b, 1.0f - axis.y * axis.y * a, -axis.y);
+}
+
+static void UpdateTransportedFusionFrame(BubbleContactPair& pair,
+                                         const glm::vec3& newAxis)
+{
+    glm::vec3 axis = SafeNormalizeDirection(newAxis, pair.fusionAxis);
+    if (!pair.fusionFrameInitialized) {
+        BuildStableOrthonormalFrame(axis, pair.fusionSide, pair.fusionBinormal);
+        pair.fusionAxis = axis;
+        pair.fusionFrameInitialized = true;
+        return;
+    }
+
+    glm::vec3 side = pair.fusionSide - axis * glm::dot(pair.fusionSide, axis);
+    if (!IsFiniteDirection(side) || glm::dot(side, side) <= 1e-10f) {
+        side = pair.fusionBinormal - axis * glm::dot(pair.fusionBinormal, axis);
+    }
+    if (!IsFiniteDirection(side) || glm::dot(side, side) <= 1e-10f) {
+        BuildStableOrthonormalFrame(axis, side, pair.fusionBinormal);
+    } else {
+        side = SafeNormalizeDirection(side, pair.fusionSide);
+        pair.fusionBinormal = SafeNormalizeDirection(
+            glm::cross(axis, side),
+            pair.fusionBinormal);
+        side = SafeNormalizeDirection(
+            glm::cross(pair.fusionBinormal, axis),
+            side);
+    }
+
+    pair.fusionAxis = axis;
+    pair.fusionSide = side;
 }
 
 static float PairHash01(uint64_t a, uint64_t b)
@@ -1284,9 +1349,16 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
         normalSums[ib] += faceNormal;
         normalSums[ic] += faceNormal;
     }
+    float rebuiltNormalBlend = glm::clamp(
+        std::max(surfaceDynamicsBlend, bubble.contactStrength),
+        0.0f, 1.0f);
     for (size_t i = 0; i < vertices.size(); ++i) {
         if (glm::length(normalSums[i]) > 1e-6f) {
-            vertices[i].Normal = glm::normalize(normalSums[i]);
+            vertices[i].Normal = SafeNormalizeDirection(
+                glm::mix(vertices[i].Normal,
+                         glm::normalize(normalSums[i]),
+                         rebuiltNormalBlend),
+                vertices[i].Normal);
         }
     }
     return vertices;
@@ -1458,6 +1530,7 @@ static void UpdateBubblePair(BubbleContactPair& pair, float dt)
         pair.filteredPlaneCenter = glm::mix(pair.filteredPlaneCenter,
                                             targetPlaneCenter, frameBlend);
     }
+    UpdateTransportedFusionFrame(pair, pair.filteredNormal);
 
     pair.bridgeStrength = Smooth01(pair.contactTime / 0.55f) * contactAmount;
     float geometryTarget = glm::mix(sharedFilmProgress, 1.0f, effectiveFusionProgress) * contactAmount;
@@ -2455,18 +2528,30 @@ static void RenderFrame()
             glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
                                      targetVolume;
 
-            glm::vec3 axis = b.position - a.position;
-            if (glm::length(axis) <= 1e-5f) {
+            glm::vec3 axis = pair.fusionFrameInitialized
+                ? pair.fusionAxis
+                : b.position - a.position;
+            if (!IsFiniteDirection(axis) || glm::length(axis) <= 1e-5f) {
                 axis = pair.contactFrameInitialized
                     ? pair.filteredNormal
                     : glm::vec3(1.0f, 0.0f, 0.0f);
             }
+            if (!IsFiniteDirection(axis) || glm::length(axis) <= 1e-5f) {
+                axis = glm::vec3(1.0f, 0.0f, 0.0f);
+            }
             axis = glm::normalize(axis);
-            glm::vec3 reference = std::abs(axis.z) < 0.90f
-                ? glm::vec3(0.0f, 0.0f, 1.0f)
-                : glm::vec3(0.0f, 1.0f, 0.0f);
-            glm::vec3 side = glm::normalize(glm::cross(reference, axis));
-            glm::vec3 binormal = glm::normalize(glm::cross(axis, side));
+            glm::vec3 side;
+            glm::vec3 binormal;
+            if (pair.fusionFrameInitialized) {
+                side = SafeNormalizeDirection(
+                    pair.fusionSide - axis * glm::dot(pair.fusionSide, axis),
+                    pair.fusionSide);
+                binormal = SafeNormalizeDirection(
+                    glm::cross(axis, side),
+                    pair.fusionBinormal);
+            } else {
+                BuildStableOrthonormalFrame(axis, side, binormal);
+            }
             float centerA = glm::dot(a.position - targetCenter, axis);
             float centerB = glm::dot(b.position - targetCenter, axis);
 
@@ -2487,10 +2572,21 @@ static void RenderFrame()
                 mesh->updateVertices(BuildFusionSurfaceVertices(parameters));
             }
 
+            glm::mat3 fusionBasis(1.0f);
+            fusionBasis[0] = axis;
+            fusionBasis[1] = side;
+            fusionBasis[2] = binormal;
+            glm::quat fusionOrientation = glm::normalize(glm::quat_cast(fusionBasis));
+            glm::quat renderedOrientation = glm::slerp(
+                fusionOrientation,
+                glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
+                Smooth01(pair.relaxationProgress));
+            glm::mat3 renderedBasis = glm::mat3_cast(renderedOrientation);
+
             glm::mat4 fusionModel(1.0f);
-            fusionModel[0] = glm::vec4(axis, 0.0f);
-            fusionModel[1] = glm::vec4(side, 0.0f);
-            fusionModel[2] = glm::vec4(binormal, 0.0f);
+            fusionModel[0] = glm::vec4(renderedBasis[0], 0.0f);
+            fusionModel[1] = glm::vec4(renderedBasis[1], 0.0f);
+            fusionModel[2] = glm::vec4(renderedBasis[2], 0.0f);
             fusionModel[3] = glm::vec4(targetCenter, 1.0f);
 
             float pairAlpha = std::max(a.alpha, b.alpha);

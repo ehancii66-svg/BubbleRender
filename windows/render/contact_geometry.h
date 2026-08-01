@@ -16,7 +16,7 @@ struct DiscMeshData {
 inline constexpr int kContactBubbleSegments = 72;
 inline constexpr int kContactBubbleRings = 28;
 inline constexpr int kFusionSurfaceSegments = 72;
-inline constexpr int kFusionSurfaceRings = 56;
+inline constexpr int kFusionSurfaceRings = 28;
 
 struct FusionSurfaceParameters {
     float centerA = -0.5f;

@@ -84,6 +84,10 @@ struct BubbleContactPair {
     glm::vec3 filteredNormal = glm::vec3(1.0f, 0.0f, 0.0f);
     glm::vec3 filteredPlaneCenter = glm::vec3(0.0f);
     bool contactFrameInitialized = false;
+    glm::vec3 fusionAxis = glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec3 fusionSide = glm::vec3(0.0f, 1.0f, 0.0f);
+    glm::vec3 fusionBinormal = glm::vec3(0.0f, 0.0f, 1.0f);
+    bool fusionFrameInitialized = false;
     float filmThickness = 1.0f;
     float ruptureRisk = 0.0f;
     float coalescenceScore = 0.0f;
