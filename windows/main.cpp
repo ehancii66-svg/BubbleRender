@@ -656,14 +656,17 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
     float thinFilm = Smooth01((0.42f - pair.filmThickness) / 0.26f);
     float impact = Smooth01(std::max(-relNormalSpeed, 0.0f) / 0.52f);
     float contactSize = Smooth01((pair.contactRadius / minRadius - 0.18f) / 0.46f);
-    float windInstability = Smooth01(g_GlobalWindStrength / std::max(kMaxGlobalWindStrength, 0.001f));
+    float windInstability = g_WindEnabled
+                                ? Smooth01(g_GlobalWindStrength /
+                                           std::max(kMaxGlobalWindStrength, 0.001f))
+                                : 0.0f;
 
     float separationProbability = glm::clamp(
-        0.08f +
-            (1.0f - contactSize) * 0.10f +
-            impact * 0.08f +
-            windInstability * 0.04f,
-        0.08f, 0.26f);
+        0.04f +
+            (1.0f - contactSize) * 0.05f +
+            impact * 0.04f +
+            windInstability * 0.02f,
+        0.04f, 0.14f);
     float fusionProbability = glm::clamp(
         0.14f +
             sizeMismatch * 0.68f +
