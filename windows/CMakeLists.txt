@@ -15,10 +15,12 @@ set(RENDER_SOURCES
     render/shader.cpp
     render/camera.cpp
     render/contact_geometry.cpp
+    render/bubble_surface_system.cpp
 )
 
 set(RENDER_HEADERS
     render/contact_geometry.h
+    render/bubble_surface_system.h
     render/model.h
     render/mesh.h
     render/shader.h

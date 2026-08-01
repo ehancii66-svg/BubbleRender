@@ -186,6 +186,19 @@ Model* Model::CreateFromVertices(
     return model;
 }
 
+Model* Model::CreateFromVertices(const std::vector<Vertex>& vertices,
+                                 const std::vector<unsigned int>& indices)
+{
+    Model* model = new Model();
+    for (const Vertex& vertex : vertices) {
+        model->updateMaxMinXyz(vertex.Position);
+    }
+
+    Mesh simMesh(vertices, indices, std::vector<Texture>(), true);
+    model->m_meshes.push_back(simMesh);
+    return model;
+}
+
 void Model::Draw(Shader& shader)
 {
     for (unsigned int i = 0; i < m_meshes.size(); i++) {

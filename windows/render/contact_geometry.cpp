@@ -268,10 +268,7 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
                     glm::mix(radialFallback, sourceDirectionB,
                              Smooth01Local((sourceBlend - 0.5f) * 2.0f)),
                     radialFallback);
-            glm::vec3 targetFilmDirection = SafeNormalize(vertex.Position, vertex.Normal);
-            vertex.FilmDirection = SafeNormalize(
-                glm::mix(sourceFilmDirection, targetFilmDirection, relaxationProgress),
-                targetFilmDirection);
+            vertex.FilmDirection = sourceFilmDirection;
             vertex.Tangent = glm::vec3(0.0f);
             vertex.Bitangent = glm::vec3(0.0f);
             vertices.push_back(vertex);

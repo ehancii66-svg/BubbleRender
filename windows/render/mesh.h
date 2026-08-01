@@ -51,7 +51,24 @@ public:
         vertices = newVertices;
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
         glBufferSubData(GL_ARRAY_BUFFER, 0,
-                        vertices.size() * sizeof(Vertex), &vertices[0]);
+                        vertices.size() * sizeof(Vertex), vertices.data());
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    void updateGeometry(const vector<Vertex>& newVertices,
+                        const vector<unsigned int>& newIndices)
+    {
+        vertices = newVertices;
+        indices = newIndices;
+
+        glBindVertexArray(VAO);
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
+                     vertices.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int),
+                     indices.data(), GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 

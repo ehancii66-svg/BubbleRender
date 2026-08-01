@@ -6,8 +6,6 @@
 
 #include <glm/glm.hpp>
 
-class Model;
-
 struct DisplayBubble {
     struct SurfaceControl {
         glm::vec3 localDir;
@@ -108,11 +106,6 @@ struct BubbleContactPair {
     bool fusionActive = false;
     bool fusionComplete = false;
     float candidateExitTime = 0.0f;
-};
-
-struct DisplayBubbleModelSlot {
-    uint64_t bubbleId = 0;
-    Model *model = nullptr;
 };
 
 #endif

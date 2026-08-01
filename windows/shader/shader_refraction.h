@@ -442,9 +442,6 @@ void main() {
         + (drainage - 0.5) * 0.46;
     float dynamicThickness = uThickness
         + thicknessPattern * uThicknessVar
-        - vContactMask * 70.0
-        + vContactRim * 85.0
-        - vSharedFilmMask * 15.0
         + touchMask * 190.0
         + touchRipple * 95.0;
     vec3 kimReflectance = kim2012Iridescence(NdotV, dynamicThickness);

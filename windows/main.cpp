@@ -24,6 +24,7 @@
 #include "render/camera.h"
 #include "render/shader.h"
 #include "render/contact_geometry.h"
+#include "render/bubble_surface_system.h"
 #include "simulation/display_bubble.h"
 #include "simulation/display_bubble_simulation.h"
 #include "simulation/vortex_sheet.h"
@@ -109,9 +110,7 @@ static std::vector<BubbleContactPair> g_ContactPairs;
 static uint64_t g_NextBubbleId = 1;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = true;
-static Model *g_ContactFilmModel = nullptr;
-static Model *g_FusionSurfaceModel = nullptr;
-static std::vector<DisplayBubbleModelSlot> g_DisplayBubbleModels;
+static BubbleSurfaceSystem g_BubbleSurfaces;
 static glm::vec3 g_BridgeDirection = glm::vec3(0.0f, 0.0f, 1.0f);
 static float g_BridgeStrength = 0.0f;
 static glm::vec2 g_AutoTouchPoint = glm::vec2(-10.0f, -10.0f);
@@ -280,10 +279,7 @@ static const char* CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome 
 
 static float FusionSurfaceVisibility(const BubbleContactPair& pair)
 {
-    if (!pair.fusionActive || pair.fusionComplete) {
-        return 0.0f;
-    }
-    return Smooth01((pair.ruptureProgress - 0.62f) / 0.38f);
+    return pair.fusionActive ? 1.0f : 0.0f;
 }
 
 static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)
@@ -300,7 +296,8 @@ static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)
 static bool PairCanBeginExclusiveFusion(const BubbleContactPair& pair)
 {
     for (const BubbleContactPair& other : g_ContactPairs) {
-        if (&other == &pair || !other.fusionActive) {
+        if (&other == &pair ||
+            (!other.active && !other.candidate && !other.bonded)) {
             continue;
         }
         if (other.a == pair.a || other.a == pair.b ||
@@ -648,37 +645,21 @@ static float PlateauContactRadius(const BubbleContactPair& pair, const DisplayBu
 
 static void RebuildDisplayBubbleModels()
 {
-    for (auto& slot : g_DisplayBubbleModels) {
-        delete slot.model;
-    }
-    g_DisplayBubbleModels.clear();
-
     std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
-    std::vector<glm::vec3> positions(vertices.size());
-    std::vector<glm::vec3> normals(vertices.size());
-    for (size_t i = 0; i < vertices.size(); ++i) {
-        positions[i] = vertices[i].Position;
-        normals[i] = vertices[i].Normal;
+    for (Vertex& vertex : vertices) {
+        vertex.FilmDirection = glm::normalize(vertex.Position);
     }
     std::vector<unsigned int> indices = BuildContactBubblePatchIndices();
 
-    g_DisplayBubbleModels.reserve(g_DisplayBubbles.size());
-    for (size_t i = 0; i < g_DisplayBubbles.size(); ++i) {
-        DisplayBubbleModelSlot slot;
-        slot.bubbleId = g_DisplayBubbles[i].id;
-        slot.model = Model::CreateFromVertices(positions, normals, indices);
-        g_DisplayBubbleModels.push_back(slot);
+    g_BubbleSurfaces.Clear();
+    for (const DisplayBubble& bubble : g_DisplayBubbles) {
+        g_BubbleSurfaces.EnsureBubble(bubble.id, vertices, indices);
     }
 }
 
 static Model* FindDisplayBubbleModel(uint64_t bubbleId)
 {
-    for (auto& slot : g_DisplayBubbleModels) {
-        if (slot.bubbleId == bubbleId) {
-            return slot.model;
-        }
-    }
-    return nullptr;
+    return g_BubbleSurfaces.FindBubble(bubbleId);
 }
 
 static uint64_t AddBubble(const glm::vec3& position,
@@ -717,7 +698,12 @@ static uint64_t AddBubble(const glm::vec3& position,
     uint64_t id = bubble.id;
     g_DisplayBubbles.push_back(bubble);
     if (rebuildModels && g_DecorativeBubbleModel) {
-        RebuildDisplayBubbleModels();
+        std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
+        for (Vertex& vertex : vertices) {
+            vertex.FilmDirection = glm::normalize(vertex.Position);
+        }
+        g_BubbleSurfaces.EnsureBubble(id, vertices,
+                                      BuildContactBubblePatchIndices());
     }
     return id;
 }
@@ -746,14 +732,7 @@ static bool RemoveBubble(uint64_t id)
                        }),
         g_ContactPairs.end());
 
-    auto modelIt = std::find_if(g_DisplayBubbleModels.begin(), g_DisplayBubbleModels.end(),
-                                [id](const DisplayBubbleModelSlot& slot) {
-                                    return slot.bubbleId == id;
-                                });
-    if (modelIt != g_DisplayBubbleModels.end()) {
-        delete modelIt->model;
-        g_DisplayBubbleModels.erase(modelIt);
-    }
+    g_BubbleSurfaces.RemoveBubble(id);
     return true;
 }
 
@@ -787,6 +766,11 @@ static void FinalizeCompletedFusions()
         glm::vec3 mergedVelocity = (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
                                    mergedVolume;
         float mergedRadius = RadiusFromVolume(mergedVolume);
+
+        if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
+                                            survivor.id, absorbed.id, mergedRadius)) {
+            continue;
+        }
 
         survivor.position = mergedCenter;
         survivor.basePosition = mergedCenter;
@@ -1213,9 +1197,29 @@ static glm::mat4 PersistentBubbleModelMatrix(const DisplayBubble& bubble, float 
     return glm::scale(model, glm::vec3(std::max(bubble.radius, 0.001f)));
 }
 
-static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float time)
+static void PreserveFilmCoordinates(std::vector<Vertex>& vertices,
+                                    const std::vector<Vertex>& previousVertices)
 {
-    std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
+    if (vertices.size() != previousVertices.size()) {
+        return;
+    }
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (glm::dot(previousVertices[i].FilmDirection,
+                     previousVertices[i].FilmDirection) > 1e-8f) {
+            vertices[i].FilmDirection = previousVertices[i].FilmDirection;
+        }
+    }
+}
+
+static std::vector<Vertex> BuildPersistentBubbleVertices(
+    int bubbleIndex,
+    float time,
+    const std::vector<Vertex>* restVertices,
+    const std::vector<Vertex>* previousVertices = nullptr)
+{
+    std::vector<Vertex> vertices = restVertices
+        ? *restVertices
+        : BuildBubbleShellVertices(1.0f, 0.0f, false);
     if (bubbleIndex < 0 || bubbleIndex >= (int)g_DisplayBubbles.size()) {
         return vertices;
     }
@@ -1360,6 +1364,9 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
                          rebuiltNormalBlend),
                 vertices[i].Normal);
         }
+    }
+    if (previousVertices) {
+        PreserveFilmCoordinates(vertices, *previousVertices);
     }
     return vertices;
 }
@@ -1981,6 +1988,11 @@ static void UpdateDisplayBubbleInteractions(float dt)
     UpdatePersistentSurfaceDynamics(dt);
     FinalizeCompletedFusions();
 
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if (!pair.active && pair.contactTime <= 0.01f && pair.geometryBlend <= 0.01f) {
+            g_BubbleSurfaces.RemoveContact(pair.a, pair.b);
+        }
+    }
     g_ContactPairs.erase(
         std::remove_if(g_ContactPairs.begin(), g_ContactPairs.end(), [](const BubbleContactPair& pair) {
             return !pair.active && pair.contactTime <= 0.01f && pair.geometryBlend <= 0.01f;
@@ -2442,9 +2454,15 @@ static void RenderFrame()
             SetBubbleContactUniforms((int)item.second);
             Model* shellModel = FindDisplayBubbleModel(bubble.id);
             if (shellModel) {
-                if (Mesh* mesh = shellModel->getMesh(0)) {
-                    mesh->updateVertices(BuildPersistentBubbleVertices((int)item.second,
-                                                                        (float)g_Time));
+                if (renderToFBO) {
+                    Mesh* mesh = shellModel->getMesh(0);
+                    const std::vector<Vertex>* restVertices =
+                        g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
+                    if (mesh) {
+                        mesh->updateVertices(BuildPersistentBubbleVertices(
+                            (int)item.second, (float)g_Time,
+                            restVertices, &mesh->vertices));
+                    }
                 }
                 shellModel->Draw(*g_RefractionShader);
             } else if (g_DecorativeBubbleModel) {
@@ -2463,9 +2481,6 @@ static void RenderFrame()
     auto DrawFusionSurfaces = [&](bool isBackFace, bool renderToFBO,
                                   GLuint backgroundTexture, bool straightComposite)
     {
-        if (!g_FusionSurfaceModel) {
-            return;
-        }
         BindRefractionInputs(backgroundTexture);
 
         GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
@@ -2559,35 +2574,45 @@ static void RenderFrame()
                                         pair.relaxationProgress;
             float oscillation = std::sin(pair.relaxationProgress * 3.0f * 3.14159265f) *
                                 oscillationEnvelope * 0.12f;
-            if (Mesh* mesh = g_FusionSurfaceModel->getMesh(0)) {
-                FusionSurfaceParameters parameters;
-                parameters.centerA = centerA;
-                parameters.radiusA = a.radius;
-                parameters.centerB = centerB;
-                parameters.radiusB = b.radius;
-                parameters.targetRadius = targetRadius;
-                parameters.neckProgress = pair.neckProgress;
-                parameters.relaxationProgress = pair.relaxationProgress;
-                parameters.oscillation = oscillation;
-                mesh->updateVertices(BuildFusionSurfaceVertices(parameters));
-            }
-
             glm::mat3 fusionBasis(1.0f);
             fusionBasis[0] = axis;
             fusionBasis[1] = side;
             fusionBasis[2] = binormal;
-            glm::quat fusionOrientation = glm::normalize(glm::quat_cast(fusionBasis));
-            glm::quat renderedOrientation = glm::slerp(
-                fusionOrientation,
-                glm::quat(1.0f, 0.0f, 0.0f, 0.0f),
-                Smooth01(pair.relaxationProgress));
-            glm::mat3 renderedBasis = glm::mat3_cast(renderedOrientation);
 
-            glm::mat4 fusionModel(1.0f);
-            fusionModel[0] = glm::vec4(renderedBasis[0], 0.0f);
-            fusionModel[1] = glm::vec4(renderedBasis[1], 0.0f);
-            fusionModel[2] = glm::vec4(renderedBasis[2], 0.0f);
-            fusionModel[3] = glm::vec4(targetCenter, 1.0f);
+            FusionSurfaceParameters parameters;
+            parameters.centerA = centerA;
+            parameters.radiusA = a.radius;
+            parameters.centerB = centerB;
+            parameters.radiusB = b.radius;
+            parameters.targetRadius = targetRadius;
+            parameters.neckProgress = pair.neckProgress;
+            parameters.relaxationProgress = pair.relaxationProgress;
+            parameters.oscillation = oscillation;
+            std::vector<Vertex> fusionVertices = BuildFusionSurfaceVertices(parameters);
+            for (Vertex& vertex : fusionVertices) {
+                vertex.Position = fusionBasis * vertex.Position;
+                vertex.Normal = SafeNormalizeDirection(fusionBasis * vertex.Normal,
+                                                       vertex.Normal);
+                vertex.FilmDirection = SafeNormalizeDirection(
+                    fusionBasis * vertex.FilmDirection, vertex.Normal);
+            }
+
+            Model* fusionSurface = g_BubbleSurfaces.FindFusion(pair.a, pair.b);
+            if (!fusionSurface) {
+                fusionSurface = g_BubbleSurfaces.EnsureFusion(
+                    pair.a, pair.b, fusionVertices, BuildFusionSurfaceIndices());
+            } else if (renderToFBO) {
+                Mesh* mesh = fusionSurface->getMesh(0);
+                if (mesh) {
+                    PreserveFilmCoordinates(fusionVertices, mesh->vertices);
+                    mesh->updateVertices(fusionVertices);
+                }
+            }
+            if (!fusionSurface) {
+                continue;
+            }
+
+            glm::mat4 fusionModel = glm::translate(glm::mat4(1.0f), targetCenter);
 
             float pairAlpha = std::max(a.alpha, b.alpha);
             float alpha = (straightComposite
@@ -2597,7 +2622,7 @@ static void RenderFrame()
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
             g_RefractionShader->SetInt("uVisualContactCount", 0);
-            g_FusionSurfaceModel->Draw(*g_RefractionShader);
+            fusionSurface->Draw(*g_RefractionShader);
         }
 
         if (straightComposite) {
@@ -2615,9 +2640,6 @@ static void RenderFrame()
     auto DrawContactBridges = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture, bool straightComposite)
     {
         BindRefractionInputs(backgroundTexture);
-        if (!g_ContactFilmModel) {
-            return;
-        }
 
         GLboolean filmBlendWasEnabled = glIsEnabled(GL_BLEND);
         GLboolean filmCullWasEnabled = glIsEnabled(GL_CULL_FACE);
@@ -2648,22 +2670,38 @@ static void RenderFrame()
                                           (float)(pair.a * 0.37f + pair.b * 0.19f)) * 0.008f;
             float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
             float normalizedCurvature = ContactFilmWorldCurvature(a, b, pair) * filmRadius;
-            if (Mesh* mesh = g_ContactFilmModel->getMesh(0)) {
-                float holeRadius = pair.fusionActive
-                    ? Smooth01(pair.ruptureProgress) * 0.98f
-                    : 0.0f;
-                mesh->updateVertices(BuildCurvedContactFilmVertices(normalizedCurvature,
-                                                                     holeRadius));
+            float holeRadius = pair.fusionActive
+                ? Smooth01(pair.ruptureProgress) * 0.98f
+                : 0.0f;
+            std::vector<Vertex> contactVertices =
+                BuildCurvedContactFilmVertices(normalizedCurvature, holeRadius);
+            for (Vertex& vertex : contactVertices) {
+                glm::vec3 materialDirection(vertex.Position.x,
+                                            vertex.Position.y,
+                                            0.35f + vertex.Position.z);
+                vertex.FilmDirection = SafeNormalizeDirection(materialDirection,
+                                                              glm::vec3(0.0f, 0.0f, 1.0f));
+            }
+            Model* contactSurface = g_BubbleSurfaces.FindContact(pair.a, pair.b);
+            if (!contactSurface) {
+                contactSurface = g_BubbleSurfaces.EnsureContact(
+                    pair.a, pair.b, contactVertices, BuildContactFilmDisc(72).indices);
+            } else if (renderToFBO) {
+                Mesh* mesh = contactSurface->getMesh(0);
+                if (mesh) {
+                    PreserveFilmCoordinates(contactVertices, mesh->vertices);
+                    mesh->updateVertices(contactVertices);
+                }
+            }
+            if (!contactSurface) {
+                continue;
             }
             glm::mat4 filmModel = MakeContactFilmModel(a, b, pair, (float)g_Time);
             SetRefractUniforms(filmModel, std::max(pair.contactRadius, 0.01f),
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
             g_RefractionShader->SetInt("uForceSharedFilm", 1);
-            g_RefractionShader->SetFloat("uRefractionStrength", g_RefractionStrength * 0.22f);
-            g_RefractionShader->SetFloat("uEnvironmentReflectionStrength",
-                                         g_EnvironmentReflectionStrength * 0.45f);
-            g_ContactFilmModel->Draw(*g_RefractionShader);
+            contactSurface->Draw(*g_RefractionShader);
         }
         g_RefractionShader->SetInt("uForceSharedFilm", 0);
 
@@ -3133,16 +3171,9 @@ static void Cleanup()
 {
     delete g_RefractModel;
     delete g_DecorativeBubbleModel;
-    delete g_ContactFilmModel;
-    delete g_FusionSurfaceModel;
     delete g_SkyboxModel;
     g_RefractModel = g_DecorativeBubbleModel = g_SkyboxModel = nullptr;
-    g_ContactFilmModel = g_FusionSurfaceModel = nullptr;
-
-    for (auto& slot : g_DisplayBubbleModels) {
-        delete slot.model;
-    }
-    g_DisplayBubbleModels.clear();
+    g_BubbleSurfaces.Clear();
 
     for (auto *sphere : g_BackgroundModels)
     {
@@ -3296,22 +3327,6 @@ int main()
     }
 
     g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
-    {
-        DiscMeshData disc = BuildContactFilmDisc(72);
-        g_ContactFilmModel = Model::CreateFromVertices(disc.positions, disc.normals, disc.indices);
-    }
-    {
-        FusionSurfaceParameters parameters;
-        std::vector<Vertex> vertices = BuildFusionSurfaceVertices(parameters);
-        std::vector<glm::vec3> positions(vertices.size());
-        std::vector<glm::vec3> normals(vertices.size());
-        for (size_t i = 0; i < vertices.size(); ++i) {
-            positions[i] = vertices[i].Position;
-            normals[i] = vertices[i].Normal;
-        }
-        g_FusionSurfaceModel = Model::CreateFromVertices(
-            positions, normals, BuildFusionSurfaceIndices());
-    }
     ResetDisplayBubbles();
     StartBubbleInteractionDemo();
 
