@@ -128,7 +128,6 @@ static constexpr float kNeckExpansionDuration = 1.20f;
 static constexpr float kRelaxationDelay = 0.95f;
 static constexpr float kRelaxationDuration = 1.45f;
 static constexpr float kFusionCompletionHold = 0.12f;
-static constexpr float kPostFusionSurfaceRecoveryDuration = 0.85f;
 static constexpr float kShellCutDelay = 0.42f;
 static constexpr size_t kDefaultDisplayBubbleCount = 3;
 static constexpr size_t kHardMaxDisplayBubbleCount = 16;
@@ -365,6 +364,9 @@ static void UpdatePersistentSurfaceDynamics(float dt)
         DisplayBubble& bubble = g_DisplayBubbles[bubbleIndex];
         targets[bubbleIndex].resize(bubble.surfaceControls.size(), glm::vec3(0.0f));
         contactWeights[bubbleIndex].resize(bubble.surfaceControls.size(), 0.0f);
+        if (bubble.volumeTransferred) {
+            continue;
+        }
         for (size_t controlIndex = 0; controlIndex < bubble.surfaceControls.size(); ++controlIndex) {
             const auto& control = bubble.surfaceControls[controlIndex];
             float freeWave = std::sin((float)g_Time * (0.72f + bubble.speed * 0.12f) +
@@ -549,7 +551,7 @@ static void UpdatePersistentSurfaceDynamics(float dt)
 
     for (size_t bubbleIndex = 0; bubbleIndex < g_DisplayBubbles.size(); ++bubbleIndex) {
         DisplayBubble& bubble = g_DisplayBubbles[bubbleIndex];
-        if (bubble.state == DisplayBubble::State::Dead) {
+        if (bubble.state == DisplayBubble::State::Dead || bubble.volumeTransferred) {
             continue;
         }
         for (size_t controlIndex = 0; controlIndex < bubble.surfaceControls.size(); ++controlIndex) {
@@ -763,8 +765,6 @@ static void FinalizeCompletedFusions()
         float mergedVolume = std::max(volumeA + volumeB, 0.001f);
         glm::vec3 mergedCenter = (survivor.position * volumeA + absorbed.position * volumeB) /
                                  mergedVolume;
-        glm::vec3 mergedVelocity = (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
-                                   mergedVolume;
         float mergedRadius = RadiusFromVolume(mergedVolume);
 
         if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
@@ -774,7 +774,7 @@ static void FinalizeCompletedFusions()
 
         survivor.position = mergedCenter;
         survivor.basePosition = mergedCenter;
-        survivor.velocity = mergedVelocity;
+        survivor.velocity = glm::vec3(0.0f);
         survivor.radius = mergedRadius;
         survivor.initialRadius = mergedRadius;
         survivor.targetVolume = mergedVolume;
@@ -787,7 +787,6 @@ static void FinalizeCompletedFusions()
         survivor.surfaceDynamicsBlend = 0.0f;
         survivor.volumeTransferred = true;
         survivor.state = DisplayBubble::State::Merged;
-        survivor.surfaceControls = MakeSurfaceControls(survivor.phase);
 
         std::cout << "[BubbleFusion] pair=(" << ids.first << ", " << ids.second
                   << ") survivor=" << survivor.id
@@ -1667,6 +1666,15 @@ static void UpdateDisplayBubbleInteractions(float dt)
             continue;
         }
 
+        if (bubble.volumeTransferred) {
+            bubble.state = DisplayBubble::State::Merged;
+            bubble.basePosition = bubble.position;
+            bubble.velocity = glm::vec3(0.0f);
+            bubble.contactStrength = 0.0f;
+            bubble.surfaceDynamicsBlend = 0.0f;
+            continue;
+        }
+
         bubble.state = DisplayBubble::State::Free;
         float driftScale = g_InteractionDemoActive ? 0.15f : 0.85f;
         glm::vec3 homePull = (bubble.basePosition - bubble.position) *
@@ -1684,10 +1692,6 @@ static void UpdateDisplayBubbleInteractions(float dt)
         bubble.velocity *= expf(dt * -0.48f);
         bubble.position += bubble.velocity * dt;
         bubble.contactStrength *= expf(dt * -3.0f);
-        bubble.surfaceDynamicsBlend = std::min(
-            1.0f,
-            bubble.surfaceDynamicsBlend +
-                dt / std::max(kPostFusionSurfaceRecoveryDuration, 0.001f));
         if (bubble.targetVolume > 0.0f) {
             float targetRadius = RadiusFromVolume(bubble.targetVolume);
             bubble.radius += (targetRadius - bubble.radius) * std::min(1.0f, dt * 1.8f);
@@ -2475,7 +2479,7 @@ static void RenderFrame()
             SetBubbleContactUniforms((int)item.second);
             Model* shellModel = FindDisplayBubbleModel(bubble.id);
             if (shellModel) {
-                if (renderToFBO) {
+                if (renderToFBO && !bubble.volumeTransferred) {
                     Mesh* mesh = shellModel->getMesh(0);
                     const std::vector<Vertex>* restVertices =
                         g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
