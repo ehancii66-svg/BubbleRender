@@ -768,7 +768,7 @@ static void FinalizeCompletedFusions()
         float mergedRadius = RadiusFromVolume(mergedVolume);
 
         if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
-                                            survivor.id, absorbed.id, mergedRadius)) {
+                                            survivor.id, absorbed.id)) {
             continue;
         }
 
@@ -1190,11 +1190,15 @@ static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
     return model;
 }
 
-static glm::mat4 PersistentBubbleModelMatrix(const DisplayBubble& bubble, float time)
+static glm::mat4 PersistentBubbleModelMatrix(const DisplayBubble& bubble,
+                                             float time,
+                                             bool worldScaleSurface)
 {
     (void)time;
     glm::mat4 model = glm::translate(glm::mat4(1.0f), bubble.position);
-    return glm::scale(model, glm::vec3(std::max(bubble.radius, 0.001f)));
+    return worldScaleSurface
+        ? model
+        : glm::scale(model, glm::vec3(std::max(bubble.radius, 0.001f)));
 }
 
 static void PreserveFilmCoordinates(std::vector<Vertex>& vertices,
@@ -1215,6 +1219,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
     int bubbleIndex,
     float time,
     const std::vector<Vertex>* restVertices,
+    bool worldScaleSurface,
     const std::vector<Vertex>* previousVertices = nullptr)
 {
     std::vector<Vertex> vertices = restVertices
@@ -1225,6 +1230,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
     }
 
     const DisplayBubble& bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+    float deformationUnitScale = worldScaleSurface ? bubble.radius : 1.0f;
     float surfaceDynamicsBlend = Smooth01(bubble.surfaceDynamicsBlend);
     glm::vec3 motionAxis = bubble.velocity;
     if (glm::length(motionAxis) < 1e-4f) {
@@ -1270,7 +1276,8 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
             persistentWeight += weight;
         }
         if (persistentWeight > 1e-5f) {
-            position += persistentSurfaceOffset / persistentWeight * surfaceDynamicsBlend;
+            position += persistentSurfaceOffset / persistentWeight *
+                        surfaceDynamicsBlend * deformationUnitScale;
         }
         glm::vec3 contactOffset(0.0f);
         float vertexContactSum = 0.0f;
@@ -1326,12 +1333,16 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
             // Keep only a small analytic correction for an exact seal against
             // the contact plane. Most deformation now comes from persistent
             // surface-control dynamics above.
-            contactOffset -= contactDirection * (0.006f + 0.040f * deformationStrength) * contactMask;
-            contactOffset += radialDirection * (0.003f + 0.010f * deformationStrength) * rimMask;
+            contactOffset -= contactDirection *
+                (0.006f + 0.040f * deformationStrength) *
+                contactMask * deformationUnitScale;
+            contactOffset += radialDirection *
+                (0.003f + 0.010f * deformationStrength) *
+                rimMask * deformationUnitScale;
             vertexContactSum += deformationStrength * contactMask;
         }
 
-        float maxOffset = 0.18f;
+        float maxOffset = 0.18f * deformationUnitScale;
         float offsetLength = glm::length(contactOffset);
         if (offsetLength > maxOffset) {
             contactOffset *= maxOffset / offsetLength;
@@ -2427,7 +2438,9 @@ static void RenderFrame()
             if (bubble.state == DisplayBubble::State::Dead || bubble.alpha <= 0.01f || bubble.radius <= 0.001f) {
                 continue;
             }
-            glm::vec3 center = glm::vec3(PersistentBubbleModelMatrix(bubble, (float)g_Time) *
+            bool worldScaleSurface = g_BubbleSurfaces.BubbleUsesWorldScale(bubble.id);
+            glm::vec3 center = glm::vec3(PersistentBubbleModelMatrix(
+                                             bubble, (float)g_Time, worldScaleSurface) *
                                          glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
             glm::vec3 toCamera = center - g_Camera.getPosition();
             sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), bubbleIndex);
@@ -2446,7 +2459,9 @@ static void RenderFrame()
         for (const auto &item : sortedBubbles)
         {
             const auto &bubble = g_DisplayBubbles[item.second];
-            glm::mat4 bubbleModel = PersistentBubbleModelMatrix(bubble, (float)g_Time);
+            bool worldScaleSurface = g_BubbleSurfaces.BubbleUsesWorldScale(bubble.id);
+            glm::mat4 bubbleModel = PersistentBubbleModelMatrix(
+                bubble, (float)g_Time, worldScaleSurface);
             float fusionSurfaceVisibility = BubbleFusionSurfaceVisibility(bubble.id);
             float alpha = straightComposite
                 ? (g_InteractionDemoActive ? 0.62f : 0.72f) * bubble.alpha * independentBubbleAlphaScale
@@ -2467,7 +2482,7 @@ static void RenderFrame()
                     if (mesh) {
                         mesh->updateVertices(BuildPersistentBubbleVertices(
                             (int)item.second, (float)g_Time,
-                            restVertices, &mesh->vertices));
+                            restVertices, worldScaleSurface, &mesh->vertices));
                     }
                 }
                 shellModel->Draw(*g_RefractionShader);

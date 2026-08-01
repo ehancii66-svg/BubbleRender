@@ -49,6 +49,7 @@ Model* BubbleSurfaceSystem::EnsureBubble(uint64_t bubbleId,
     Model* result = model.get();
     bubbleModels_.emplace(bubbleId, std::move(model));
     bubbleRestVertices_[bubbleId] = vertices;
+    bubbleWorldScale_[bubbleId] = false;
     return result;
 }
 
@@ -93,11 +94,16 @@ const std::vector<Vertex>* BubbleSurfaceSystem::FindBubbleRestVertices(
     return it == bubbleRestVertices_.end() ? nullptr : &it->second;
 }
 
+bool BubbleSurfaceSystem::BubbleUsesWorldScale(uint64_t bubbleId) const
+{
+    auto it = bubbleWorldScale_.find(bubbleId);
+    return it != bubbleWorldScale_.end() && it->second;
+}
+
 bool BubbleSurfaceSystem::PromoteFusion(uint64_t bubbleA,
                                         uint64_t bubbleB,
                                         uint64_t survivorId,
-                                        uint64_t absorbedId,
-                                        float survivorRadius)
+                                        uint64_t absorbedId)
 {
     PairKey key = MakePairKey(bubbleA, bubbleB);
     auto fusionIt = fusionModels_.find(key);
@@ -107,19 +113,15 @@ bool BubbleSurfaceSystem::PromoteFusion(uint64_t bubbleA,
 
     Model* promotedModel = fusionIt->second.get();
     if (Mesh* mesh = promotedModel->getMesh(0)) {
-        std::vector<Vertex> normalizedVertices = mesh->vertices;
-        float inverseRadius = 1.0f / std::max(survivorRadius, 0.001f);
-        for (Vertex& vertex : normalizedVertices) {
-            vertex.Position *= inverseRadius;
-        }
-        mesh->updateVertices(normalizedVertices);
-        bubbleRestVertices_[survivorId] = normalizedVertices;
+        bubbleRestVertices_[survivorId] = mesh->vertices;
     }
 
     bubbleModels_[survivorId] = std::move(fusionIt->second);
     fusionModels_.erase(fusionIt);
     bubbleModels_.erase(absorbedId);
     bubbleRestVertices_.erase(absorbedId);
+    bubbleWorldScale_[survivorId] = true;
+    bubbleWorldScale_.erase(absorbedId);
     contactModels_.erase(key);
     return true;
 }
@@ -128,6 +130,7 @@ void BubbleSurfaceSystem::RemoveBubble(uint64_t bubbleId)
 {
     bubbleModels_.erase(bubbleId);
     bubbleRestVertices_.erase(bubbleId);
+    bubbleWorldScale_.erase(bubbleId);
 
     auto removePairsContainingBubble = [bubbleId](auto& models) {
         for (auto it = models.begin(); it != models.end();) {
@@ -155,4 +158,5 @@ void BubbleSurfaceSystem::Clear()
     contactModels_.clear();
     bubbleModels_.clear();
     bubbleRestVertices_.clear();
+    bubbleWorldScale_.clear();
 }

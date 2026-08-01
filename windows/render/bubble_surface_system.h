@@ -34,12 +34,12 @@ public:
     Model* FindContact(uint64_t bubbleA, uint64_t bubbleB);
     Model* FindFusion(uint64_t bubbleA, uint64_t bubbleB);
     const std::vector<Vertex>* FindBubbleRestVertices(uint64_t bubbleId) const;
+    bool BubbleUsesWorldScale(uint64_t bubbleId) const;
 
     bool PromoteFusion(uint64_t bubbleA,
                        uint64_t bubbleB,
                        uint64_t survivorId,
-                       uint64_t absorbedId,
-                       float survivorRadius);
+                       uint64_t absorbedId);
     void RemoveBubble(uint64_t bubbleId);
     void RemoveContact(uint64_t bubbleA, uint64_t bubbleB);
     void Clear();
@@ -68,6 +68,7 @@ private:
 
     std::unordered_map<uint64_t, std::unique_ptr<Model>> bubbleModels_;
     std::unordered_map<uint64_t, std::vector<Vertex>> bubbleRestVertices_;
+    std::unordered_map<uint64_t, bool> bubbleWorldScale_;
     std::unordered_map<PairKey, std::unique_ptr<Model>, PairKeyHash> contactModels_;
     std::unordered_map<PairKey, std::unique_ptr<Model>, PairKeyHash> fusionModels_;
 };
