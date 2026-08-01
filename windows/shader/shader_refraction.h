@@ -10,6 +10,7 @@ const char *refractionVertexShader = R"(#version 330 core
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
+layout(location = 5) in vec3 aFilmDirection;
 
 uniform mat4 uModel;
 uniform mat4 uView;
@@ -27,6 +28,7 @@ uniform int uForceSharedFilm;
 
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
+out vec3 vFilmDirection;
 out vec3 vWorldPos;
 out vec2 vUV;
 out mat4 vView;
@@ -66,7 +68,12 @@ void main() {
     vec4 worldPos = uModel * vec4(deformedPos, 1.0);
     gl_Position = uProj * uView * worldPos;
     vEyeVector = normalize(worldPos.xyz - uCameraPos);
-    vWorldNormal = normalize(transpose(inverse(mat3(uModel))) * aNormal);
+    mat3 normalMatrix = transpose(inverse(mat3(uModel)));
+    vWorldNormal = normalize(normalMatrix * aNormal);
+    vec3 localFilmDirection = length(aFilmDirection) > 1e-5
+        ? normalize(aFilmDirection)
+        : localNormal;
+    vFilmDirection = normalize(normalMatrix * localFilmDirection);
     vWorldPos = worldPos.xyz;
     vUV = aTexCoord;
     vView = uView;
@@ -123,6 +130,7 @@ uniform float uTouchVelocity;   // normalized drag speed
 
 in vec3 vEyeVector;
 in vec3 vWorldNormal;
+in vec3 vFilmDirection;
 in vec3 vWorldPos;
 in vec2 vUV;
 in mat4 vView;
@@ -413,7 +421,10 @@ void main() {
 
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
-    vec3 filmDir = normalize(vWorldNormal);
+    float filmDirectionLengthSquared = dot(vFilmDirection, vFilmDirection);
+    vec3 filmDir = filmDirectionLengthSquared > 1e-10
+        ? vFilmDirection * inversesqrt(filmDirectionLengthSquared)
+        : normalize(vWorldNormal);
     float flowSpeed = 1.45;
     vec3 slowFlow = vec3(uTime * 0.10, -uTime * 0.20, uTime * 0.08) * flowSpeed;
     vec3 warp = vec3(

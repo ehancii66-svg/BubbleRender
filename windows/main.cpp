@@ -1184,6 +1184,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
 
     for (Vertex& vertex : vertices) {
         glm::vec3 direction = glm::normalize(vertex.Position);
+        vertex.FilmDirection = direction;
         float alongMotion = glm::dot(direction, motionAxis);
         glm::vec3 axial = motionAxis * alongMotion * axialScale;
         glm::vec3 radial = (direction - motionAxis * alongMotion) * radialScale;

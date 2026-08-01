@@ -13,6 +13,15 @@ float Smooth01Local(float x)
     return x * x * (3.0f - 2.0f * x);
 }
 
+glm::vec3 SafeNormalize(const glm::vec3& value, const glm::vec3& fallback)
+{
+    float lengthSquared = glm::dot(value, value);
+    if (lengthSquared <= 1e-10f) {
+        return fallback;
+    }
+    return value / std::sqrt(lengthSquared);
+}
+
 } // namespace
 
 DiscMeshData BuildContactFilmDisc(int segments, int rings)
@@ -143,8 +152,10 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
 
     std::vector<float> axial((size_t)rings + 1u);
     std::vector<float> radial((size_t)rings + 1u);
+    std::vector<float> sourceAxial((size_t)rings + 1u);
     for (int ring = 0; ring <= rings; ++ring) {
         float v = (float)ring / (float)rings;
+        float sourceX = glm::mix(sourceLeft, sourceRight, v);
         float x = glm::mix(left, right, v);
         float rhoASq = radiusA * radiusA - (x - centerA) * (x - centerA);
         float rhoBSq = radiusB * radiusB - (x - centerB) * (x - centerB);
@@ -169,6 +180,7 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
 
         axial[(size_t)ring] = x;
         radial[(size_t)ring] = ring == 0 || ring == rings ? 0.0f : rho;
+        sourceAxial[(size_t)ring] = sourceX;
     }
 
     float volumeIntegral = 0.0f;
@@ -221,6 +233,37 @@ std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& pa
                 vertex.Normal = glm::normalize(glm::vec3(-slope, cosine, sine));
             }
             vertex.TexCoords = glm::vec2(u, (float)ring / (float)rings);
+            float materialX = sourceAxial[(size_t)ring];
+            float sourceRhoA = std::sqrt(std::max(
+                radiusA * radiusA - (materialX - centerA) * (materialX - centerA),
+                0.0f));
+            float sourceRhoB = std::sqrt(std::max(
+                radiusB * radiusB - (materialX - centerB) * (materialX - centerB),
+                0.0f));
+            glm::vec3 radialFallback(0.0f, cosine, sine);
+            glm::vec3 sourceDirectionA = SafeNormalize(
+                glm::vec3(materialX - centerA, sourceRhoA * cosine, sourceRhoA * sine),
+                radialFallback);
+            glm::vec3 sourceDirectionB = SafeNormalize(
+                glm::vec3(materialX - centerB, sourceRhoB * cosine, sourceRhoB * sine),
+                radialFallback);
+            float materialBlendHalfWidth = std::max(minRadius * 0.32f, 0.001f);
+            float sourceBlend = Smooth01Local(
+                (materialX - contactCenter + materialBlendHalfWidth) /
+                (2.0f * materialBlendHalfWidth));
+            glm::vec3 sourceFilmDirection = sourceBlend <= 0.5f
+                ? SafeNormalize(
+                    glm::mix(sourceDirectionA, radialFallback,
+                             Smooth01Local(sourceBlend * 2.0f)),
+                    radialFallback)
+                : SafeNormalize(
+                    glm::mix(radialFallback, sourceDirectionB,
+                             Smooth01Local((sourceBlend - 0.5f) * 2.0f)),
+                    radialFallback);
+            glm::vec3 targetFilmDirection = SafeNormalize(vertex.Position, vertex.Normal);
+            vertex.FilmDirection = SafeNormalize(
+                glm::mix(sourceFilmDirection, targetFilmDirection, relaxationProgress),
+                targetFilmDirection);
             vertex.Tangent = glm::vec3(0.0f);
             vertex.Bitangent = glm::vec3(0.0f);
             vertices.push_back(vertex);
