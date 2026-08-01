@@ -3206,6 +3206,7 @@ int main()
             positions, normals, BuildFusionSurfaceIndices());
     }
     ResetDisplayBubbles();
+    StartBubbleInteractionDemo();
 
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
@@ -3289,7 +3290,7 @@ int main()
               << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
               << ", contactLog=" << (g_LogContactDebug ? "on" : "off")
               << std::endl;
-    std::cout << "Scene: three persistent bubbles with wind drift and multi-contact deformation" << std::endl;
+    std::cout << "Scene: startup two-bubble fusion replay" << std::endl;
     std::cout << "==================================================" << std::endl;
 
     while (!glfwWindowShouldClose(window))
