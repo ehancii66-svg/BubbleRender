@@ -128,6 +128,7 @@ static constexpr float kNeckExpansionDuration = 1.20f;
 static constexpr float kRelaxationDelay = 0.95f;
 static constexpr float kRelaxationDuration = 1.45f;
 static constexpr float kFusionCompletionHold = 0.12f;
+static constexpr float kPostFusionSurfaceRecoveryDuration = 0.85f;
 static constexpr float kShellCutDelay = 0.42f;
 static constexpr size_t kDefaultDisplayBubbleCount = 3;
 static constexpr size_t kHardMaxDisplayBubbleCount = 16;
@@ -642,6 +643,7 @@ static uint64_t AddBubble(const glm::vec3& position,
     bubble.mergeProgress = 0.0f;
     bubble.filmThickness = 1.0f;
     bubble.contactStrength = 0.0f;
+    bubble.surfaceDynamicsBlend = 1.0f;
     bubble.contactAxis = glm::vec3(1.0f, 0.0f, 0.0f);
     bubble.volumeTransferred = false;
     bubble.state = DisplayBubble::State::Free;
@@ -733,6 +735,7 @@ static void FinalizeCompletedFusions()
         survivor.filmThickness = std::min(survivor.filmThickness,
                                           absorbed.filmThickness);
         survivor.contactStrength = 0.0f;
+        survivor.surfaceDynamicsBlend = 0.0f;
         survivor.volumeTransferred = true;
         survivor.state = DisplayBubble::State::Merged;
         survivor.surfaceControls = MakeSurfaceControls(survivor.phase);
@@ -1001,6 +1004,7 @@ static void StartBubbleInteractionDemo()
     a.mergeProgress = 0.0f;
     a.filmThickness = 1.0f;
     a.contactStrength = 0.0f;
+    a.surfaceDynamicsBlend = 1.0f;
     a.contactAxis = axis;
     a.volumeTransferred = false;
     a.state = DisplayBubble::State::Free;
@@ -1017,6 +1021,7 @@ static void StartBubbleInteractionDemo()
     b.mergeProgress = 0.0f;
     b.filmThickness = 1.0f;
     b.contactStrength = 0.0f;
+    b.surfaceDynamicsBlend = 1.0f;
     b.contactAxis = -axis;
     b.volumeTransferred = false;
     b.state = DisplayBubble::State::Free;
@@ -1151,13 +1156,16 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
     }
 
     const DisplayBubble& bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+    float surfaceDynamicsBlend = Smooth01(bubble.surfaceDynamicsBlend);
     glm::vec3 motionAxis = bubble.velocity;
     if (glm::length(motionAxis) < 1e-4f) {
         motionAxis = glm::vec3(0.78f, 0.26f, 0.12f);
     }
     motionAxis = glm::normalize(motionAxis);
-    float speedStretch = glm::clamp(glm::length(bubble.velocity) * 0.055f, 0.0f, 0.045f);
-    float freeOscillation = std::sin(time * (0.72f + bubble.speed * 0.18f) + bubble.phase) * 0.012f;
+    float speedStretch = glm::clamp(glm::length(bubble.velocity) * 0.055f, 0.0f, 0.045f) *
+                         surfaceDynamicsBlend;
+    float freeOscillation = std::sin(time * (0.72f + bubble.speed * 0.18f) + bubble.phase) *
+                            0.012f * surfaceDynamicsBlend;
     float axialScale = 1.0f + speedStretch + freeOscillation;
     float radialScale = 1.0f / std::sqrt(std::max(axialScale, 0.25f));
     float contactShare = 1.0f /
@@ -1169,8 +1177,10 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
     if (!bubble.surfaceControls.empty()) {
         meanControlRadialOffset /= (float)bubble.surfaceControls.size();
     }
-    float persistentVolumeScale = glm::clamp(1.0f - meanControlRadialOffset,
-                                             0.94f, 1.06f);
+    float persistentVolumeScale = glm::mix(
+        1.0f,
+        glm::clamp(1.0f - meanControlRadialOffset, 0.94f, 1.06f),
+        surfaceDynamicsBlend);
 
     for (Vertex& vertex : vertices) {
         glm::vec3 direction = glm::normalize(vertex.Position);
@@ -1187,7 +1197,7 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
             persistentWeight += weight;
         }
         if (persistentWeight > 1e-5f) {
-            position += persistentSurfaceOffset / persistentWeight;
+            position += persistentSurfaceOffset / persistentWeight * surfaceDynamicsBlend;
         }
         glm::vec3 contactOffset(0.0f);
         float vertexContactSum = 0.0f;
@@ -1207,16 +1217,13 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(int bubbleIndex, float 
             }
             contactDirection /= contactDistance;
 
+            float bondedStrength = glm::clamp(
+                0.20f + 0.80f * std::max(pair.interactionCompression,
+                                         Smooth01(pair.contactTime / kFusionTime)),
+                0.0f, 1.0f);
             float pairStrength = pair.bonded
-                ? glm::clamp(0.20f + 0.80f * std::max(pair.interactionCompression,
-                                                       Smooth01(pair.contactTime / kFusionTime)),
-                             0.0f, 1.0f)
-                : Smooth01((bubble.radius + otherBubble.radius +
-                            std::min(bubble.radius, otherBubble.radius) * 0.08f -
-                            contactDistance) /
-                           std::max(std::min(bubble.radius,
-                                             otherBubble.radius) * 0.08f,
-                                    0.001f));
+                ? std::max(pair.contactActivation, bondedStrength)
+                : pair.contactActivation;
             if (pairStrength <= 0.001f) {
                 continue;
             }
@@ -1579,6 +1586,10 @@ static void UpdateDisplayBubbleInteractions(float dt)
         bubble.velocity *= expf(dt * -0.48f);
         bubble.position += bubble.velocity * dt;
         bubble.contactStrength *= expf(dt * -3.0f);
+        bubble.surfaceDynamicsBlend = std::min(
+            1.0f,
+            bubble.surfaceDynamicsBlend +
+                dt / std::max(kPostFusionSurfaceRecoveryDuration, 0.001f));
         if (bubble.targetVolume > 0.0f) {
             float targetRadius = RadiusFromVolume(bubble.targetVolume);
             bubble.radius += (targetRadius - bubble.radius) * std::min(1.0f, dt * 1.8f);
@@ -2485,7 +2496,7 @@ static void RenderFrame()
             float alpha = (straightComposite
                 ? (g_InteractionDemoActive ? 0.62f : 0.72f)
                 : 1.0f) * pairAlpha * visibility;
-            SetRefractUniforms(fusionModel, targetRadius * 1.15f,
+            SetRefractUniforms(fusionModel, targetRadius,
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
             g_RefractionShader->SetInt("uVisualContactCount", 0);

@@ -31,6 +31,7 @@ struct DisplayBubble {
     float mergeProgress = 0.0f;
     float filmThickness = 1.0f;
     float contactStrength = 0.0f;
+    float surfaceDynamicsBlend = 1.0f;
     glm::vec3 contactAxis = glm::vec3(1.0f, 0.0f, 0.0f);
     bool volumeTransferred = false;
 
