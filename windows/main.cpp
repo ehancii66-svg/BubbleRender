@@ -36,6 +36,7 @@
 #include <cstdio>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <utility>
 #include <vector>
 #include <string>
@@ -110,6 +111,7 @@ static std::vector<glm::vec3> g_SpherePositions;
 static std::vector<DisplayBubble> g_DisplayBubbles;
 static std::vector<BubbleContactPair> g_ContactPairs;
 static uint64_t g_NextBubbleId = 1;
+static uint64_t g_InteractionOutcomeSeed = 0;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = true;
 static BubbleSurfaceSystem g_BubbleSurfaces;
@@ -261,9 +263,11 @@ static void UpdateTransportedFusionFrame(BubbleContactPair &pair,
     pair.fusionSide = side;
 }
 
-static float PairHash01(uint64_t a, uint64_t b)
+static float PairHash01(uint64_t a, uint64_t b, uint64_t sceneSeed)
 {
-    uint64_t x = a * 0x9E3779B97F4A7C15ull ^ b * 0xBF58476D1CE4E5B9ull;
+    uint64_t x = a * 0x9E3779B97F4A7C15ull ^
+                 b * 0xBF58476D1CE4E5B9ull ^
+                 sceneSeed * 0xD6E8FEB86659FD93ull;
     x ^= x >> 30;
     x *= 0xBF58476D1CE4E5B9ull;
     x ^= x >> 27;
@@ -662,11 +666,11 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
                                 : 0.0f;
 
     float separationProbability = glm::clamp(
-        0.04f +
-            (1.0f - contactSize) * 0.05f +
-            impact * 0.04f +
-            windInstability * 0.02f,
-        0.04f, 0.14f);
+        0.02f +
+            (1.0f - contactSize) * 0.03f +
+            impact * 0.02f +
+            windInstability * 0.01f,
+        0.02f, 0.08f);
     float fusionProbability = glm::clamp(
         0.14f +
             sizeMismatch * 0.68f +
@@ -682,7 +686,8 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
         fusionProbability *= scale;
     }
     pair.coalescenceScore = fusionProbability;
-    pair.coalescenceRandom = PairHash01(pair.a, pair.b);
+    pair.coalescenceRandom = PairHash01(
+        pair.a, pair.b, g_InteractionOutcomeSeed);
     if (pair.coalescenceRandom < separationProbability)
     {
         pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
@@ -703,6 +708,7 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
                   << " outcome=" << CoalescenceOutcomeName(pair.outcome)
                   << " score=" << pair.coalescenceScore
                   << " random=" << pair.coalescenceRandom
+                  << " sceneSeed=" << g_InteractionOutcomeSeed
                   << " separate=" << separationProbability
                   << " sizeRatio=" << sizeRatio
                   << " mismatch=" << sizeMismatch
@@ -956,44 +962,6 @@ static uint64_t SpawnBubble(const BubbleSpawnRequest &request)
     return id;
 }
 
-static uint64_t SpawnInteractiveBubble()
-{
-    float spawnIndex = (float)std::max<uint64_t>(g_NextBubbleId, 1);
-    float angle = spawnIndex * 2.3999632f + (float)g_Time * 0.17f;
-    float radius = g_SpawnRadius;
-    glm::vec3 clusterCenter(0.0f, 0.05f, 1.10f);
-    glm::vec3 radial(std::cos(angle), std::sin(angle), 0.18f * std::sin(angle * 0.7f));
-    radial = glm::normalize(radial);
-    glm::vec3 tangent(-radial.y, radial.x, 0.0f);
-    if (glm::length(tangent) < 1e-5f)
-    {
-        tangent = glm::vec3(0.0f, 1.0f, 0.0f);
-    }
-    tangent = glm::normalize(tangent);
-
-    float spawnDistance = 1.10f + radius * 0.85f;
-    glm::vec3 position = clusterCenter + radial * spawnDistance;
-    glm::vec3 home = clusterCenter + radial * (0.34f + 0.06f * std::sin(spawnIndex));
-    glm::vec3 velocity = -radial * (0.20f + 0.035f * std::sin(spawnIndex * 0.53f)) +
-                         tangent * (0.035f * std::cos(spawnIndex * 0.91f));
-    float phase = spawnIndex * 1.37f;
-    float wind = 0.010f + 0.003f * Smooth01(0.5f + 0.5f * std::sin(spawnIndex * 0.63f));
-    float lift = 0.008f + 0.003f * Smooth01(0.5f + 0.5f * std::cos(spawnIndex * 0.47f));
-    float speed = 0.52f + 0.18f * Smooth01(0.5f + 0.5f * std::sin(spawnIndex * 0.81f));
-
-    BubbleSpawnRequest request;
-    request.position = position;
-    request.basePosition = home;
-    request.initialVelocity = velocity;
-    request.radius = radius;
-    request.phase = phase;
-    request.windAmplitude = wind;
-    request.floatAmplitude = lift;
-    request.speed = speed;
-    request.shapePerturbation = 1.0f;
-    return SpawnBubble(request);
-}
-
 static bool BubblePlanePointFromScreen(double screenX, double screenY, glm::vec3 &worldPoint)
 {
     UpdateCamera();
@@ -1042,30 +1010,71 @@ static uint64_t SpawnBubbleAtScreenPoint(double screenX, double screenY)
     return SpawnBubble(request);
 }
 
-static bool RemoveLastInteractiveBubble()
+static bool RaySphereIntersection(const glm::vec3 &rayOrigin,
+                                  const glm::vec3 &rayDirection,
+                                  const glm::vec3 &sphereCenter,
+                                  float sphereRadius,
+                                  float &hitDistance)
 {
-    if (g_DisplayBubbles.size() <= kDefaultDisplayBubbleCount)
+    glm::vec3 offset = rayOrigin - sphereCenter;
+    float projected = glm::dot(offset, rayDirection);
+    float constant = glm::dot(offset, offset) - sphereRadius * sphereRadius;
+    float discriminant = projected * projected - constant;
+    if (discriminant < 0.0f)
     {
-        std::cout << "[BubbleSpawn] no interactive bubble to remove" << std::endl;
         return false;
     }
 
-    for (auto it = g_DisplayBubbles.rbegin(); it != g_DisplayBubbles.rend(); ++it)
+    float root = std::sqrt(discriminant);
+    float nearHit = -projected - root;
+    float farHit = -projected + root;
+    hitDistance = nearHit >= 0.0f ? nearHit : farHit;
+    return hitDistance >= 0.0f;
+}
+
+static bool RemoveBubbleAtScreenPoint(double screenX, double screenY)
+{
+    UpdateCamera();
+    glm::vec3 rayOrigin = g_Camera.getPosition();
+    glm::vec3 rayDirection = SafeNormalizeDirection(
+        g_Camera.getRayDirectionFromScreen((float)screenX, (float)screenY),
+        glm::vec3(0.0f, 0.0f, -1.0f));
+
+    uint64_t selectedId = 0;
+    float nearestHit = std::numeric_limits<float>::max();
+    for (const DisplayBubble &bubble : g_DisplayBubbles)
     {
-        if (it->state == DisplayBubble::State::Dead)
+        if (bubble.state == DisplayBubble::State::Dead || bubble.alpha <= 0.01f)
         {
             continue;
         }
-        uint64_t id = it->id;
-        bool removed = RemoveBubble(id);
-        if (removed)
+
+        float hitDistance = 0.0f;
+        float pickRadius = std::max(bubble.radius, 0.001f);
+        if (RaySphereIntersection(rayOrigin, rayDirection,
+                                  bubble.position, pickRadius, hitDistance) &&
+            hitDistance < nearestHit)
         {
-            std::cout << "[BubbleSpawn] remove id=" << id
-                      << " live=" << LiveDisplayBubbleCount() << std::endl;
+            nearestHit = hitDistance;
+            selectedId = bubble.id;
         }
-        return removed;
     }
-    return false;
+
+    if (selectedId == 0)
+    {
+        std::cout << "[BubbleSpawn] no bubble under cursor" << std::endl;
+        return false;
+    }
+
+    g_InteractionDemoActive = false;
+    g_ShowMainBubble = false;
+    bool removed = RemoveBubble(selectedId);
+    if (removed)
+    {
+        std::cout << "[BubbleSpawn] remove id=" << selectedId
+                  << " live=" << LiveDisplayBubbleCount() << std::endl;
+    }
+    return removed;
 }
 
 static glm::mat4 AxisBasisModel(const glm::vec3 &center, const glm::vec3 &axisToPartner)
@@ -1102,6 +1111,7 @@ static void ResetDisplayBubbles()
         {{0.02f, 1.22f, 1.08f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.66f, {-0.004f, -0.130f, 0.004f}}};
 
     g_DisplayBubbles.clear();
+    ++g_InteractionOutcomeSeed;
     g_NextBubbleId = 1;
     g_DisplayBubbles.reserve(seeds.size());
     const glm::vec3 clusteredHomes[] = {
@@ -3353,6 +3363,15 @@ static void MouseButtonCallback(GLFWwindow *window, int button, int action, int 
     }
     else if (button == GLFW_MOUSE_BUTTON_RIGHT)
     {
+        if (action == GLFW_PRESS && (mods & GLFW_MOD_SHIFT))
+        {
+            double x, y;
+            glfwGetCursorPos(window, &x, &y);
+            RemoveBubbleAtScreenPoint(x, y);
+            g_TouchPressed = false;
+            return;
+        }
+
         g_TouchPressed = (action == GLFW_PRESS);
         if (g_TouchPressed)
         {
@@ -3498,18 +3517,6 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
     case GLFW_KEY_4:
         g_Sim.surfaceTensionStrength = std::min(50.0f, g_Sim.surfaceTensionStrength + 1.0f);
         std::cout << "SurfaceTensionStrength: " << g_Sim.surfaceTensionStrength << std::endl;
-        break;
-    case GLFW_KEY_B:
-        if (action == GLFW_PRESS)
-        {
-            SpawnInteractiveBubble();
-        }
-        break;
-    case GLFW_KEY_V:
-        if (action == GLFW_PRESS)
-        {
-            RemoveLastInteractiveBubble();
-        }
         break;
     case GLFW_KEY_LEFT_BRACKET:
         g_SpawnRadius = std::max(kMinSpawnRadius, g_SpawnRadius - 0.03f);
@@ -3792,8 +3799,8 @@ int main()
     std::cout << "  Z              Pause / resume" << std::endl;
     std::cout << "  X              Reset synced bubble scene" << std::endl;
     std::cout << "  G              Cycle interaction outcome replay" << std::endl;
-    std::cout << "  B / V          Add / remove interactive bubble" << std::endl;
     std::cout << "  Shift+Left     Spawn bubble at cursor plane" << std::endl;
+    std::cout << "  Shift+Right    Remove bubble under cursor" << std::endl;
     std::cout << "  [ / ]          Spawn radius               - / +" << std::endl;
     std::cout << "  , / .          Max live bubbles           - / +" << std::endl;
     std::cout << "  F              Toggle global wind" << std::endl;
