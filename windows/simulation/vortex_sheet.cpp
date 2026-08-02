@@ -530,6 +530,85 @@ void VortexSheetSimulation::advectPositions(float dt)
 }
 
 // ============================================================
+// Delete triangles near holeDirection to create an opening,
+// then remap and prune orphaned vertices.
+// ============================================================
+
+void VortexSheetSimulation::punchHole(const glm::vec3 &holeDirection,
+                                      float angularThreshold)
+{
+    glm::vec3 dir = glm::length(holeDirection) > 1e-6f
+        ? glm::normalize(holeDirection) : glm::vec3(0, 1, 0);
+    float cosThreshold = std::cos(angularThreshold);
+
+    // Mark triangles for deletion
+    std::vector<int> oldToNew(m_mesh.positions.size(), -1);
+    std::vector<glm::ivec3> keptTris;
+    keptTris.reserve(m_mesh.triangles.size());
+
+    for (const auto& tri : m_mesh.triangles) {
+        glm::vec3 c = (m_mesh.positions[tri.x] + m_mesh.positions[tri.y]
+                     + m_mesh.positions[tri.z]) / 3.0f;
+        float cl = glm::length(c);
+        if (cl < 1e-6f) { keptTris.push_back(tri); continue; }
+        glm::vec3 cn = c / cl;
+        if (glm::dot(cn, dir) > cosThreshold) {
+            // This triangle is inside the hole — delete it.
+            continue;
+        }
+        keptTris.push_back(tri);
+    }
+
+    if (keptTris.size() == m_mesh.triangles.size()) {
+        // Nothing was deleted
+        return;
+    }
+
+    // Remap: keep only vertices still referenced by kept triangles
+    std::vector<glm::vec3> newPos;
+    std::vector<glm::ivec3> newTris;
+    newTris.reserve(keptTris.size());
+
+    for (const auto& tri : keptTris) {
+        glm::ivec3 nt;
+        for (int k = 0; k < 3; ++k) {
+            int oldIdx = tri[k];
+            if (oldToNew[oldIdx] < 0) {
+                oldToNew[oldIdx] = (int)newPos.size();
+                newPos.push_back(m_mesh.positions[oldIdx]);
+            }
+            nt[k] = oldToNew[oldIdx];
+        }
+        newTris.push_back(nt);
+    }
+
+    m_mesh.positions = newPos;
+    m_mesh.triangles = newTris;
+    int nv = (int)m_mesh.positions.size();
+    m_mesh.circulation.assign(nv, 0.0f);
+    m_mesh.vertexNormals.assign(nv, glm::vec3(0.0f));
+    m_mesh.voronoiAreas.assign(nv, 0.0f);
+    m_mesh.meanCurvature.assign(nv, 0.0f);
+    m_mesh.velocity.assign(nv, glm::vec3(0.0f));
+
+    computeVertexNormalsAndAreas();
+    m_avgEdgeLength = 0.0f;
+    {
+        int ec = 0;
+        for (const auto& tri : m_mesh.triangles) {
+            for (int k = 0; k < 3; ++k) {
+                glm::vec3 d = m_mesh.positions[tri[k]]
+                            - m_mesh.positions[tri[(k+1)%3]];
+                m_avgEdgeLength += glm::length(d);
+                ++ec;
+            }
+        }
+        if (ec > 0) m_avgEdgeLength /= float(ec);
+    }
+    regularizationAlpha = m_avgEdgeLength * 1.0f;
+}
+
+// ============================================================
 // Stability: Laplacian diffusion of circulation (§6)
 // ============================================================
 

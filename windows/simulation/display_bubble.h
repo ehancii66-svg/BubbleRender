@@ -32,6 +32,9 @@ struct DisplayBubble {
     float surfaceDynamicsBlend = 1.0f;
     glm::vec3 contactAxis = glm::vec3(1.0f, 0.0f, 0.0f);
     bool volumeTransferred = false;
+    float burstElapsed = 0.0f;
+    float burstDuration = 0.5f;
+    float burstScale = 1.0f;
 
     enum class State {
         Free,

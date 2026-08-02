@@ -95,6 +95,91 @@ static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation &sim
     return verts;
 }
 
+// ============================================================
+// Per-display-bubble DBSTT vortex sheet sims
+// ============================================================
+// A DBSTT vortex sheet sim is created per bubble at unit radius.  It is
+// only activated during burst: the boosted surface tension drives the
+// membrane retraction as real physics.  Normal (non-burst) rendering and
+// contact/fusion continue to use the existing control-point surface.
+#include <unordered_map>
+#include <memory>
+static std::unordered_map<uint64_t, std::unique_ptr<VortexSheetSimulation>> g_BubbleSims;
+
+static constexpr int kDisplayBubbleSimSubdivs = 2;
+
+static VortexSheetSimulation *GetBubbleSim(uint64_t id)
+{
+    auto it = g_BubbleSims.find(id);
+    return it != g_BubbleSims.end() ? it->second.get() : nullptr;
+}
+
+static VortexSheetSimulation *InitBubbleSim(uint64_t id, float radius)
+{
+    auto sim = std::make_unique<VortexSheetSimulation>();
+    // Always create at unit radius — the model matrix handles visual scaling.
+    // This keeps the sim independent of bubble.radius changes (e.g. demo).
+    sim->initIcosphere(1.0f, kDisplayBubbleSimSubdivs, 0.04f);
+    sim->timeStep = 0.001f;
+    sim->substepsPerFrame = 3;
+    sim->surfaceTensionStrength = 15.0f;
+    sim->circulationDiffusion = 0.0008f;
+    sim->flipSurfaceTensionSign = true;
+    sim->diagnosticsEnabled = false;
+    auto *ptr = sim.get();
+    g_BubbleSims[id] = std::move(sim);
+    return ptr;
+}
+
+// Build initial Vertex + index arrays from a sim mesh for EnsureBubble.
+static std::pair<std::vector<Vertex>, std::vector<unsigned int>>
+BuildSimRenderMesh(const VortexSheetSimulation &sim)
+{
+    const auto &pos = sim.getPositions();
+    const auto &nrm = sim.getNormals();
+    const auto &tris = sim.getTriangles();
+    std::vector<Vertex> verts(pos.size());
+    for (size_t i = 0; i < pos.size(); ++i)
+    {
+        verts[i].Position = pos[i];
+        verts[i].Normal = nrm[i];
+        verts[i].TexCoords = glm::vec2(0.0f);
+        verts[i].Tangent = glm::vec3(0.0f);
+        verts[i].Bitangent = glm::vec3(0.0f);
+        verts[i].FilmDirection = glm::length(pos[i]) > 1e-6f
+            ? glm::normalize(pos[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    std::vector<unsigned int> indices(tris.size() * 3);
+    for (size_t i = 0; i < tris.size(); ++i)
+    {
+        indices[3 * i]     = (unsigned int)tris[i].x;
+        indices[3 * i + 1] = (unsigned int)tris[i].y;
+        indices[3 * i + 2] = (unsigned int)tris[i].z;
+    }
+    return {verts, indices};
+}
+
+// Upload sim vertex positions to a render mesh (called each frame).
+static void UpdateMeshFromSim(Mesh *mesh, const VortexSheetSimulation &sim)
+{
+    if (!mesh) return;
+    const auto &pos = sim.getPositions();
+    const auto &nrm = sim.getNormals();
+    auto &verts = mesh->vertices;
+    if (verts.size() != pos.size()) return;
+    for (size_t i = 0; i < pos.size(); ++i)
+    {
+        verts[i].Position = pos[i];
+        verts[i].Normal = nrm[i];
+        // Keep FilmDirection pointing outward from the original direction
+        // so the thin-film interference pattern stays stable.
+        if (glm::dot(verts[i].FilmDirection, verts[i].FilmDirection) < 1e-6f)
+            verts[i].FilmDirection = glm::length(pos[i]) > 1e-6f
+                ? glm::normalize(pos[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    mesh->updateVertices(verts);
+}
+
 static Camera g_Camera;
 
 static Shader *g_RefractionShader = nullptr;
@@ -110,6 +195,23 @@ static std::vector<glm::vec3> g_SpherePositions;
 
 static std::vector<DisplayBubble> g_DisplayBubbles;
 static std::vector<BubbleContactPair> g_ContactPairs;
+
+static void UpdateBubbleSims(float dt)
+{
+    if (g_SimPaused) return;
+    // DBSTT sims are only updated during burst.  Normal surface dynamics
+    // are handled by BuildPersistentBubbleVertices.
+    for (auto &bubble : g_DisplayBubbles)
+    {
+        if (bubble.state == DisplayBubble::State::Dead) continue;
+        if (bubble.state != DisplayBubble::State::Burst) continue;
+        auto *sim = GetBubbleSim(bubble.id);
+        if (!sim) continue;
+
+        sim->update(dt);
+    }
+}
+
 struct RenderOnlyBubble
 {
     glm::vec3 basePosition = glm::vec3(0.0f);
@@ -161,6 +263,7 @@ static constexpr float kMinGlobalWindStrength = 0.0f;
 static constexpr float kMaxGlobalWindStrength = 0.45f;
 static constexpr float kGlobalWindStrengthStep = 0.025f;
 static bool g_LogContactDebug = false;
+static bool g_DeleteMode = false;
 
 static GLuint g_BackgroundTexture = 0;
 static GLuint g_SceneBehindTexture = 0;
@@ -738,17 +841,14 @@ static float PlateauContactRadius(const BubbleContactPair &pair, const DisplayBu
 
 static void RebuildDisplayBubbleModels()
 {
-    std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
-    for (Vertex &vertex : vertices)
-    {
-        vertex.FilmDirection = glm::normalize(vertex.Position);
-    }
-    std::vector<unsigned int> indices = BuildContactBubblePatchIndices();
-
     g_BubbleSurfaces.Clear();
     for (const DisplayBubble &bubble : g_DisplayBubbles)
     {
-        g_BubbleSurfaces.EnsureBubble(bubble.id, vertices, indices);
+        std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
+        for (Vertex &vertex : vertices)
+            vertex.FilmDirection = glm::normalize(vertex.Position);
+        g_BubbleSurfaces.EnsureBubble(bubble.id, vertices,
+                                      BuildContactBubblePatchIndices());
     }
 }
 
@@ -792,6 +892,8 @@ static uint64_t AddBubble(const glm::vec3 &position,
 
     uint64_t id = bubble.id;
     g_DisplayBubbles.push_back(bubble);
+    // Create a DBSTT sim for burst physics (activated only on burst).
+    InitBubbleSim(id, radius);
     if (rebuildModels && g_DecorativeBubbleModel)
     {
         std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
@@ -832,6 +934,7 @@ static bool RemoveBubble(uint64_t id)
         g_ContactPairs.end());
 
     g_BubbleSurfaces.RemoveBubble(id);
+    g_BubbleSims.erase(id);
     return true;
 }
 
@@ -911,6 +1014,133 @@ static size_t LiveDisplayBubbleCount()
         }
     }
     return count;
+}
+
+static void TriggerBubbleBurst(uint64_t bubbleId)
+{
+    int index = FindBubbleIndexById(g_DisplayBubbles, bubbleId);
+    if (index < 0)
+    {
+        return;
+    }
+    DisplayBubble &bubble = g_DisplayBubbles[(size_t)index];
+    if (bubble.state == DisplayBubble::State::Burst ||
+        bubble.state == DisplayBubble::State::Dead)
+    {
+        return;
+    }
+
+    bubble.state = DisplayBubble::State::Burst;
+    bubble.burstElapsed = 0.0f;
+    bubble.burstDuration = 0.35f;
+    bubble.burstScale = 1.0f;
+    bubble.contactStrength = 0.0f;
+    bubble.surfaceDynamicsBlend = 0.0f;
+
+    // Re-initialise the sim at the bubble's actual radius so the initial
+    // shape matches what the user sees, then boost surface tension so the
+    // membrane retracts inward under real DBSTT physics.
+    auto *sim = GetBubbleSim(bubbleId);
+    if (sim)
+    {
+        // Re-init at actual radius, then punch a hole toward the camera so
+        // the membrane has a free edge to retract from under surface tension.
+        sim->initIcosphere(bubble.radius, kDisplayBubbleSimSubdivs, 0.04f);
+        glm::vec3 holeDir = glm::normalize(g_Camera.getPosition() - bubble.position);
+        sim->punchHole(holeDir, 0.45f);  // ~26 degree opening
+        sim->surfaceTensionStrength = 120.0f;
+        sim->substepsPerFrame = 12;
+        sim->timeStep = 0.002f;
+        sim->circulationDiffusion = 0.0001f;
+        sim->diagnosticsEnabled = false;
+
+        // Replace the render mesh with the (holed) sim mesh so physics
+        // drives the retraction shape during the burst.
+        Model *shellModel = FindDisplayBubbleModel(bubbleId);
+        if (shellModel)
+        {
+            Mesh *mesh = shellModel->getMesh(0);
+            if (mesh)
+            {
+                auto [sv, si] = BuildSimRenderMesh(*sim);
+                mesh->updateGeometry(sv, si);
+            }
+        }
+    }
+    else
+    {
+        // Fallback: no sim available — use manual shrink.
+        bubble.burstScale = 1.0f;
+    }
+
+    // Deactivate contact pairs involving this bubble so the contact
+    // logic does not fight a dying, expanding bubble.
+    for (auto &pair : g_ContactPairs)
+    {
+        if (pair.a == bubbleId || pair.b == bubbleId)
+        {
+            pair.bonded = false;
+            pair.candidate = false;
+            pair.active = false;
+            pair.contactActivation = 0.0f;
+            pair.bridgeStrength = 0.0f;
+            // Critical: clear fusion state so the fusion surface stops
+            // rendering and the bursting shell becomes visible.
+            pair.fusionActive = false;
+            pair.fusionComplete = false;
+            pair.persistentRenderPair = false;
+            pair.contactRadius = 0.0f;
+            pair.contactRadiusVelocity = 0.0f;
+            pair.geometryBlend = 0.0f;
+            pair.interactionCompression = 0.0f;
+        }
+    }
+
+    // Apply a ripple impulse to nearby bubbles, mimicking the shockwave
+    // that the DBSTT paper gets for free from the vortex-sheet solver.
+    glm::vec3 burstCenter = bubble.position;
+    float burstRadius = bubble.radius;
+    float impulseRange = burstRadius * 4.0f;
+    for (auto &other : g_DisplayBubbles)
+    {
+        if (other.id == bubbleId ||
+            other.state == DisplayBubble::State::Burst ||
+            other.state == DisplayBubble::State::Dead)
+        {
+            continue;
+        }
+        glm::vec3 delta = other.position - burstCenter;
+        float dist = glm::length(delta);
+        if (dist < 1e-4f || dist > impulseRange)
+        {
+            continue;
+        }
+        float falloff = 1.0f - dist / impulseRange;
+        // Outward kick from shockwave + expansion for contact partners
+        // (their shared film just vanished, so internal pressure releases).
+        glm::vec3 impulse = glm::normalize(delta) * (0.8f * falloff);
+        other.velocity += impulse;
+        // Surface jolt for visible ripple.
+        other.contactStrength = std::max(other.contactStrength, 0.85f * falloff);
+
+        // If this neighbour was in contact with the bursting bubble, it
+        // should expand — the shared membrane that constrained it is gone.
+        for (const auto &pair : g_ContactPairs)
+        {
+            if ((pair.a == bubbleId && pair.b == other.id) ||
+                (pair.b == bubbleId && pair.a == other.id))
+            {
+                float expandBoost = 1.15f * falloff;
+                other.radius += expandBoost * 0.04f;
+                other.contactStrength = std::max(other.contactStrength, 1.0f);
+                break;
+            }
+        }
+    }
+
+    g_InteractionDemoActive = false;
+    g_ShowMainBubble = false;
+    std::cout << "[BubbleBurst] id=" << bubbleId << std::endl;
 }
 
 struct BubbleSpawnRequest
@@ -1087,6 +1317,46 @@ static bool RemoveBubbleAtScreenPoint(double screenX, double screenY)
     return removed;
 }
 
+static bool BurstBubbleAtScreenPoint(double screenX, double screenY)
+{
+    UpdateCamera();
+    glm::vec3 rayOrigin = g_Camera.getPosition();
+    glm::vec3 rayDirection = SafeNormalizeDirection(
+        g_Camera.getRayDirectionFromScreen((float)screenX, (float)screenY),
+        glm::vec3(0.0f, 0.0f, -1.0f));
+
+    uint64_t selectedId = 0;
+    float nearestHit = std::numeric_limits<float>::max();
+    for (const DisplayBubble &bubble : g_DisplayBubbles)
+    {
+        if (bubble.state == DisplayBubble::State::Dead ||
+            bubble.state == DisplayBubble::State::Burst ||
+            bubble.alpha <= 0.01f)
+        {
+            continue;
+        }
+
+        float hitDistance = 0.0f;
+        float pickRadius = std::max(bubble.radius, 0.001f);
+        if (RaySphereIntersection(rayOrigin, rayDirection,
+                                  bubble.position, pickRadius, hitDistance) &&
+            hitDistance < nearestHit)
+        {
+            nearestHit = hitDistance;
+            selectedId = bubble.id;
+        }
+    }
+
+    if (selectedId == 0)
+    {
+        std::cout << "[BubbleBurst] no bubble under cursor" << std::endl;
+        return false;
+    }
+
+    TriggerBubbleBurst(selectedId);
+    return true;
+}
+
 static glm::mat4 AxisBasisModel(const glm::vec3 &center, const glm::vec3 &axisToPartner)
 {
     glm::vec3 axis = glm::normalize(axisToPartner);
@@ -1138,6 +1408,7 @@ static void ResetDisplayBubbles()
         {{-1.48f, 0.42f, 1.20f}, 0.28f, 5.2f, 0.010f, 0.009f, 0.50f, {0.018f, -0.012f, 0.000f}}};
 
     g_DisplayBubbles.clear();
+    g_BubbleSims.clear();
     ++g_InteractionOutcomeSeed;
     g_NextBubbleId = 1;
     g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
@@ -1404,11 +1675,20 @@ static glm::mat4 BubbleModelMatrix(const DisplayBubble &bubble, float time)
 }
 
 static glm::mat4 PersistentBubbleModelMatrix(const DisplayBubble &bubble,
-                                             float time,
-                                             bool worldScaleSurface)
+                                            float time,
+                                            bool worldScaleSurface)
 {
     (void)time;
     glm::mat4 model = glm::translate(glm::mat4(1.0f), bubble.position);
+    if (bubble.state == DisplayBubble::State::Burst)
+    {
+        // If we have a sim, its mesh is at world radius — pure translation.
+        // Otherwise fall back to manual burstScale scaling.
+        if (GetBubbleSim(bubble.id))
+            return model;
+        model = glm::scale(model, glm::vec3(std::max(bubble.burstScale, 0.001f)));
+        return model;
+    }
     return worldScaleSurface
                ? model
                : glm::scale(model, glm::vec3(std::max(bubble.radius, 0.001f)));
@@ -1979,6 +2259,30 @@ static void UpdateDisplayBubbleInteractions(float dt)
             continue;
         }
 
+    if (bubble.state == DisplayBubble::State::Burst)
+    {
+        // If we have a sim, physics drives the retraction — only manage
+        // alpha fade.  Otherwise fall back to manual burstScale shrink.
+        bubble.burstElapsed += dt;
+        float t = glm::clamp(bubble.burstElapsed / bubble.burstDuration,
+                             0.0f, 1.0f);
+        auto *sim = GetBubbleSim(bubble.id);
+        if (!sim)
+        {
+            float shrink = 1.0f - t * t * (3.0f - 2.0f * t);
+            bubble.burstScale = std::max(shrink, 0.0f);
+        }
+        bubble.alpha = std::max(1.0f - t * 2.5f, 0.0f);
+        bubble.velocity *= expf(dt * -2.5f);
+        bubble.position += bubble.velocity * dt;
+        if (t >= 1.0f)
+            {
+                bubble.state = DisplayBubble::State::Dead;
+                bubble.alpha = 0.0f;
+            }
+            continue;
+        }
+
         bool mergedBubble = bubble.volumeTransferred;
         bubble.state = mergedBubble
                            ? DisplayBubble::State::Merged
@@ -2025,6 +2329,22 @@ static void UpdateDisplayBubbleInteractions(float dt)
         }
     }
 
+    // Remove bubbles that finished their burst animation.
+    std::vector<uint64_t> deadBubbleIds;
+    for (const auto &bubble : g_DisplayBubbles)
+    {
+        if (bubble.state == DisplayBubble::State::Dead)
+        {
+            deadBubbleIds.push_back(bubble.id);
+        }
+    }
+    for (uint64_t id : deadBubbleIds)
+    {
+        RemoveBubble(id);
+        std::cout << "[BubbleBurst] removed id=" << id
+                  << " live=" << LiveDisplayBubbleCount() << std::endl;
+    }
+
     // The interaction replay is a controlled visual experiment. Move the two
     // bubbles toward first contact at a deterministic rate so frame rate,
     // damping, and the weak ambient drift cannot stall the demonstration.
@@ -2069,6 +2389,15 @@ static void UpdateDisplayBubbleInteractions(float dt)
         int j = candidatePair.second;
         auto &a = g_DisplayBubbles[(size_t)i];
         auto &b = g_DisplayBubbles[(size_t)j];
+
+        // Never create or reactivate contacts involving bursting/dead bubbles.
+        if (a.state == DisplayBubble::State::Burst ||
+            a.state == DisplayBubble::State::Dead ||
+            b.state == DisplayBubble::State::Burst ||
+            b.state == DisplayBubble::State::Dead)
+        {
+            continue;
+        }
 
         int existingPairIndex = FindContactPair(g_ContactPairs, a.id, b.id);
         if (existingPairIndex >= 0)
@@ -2684,6 +3013,9 @@ static void RenderFrame()
     }
     UpdateDisplayBubbleInteractions((float)g_DeltaTime);
 
+    // Run per-display-bubble DBSTT vortex sheet sims
+    UpdateBubbleSims((float)g_DeltaTime);
+
     // Upload updated vertices from simulation to GPU
     if (g_RefractModel && g_RefractModel->getMeshCount() > 0)
     {
@@ -2779,7 +3111,14 @@ static void RenderFrame()
         {
             return;
         }
-        const DisplayBubble &bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+       const DisplayBubble &bubble = g_DisplayBubbles[(size_t)bubbleIndex];
+        // Bursting bubbles must not get contact-plane clipping — the sim
+        // mesh has a completely different vertex layout.
+        if (bubble.state == DisplayBubble::State::Burst)
+        {
+            g_RefractionShader->SetInt("uVisualContactCount", 0);
+            return;
+        }
         int visualContactCount = 0;
         for (const BubbleContactPair &pair : g_ContactPairs)
         {
@@ -2787,6 +3126,12 @@ static void RenderFrame()
             if ((!pair.candidate && !pair.bonded) || pair.contactRadius <= 0.001f ||
                 !PairContainsBubbleIndex(g_DisplayBubbles, pair, bubbleIndex, &otherIndex) ||
                 visualContactCount >= 4)
+            {
+                continue;
+            }
+            // Skip pairs where the other bubble is bursting or dead.
+            if (g_DisplayBubbles[(size_t)otherIndex].state == DisplayBubble::State::Burst ||
+                g_DisplayBubbles[(size_t)otherIndex].state == DisplayBubble::State::Dead)
             {
                 continue;
             }
@@ -2932,7 +3277,9 @@ static void RenderFrame()
             float alpha = straightComposite
                               ? (g_InteractionDemoActive ? 0.62f : 0.72f) * bubble.alpha * independentBubbleAlphaScale
                               : bubble.alpha * independentBubbleAlphaScale;
-            alpha *= 1.0f - fusionSurfaceVisibility;
+            // Bursting bubbles are always drawn (physics drives their shape).
+            if (bubble.state != DisplayBubble::State::Burst)
+                alpha *= 1.0f - fusionSurfaceVisibility;
             if (alpha <= 0.005f)
             {
                 continue;
@@ -2943,13 +3290,23 @@ static void RenderFrame()
             Model *shellModel = FindDisplayBubbleModel(bubble.id);
             if (shellModel)
             {
-                if (renderToFBO && !bubble.volumeTransferred)
+                if (renderToFBO && bubble.state == DisplayBubble::State::Burst)
                 {
                     Mesh *mesh = shellModel->getMesh(0);
-                    const std::vector<Vertex> *restVertices =
-                        g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
                     if (mesh)
                     {
+                        auto *sim = GetBubbleSim(bubble.id);
+                        if (sim)
+                            UpdateMeshFromSim(mesh, *sim);
+                    }
+                }
+                else if (renderToFBO && !bubble.volumeTransferred)
+                {
+                    Mesh *mesh = shellModel->getMesh(0);
+                    if (mesh)
+                    {
+                        const std::vector<Vertex> *restVertices =
+                            g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
                         mesh->updateVertices(BuildPersistentBubbleVertices(
                             (int)item.second, (float)g_Time,
                             restVertices, worldScaleSurface, &mesh->vertices));
@@ -2999,6 +3356,7 @@ static void RenderFrame()
         for (const BubbleContactPair &pair : g_ContactPairs)
         {
             float visibility = FusionSurfaceVisibility(pair);
+            // Skip pairs where either bubble is bursting or dead.
             int aIndex = -1;
             int bIndex = -1;
             if (visibility <= 0.001f ||
@@ -3007,7 +3365,17 @@ static void RenderFrame()
                 continue;
             }
             const DisplayBubble &a = g_DisplayBubbles[(size_t)aIndex];
+            if (a.state == DisplayBubble::State::Burst ||
+                a.state == DisplayBubble::State::Dead)
+            {
+                continue;
+            }
             const DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
+            if (b.state == DisplayBubble::State::Burst ||
+                b.state == DisplayBubble::State::Dead)
+            {
+                continue;
+            }
             float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
             float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
             glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
@@ -3129,7 +3497,20 @@ static void RenderFrame()
                                ? (g_InteractionDemoActive ? 0.62f : 0.72f)
                                : 1.0f) *
                           pairAlpha * visibility;
-            SetRefractUniforms(fusionModel, targetRadius,
+            // Interpolate the refraction scale from the volume-weighted
+            // average of the two bubble radii to the merged target radius.
+            // uSpherePixelRadius (and thus the background offset and its
+            // clamp) scales linearly with this value, so interpolating it
+            // makes the refraction continuous across the fusion start
+            // (where shells used rA/rB) and the fusion end (where the
+            // survivor uses mergedRadius = targetRadius).
+            float avgRadius = (volumeA * a.radius + volumeB * b.radius) /
+                              std::max(volumeA + volumeB, 0.001f);
+            float totalFusionDuration = kRelaxationDelay + kRelaxationDuration;
+            float fusionProgress = Smooth01(pair.fusionElapsed /
+                                             std::max(totalFusionDuration, 0.001f));
+            float refractionRadius = glm::mix(avgRadius, targetRadius, fusionProgress);
+            SetRefractUniforms(fusionModel, refractionRadius,
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
             g_RefractionShader->SetInt("uVisualContactCount", 0);
@@ -3176,7 +3557,13 @@ static void RenderFrame()
                 continue;
             }
             const DisplayBubble &a = g_DisplayBubbles[(size_t)aIndex];
+            if (a.state == DisplayBubble::State::Burst ||
+                a.state == DisplayBubble::State::Dead)
+                continue;
             const DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
+            if (b.state == DisplayBubble::State::Burst ||
+                b.state == DisplayBubble::State::Dead)
+                continue;
             float visibility = pair.contactActivation * pair.contactActivation;
             float ruptureFade = pair.fusionActive ? 1.0f - pair.ruptureProgress : 1.0f;
             float alpha = (straightComposite ? 0.16f : 0.24f) * visibility;
@@ -3466,6 +3853,15 @@ static void MouseButtonCallback(GLFWwindow *window, int button, int action, int 
 {
     if (button == GLFW_MOUSE_BUTTON_LEFT)
     {
+        if (action == GLFW_PRESS && g_DeleteMode && !(mods & GLFW_MOD_SHIFT))
+        {
+            double x, y;
+            glfwGetCursorPos(window, &x, &y);
+            BurstBubbleAtScreenPoint(x, y);
+            g_MousePressed = false;
+            return;
+        }
+
         if (action == GLFW_PRESS && (mods & GLFW_MOD_SHIFT))
         {
             double x, y;
@@ -3490,7 +3886,14 @@ static void MouseButtonCallback(GLFWwindow *window, int button, int action, int 
         {
             double x, y;
             glfwGetCursorPos(window, &x, &y);
-            RemoveBubbleAtScreenPoint(x, y);
+            if (g_DeleteMode)
+            {
+                BurstBubbleAtScreenPoint(x, y);
+            }
+            else
+            {
+                RemoveBubbleAtScreenPoint(x, y);
+            }
             g_TouchPressed = false;
             return;
         }
@@ -3689,6 +4092,12 @@ static void KeyCallback(GLFWwindow *window, int key, int scancode, int action, i
         break;
     case GLFW_KEY_G:
         StartBubbleInteractionDemo();
+        break;
+    case GLFW_KEY_D:
+        g_DeleteMode = !g_DeleteMode;
+        std::cout << "[BubbleBurst] delete mode "
+                  << (g_DeleteMode ? "ON (left-click to pop bubbles)" : "OFF")
+                  << std::endl;
         break;
     case GLFW_KEY_ESCAPE:
         glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -3923,6 +4332,8 @@ int main()
     std::cout << "  G              Cycle interaction outcome replay" << std::endl;
     std::cout << "  Shift+Left     Spawn bubble at cursor plane" << std::endl;
     std::cout << "  Shift+Right    Remove bubble under cursor" << std::endl;
+    std::cout << "  D              Toggle delete/pop mode" << std::endl;
+    std::cout << "  (delete mode)  Left-click to pop bubble" << std::endl;
     std::cout << "  [ / ]          Spawn radius               - / +" << std::endl;
     std::cout << "  , / .          Max live bubbles           - / +" << std::endl;
     std::cout << "  F              Toggle global wind" << std::endl;

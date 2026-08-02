@@ -59,6 +59,9 @@ public:
     void initFromMesh(const std::vector<glm::vec3>& verts,
                       const std::vector<unsigned int>& indices,
                       float perturbAmount);
+    // Delete triangles whose centroid lies within angularThreshold radians
+    // of holeDirection, creating an opening.  Orphaned vertices are pruned.
+    void punchHole(const glm::vec3 &holeDirection, float angularThreshold);
 
     void update(float frameDt);
 
