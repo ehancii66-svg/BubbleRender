@@ -110,6 +110,16 @@ static std::vector<glm::vec3> g_SpherePositions;
 
 static std::vector<DisplayBubble> g_DisplayBubbles;
 static std::vector<BubbleContactPair> g_ContactPairs;
+struct RenderOnlyBubble
+{
+    glm::vec3 basePosition = glm::vec3(0.0f);
+    float radius = 0.10f;
+    float phase = 0.0f;
+    float speed = 0.5f;
+    float driftAmplitude = 0.03f;
+    float alpha = 0.72f;
+};
+static std::vector<RenderOnlyBubble> g_RenderOnlyBubbles;
 static uint64_t g_NextBubbleId = 1;
 static uint64_t g_InteractionOutcomeSeed = 0;
 static bool g_InteractionDemoActive = false;
@@ -1092,6 +1102,20 @@ static glm::mat4 AxisBasisModel(const glm::vec3 &center, const glm::vec3 &axisTo
     return basis;
 }
 
+static void ResetRenderOnlyBubbles()
+{
+    g_RenderOnlyBubbles = {
+        {{-1.72f, -0.72f, 0.92f}, 0.12f, 0.3f, 0.42f, 0.035f, 0.70f},
+        {{-1.35f, 0.92f, 1.34f}, 0.09f, 1.2f, 0.56f, 0.030f, 0.66f},
+        {{-0.84f, -0.96f, 1.28f}, 0.07f, 2.1f, 0.62f, 0.026f, 0.62f},
+        {{-0.28f, 1.12f, 0.82f}, 0.11f, 2.8f, 0.48f, 0.034f, 0.68f},
+        {{0.52f, -1.02f, 1.18f}, 0.08f, 3.7f, 0.66f, 0.028f, 0.64f},
+        {{0.98f, 0.96f, 0.88f}, 0.13f, 4.5f, 0.44f, 0.038f, 0.72f},
+        {{1.48f, -0.70f, 1.38f}, 0.10f, 5.4f, 0.58f, 0.032f, 0.67f},
+        {{1.84f, 0.18f, 0.96f}, 0.07f, 6.1f, 0.70f, 0.024f, 0.60f},
+        {{0.14f, 1.34f, 1.42f}, 0.06f, 6.8f, 0.74f, 0.022f, 0.58f}};
+}
+
 static void ResetDisplayBubbles()
 {
     struct BubbleSeed
@@ -1106,18 +1130,28 @@ static void ResetDisplayBubbles()
     };
 
     const std::vector<BubbleSeed> seeds = {
-        {{-1.12f, -0.18f, 1.08f}, 0.48f, 0.2f, 0.010f, 0.009f, 0.55f, {0.145f, 0.020f, 0.000f}},
-        {{1.10f, -0.16f, 1.12f}, 0.44f, 1.7f, 0.010f, 0.009f, 0.58f, {-0.140f, 0.018f, 0.000f}},
-        {{0.02f, 1.22f, 1.08f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.66f, {-0.004f, -0.130f, 0.004f}}};
+        {{-0.72f, -0.18f, 1.08f}, 0.46f, 0.2f, 0.010f, 0.009f, 0.55f, {0.090f, 0.018f, 0.000f}},
+        {{0.68f, -0.16f, 1.12f}, 0.43f, 1.7f, 0.010f, 0.009f, 0.58f, {-0.085f, 0.016f, 0.000f}},
+        {{0.00f, 0.78f, 1.08f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.62f, {0.000f, -0.082f, 0.003f}},
+        {{1.22f, 0.54f, 1.04f}, 0.34f, 3.6f, 0.010f, 0.009f, 0.52f, {0.045f, 0.000f, 0.000f}},
+        {{1.90f, 0.56f, 1.06f}, 0.22f, 4.4f, 0.011f, 0.010f, 0.68f, {-0.075f, 0.000f, 0.000f}},
+        {{-1.48f, 0.42f, 1.20f}, 0.28f, 5.2f, 0.010f, 0.009f, 0.50f, {0.018f, -0.012f, 0.000f}}};
 
     g_DisplayBubbles.clear();
     ++g_InteractionOutcomeSeed;
     g_NextBubbleId = 1;
+    g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
+    g_CameraDistance = 3.75f;
+    g_CurrentAngleX = 0.0f;
+    g_CurrentAngleY = 0.0f;
     g_DisplayBubbles.reserve(seeds.size());
     const glm::vec3 clusteredHomes[] = {
-        {-0.38f, -0.12f, 1.09f},
-        {0.36f, -0.10f, 1.11f},
-        {0.00f, 0.40f, 1.09f}};
+        {-0.30f, -0.10f, 1.09f},
+        {0.28f, -0.08f, 1.11f},
+        {0.00f, 0.34f, 1.09f},
+        {1.36f, 0.54f, 1.05f},
+        {1.78f, 0.55f, 1.05f},
+        {-1.38f, 0.36f, 1.18f}};
     for (size_t i = 0; i < seeds.size(); ++i)
     {
         const auto &seed = seeds[i];
@@ -1128,6 +1162,26 @@ static void ResetDisplayBubbles()
     g_MainBubbleVisualRadius = g_BubbleRadius;
     g_MainBubbleTargetRadius = g_BubbleRadius;
     g_ContactPairs.clear();
+    ResetRenderOnlyBubbles();
+
+    DisplayBubble &outerA = g_DisplayBubbles[3];
+    DisplayBubble &outerB = g_DisplayBubbles[4];
+    float outerFilmRadius = std::min(outerA.radius, outerB.radius) * 0.24f;
+    BubbleContactPair outerFusion;
+    outerFusion.a = outerA.id;
+    outerFusion.b = outerB.id;
+    outerFusion.filmThickness = 1.0f;
+    outerFusion.restDistance =
+        std::sqrt(outerA.radius * outerA.radius - outerFilmRadius * outerFilmRadius) +
+        std::sqrt(outerB.radius * outerB.radius - outerFilmRadius * outerFilmRadius);
+    outerFusion.neckRadius = std::min(outerA.radius, outerB.radius) * 0.05f;
+    outerFusion.targetVolume = outerA.targetVolume + outerB.targetVolume;
+    outerFusion.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+    outerFusion.coalescenceScore = 1.0f;
+    outerFusion.active = true;
+    outerFusion.persistentRenderPair = true;
+    g_ContactPairs.push_back(outerFusion);
+
     g_InteractionDemoActive = false;
     g_ShowMainBubble = false;
     g_BridgeStrength = 0.0f;
@@ -1153,6 +1207,9 @@ static void StartBubbleInteractionDemo()
     s_NextVariant = (s_NextVariant + 1) % 3;
 
     ResetDisplayBubbles();
+    g_RenderOnlyBubbles.clear();
+    g_CameraOrbitTarget = glm::vec3(0.0f, 0.0f, 1.10f);
+    g_CameraDistance = 2.75f;
 
     g_ContactPairs.clear();
     DisplayBubble &a = g_DisplayBubbles[0];
@@ -2767,6 +2824,70 @@ static void RenderFrame()
         glBindTexture(GL_TEXTURE_2D, g_ThinFilmLUTTexture);
     };
 
+    auto DrawRenderOnlyBubbles = [&](bool renderToFBO,
+                                     GLuint backgroundTexture,
+                                     bool straightComposite)
+    {
+        if (g_RenderOnlyBubbles.empty() || !g_DecorativeBubbleModel)
+        {
+            return;
+        }
+
+        BindRefractionInputs(backgroundTexture);
+        std::vector<std::pair<float, size_t>> sortedBubbles;
+        sortedBubbles.reserve(g_RenderOnlyBubbles.size());
+        for (size_t i = 0; i < g_RenderOnlyBubbles.size(); ++i)
+        {
+            const RenderOnlyBubble &bubble = g_RenderOnlyBubbles[i];
+            glm::vec3 drift(
+                std::sin((float)g_Time * bubble.speed + bubble.phase) * 0.72f,
+                std::cos((float)g_Time * bubble.speed * 0.77f + bubble.phase * 1.31f),
+                std::sin((float)g_Time * bubble.speed * 0.61f + bubble.phase * 0.83f) * 0.42f);
+            glm::vec3 center = bubble.basePosition + drift * bubble.driftAmplitude;
+            glm::vec3 toCamera = center - g_Camera.getPosition();
+            sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), i);
+        }
+        std::sort(sortedBubbles.begin(), sortedBubbles.end(),
+                  [](const auto &a, const auto &b)
+                  { return a.first > b.first; });
+
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        GLboolean depthWriteWasEnabled = GL_TRUE;
+        glGetBooleanv(GL_DEPTH_WRITEMASK, &depthWriteWasEnabled);
+        if (straightComposite)
+        {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        for (const auto &item : sortedBubbles)
+        {
+            const RenderOnlyBubble &bubble = g_RenderOnlyBubbles[item.second];
+            glm::vec3 drift(
+                std::sin((float)g_Time * bubble.speed + bubble.phase) * 0.72f,
+                std::cos((float)g_Time * bubble.speed * 0.77f + bubble.phase * 1.31f),
+                std::sin((float)g_Time * bubble.speed * 0.61f + bubble.phase * 0.83f) * 0.42f);
+            glm::vec3 center = bubble.basePosition + drift * bubble.driftAmplitude;
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), center);
+            model = glm::scale(model, glm::vec3(bubble.radius));
+            float alpha = (straightComposite ? 0.72f : 1.0f) * bubble.alpha;
+            SetRefractUniforms(model, bubble.radius, false, renderToFBO,
+                               false, 0.0f, 0.0f, 2, alpha, 1.0f);
+            g_RefractionShader->SetInt("uVisualContactCount", 0);
+            g_DecorativeBubbleModel->Draw(*g_RefractionShader);
+        }
+
+        if (straightComposite)
+        {
+            glDepthMask(depthWriteWasEnabled);
+            if (!blendWasEnabled)
+            {
+                glDisable(GL_BLEND);
+            }
+        }
+    };
+
     auto DrawDisplayBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTexture, bool straightComposite)
     {
         BindRefractionInputs(backgroundTexture);
@@ -3253,6 +3374,7 @@ static void RenderFrame()
 
     SetBackgroundUniforms();
 
+    DrawRenderOnlyBubbles(true, g_BackgroundTexture, true);
     DrawDisplayBubbles(false, true, g_BackgroundTexture, true);
     DrawFusionSurfaces(false, true, g_BackgroundTexture, true);
     DrawContactBridges(false, true, g_BackgroundTexture, true);
@@ -3301,6 +3423,7 @@ static void RenderFrame()
 
     DrawMainBubble(false, false, g_BackFaceTexture);
 
+    DrawRenderOnlyBubbles(false, g_MainSceneTexture, true);
     DrawDisplayBubbles(false, false, g_MainSceneTexture, true);
     DrawFusionSurfaces(false, false, g_MainSceneTexture, true);
     DrawContactBridges(false, false, g_MainSceneTexture, true);
@@ -3742,7 +3865,6 @@ int main()
 
     g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
     ResetDisplayBubbles();
-    StartBubbleInteractionDemo();
 
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
@@ -3797,7 +3919,7 @@ int main()
     std::cout << std::endl;
     std::cout << "Simulation" << std::endl;
     std::cout << "  Z              Pause / resume" << std::endl;
-    std::cout << "  X              Reset synced bubble scene" << std::endl;
+    std::cout << "  X              Reset opening showcase scene" << std::endl;
     std::cout << "  G              Cycle interaction outcome replay" << std::endl;
     std::cout << "  Shift+Left     Spawn bubble at cursor plane" << std::endl;
     std::cout << "  Shift+Right    Remove bubble under cursor" << std::endl;
@@ -3826,7 +3948,7 @@ int main()
               << g_GlobalWindDirection.y << ", " << g_GlobalWindDirection.z << ")"
               << ", contactLog=" << (g_LogContactDebug ? "on" : "off")
               << std::endl;
-    std::cout << "Scene: startup two-bubble interaction replay" << std::endl;
+    std::cout << "Scene: three-bubble center with ambient showcase bubbles" << std::endl;
     std::cout << "==================================================" << std::endl;
 
     while (!glfwWindowShouldClose(window))
