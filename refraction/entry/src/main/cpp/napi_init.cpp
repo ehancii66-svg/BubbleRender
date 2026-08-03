@@ -466,7 +466,8 @@ static void ResetOpeningScene() {
         {{-0.38f, -0.20f, 1.08f}, {-0.22f, -0.12f, 1.09f}, 0.34f, 0.2f, 0.008f, 0.008f, 0.55f, { 0.050f, 0.014f, 0.000f}},
         {{ 0.38f, -0.18f, 1.12f}, { 0.22f, -0.10f, 1.11f}, 0.33f, 1.7f, 0.008f, 0.008f, 0.58f, {-0.048f, 0.013f, 0.000f}},
         {{ 0.00f,  0.62f, 1.08f}, { 0.00f,  0.31f, 1.09f}, 0.32f, 2.8f, 0.009f, 0.009f, 0.62f, { 0.000f,-0.050f, 0.002f}},
-        {{ 0.54f,  1.12f, 1.20f}, { 0.48f,  1.04f, 1.18f}, 0.20f, 5.2f, 0.008f, 0.008f, 0.50f, {-0.010f,-0.010f, 0.000f}}
+        {{ 0.70f,  0.70f, 1.18f}, { 0.72f,  0.76f, 1.17f}, 0.34f, 4.3f, 0.008f, 0.008f, 0.52f, { 0.000f, 0.035f, 0.000f}},
+        {{ 0.70f,  1.30f, 1.20f}, { 0.72f,  1.04f, 1.18f}, 0.20f, 5.2f, 0.008f, 0.008f, 0.58f, { 0.000f,-0.060f, 0.000f}}
     };
     g_DisplayBubbles.reserve(sizeof(seeds) / sizeof(seeds[0]));
     for (const BubbleSeed& seed : seeds) {
@@ -477,6 +478,14 @@ static void ResetOpeningScene() {
         bubble.floatAmplitude = seed.lift;
         bubble.speed = seed.speed;
         bubble.surfaceControls = MakeSurfaceControls(seed.phase);
+    }
+
+    // Keep the opening composition deterministic: the separate upper-right
+    // pair demonstrates the small-into-large fusion path without disturbing
+    // the central three-bubble shared-film interaction.
+    if (g_DisplayBubbles.size() >= 5) {
+        PresetPair(g_DisplayBubbles[3].id, g_DisplayBubbles[4].id,
+                   BubbleContactPair::CoalescenceOutcome::WillCoalesce);
     }
 
     g_RenderOnlyBubbles = {

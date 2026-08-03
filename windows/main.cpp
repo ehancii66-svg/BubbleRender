@@ -784,13 +784,14 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
             impact * 0.005f +
             windInstability * 0.0025f,
         0.005f, 0.025f);
+    float sizeMismatchGate = Smooth01((sizeMismatch - 0.06f) / 0.30f);
     float fusionProbability = glm::clamp(
-        0.14f +
-            sizeMismatch * 0.68f +
-            thinFilm * 0.12f +
-            impact * 0.07f +
-            contactAge * 0.05f,
-        0.12f, 0.82f);
+        0.005f + sizeMismatchGate *
+            (0.76f +
+             thinFilm * 0.07f +
+             impact * 0.04f +
+             contactAge * 0.03f),
+        0.005f, 0.82f);
     float probabilitySum = separationProbability + fusionProbability;
     if (probabilitySum > 0.92f)
     {
