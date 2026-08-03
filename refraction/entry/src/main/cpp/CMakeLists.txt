@@ -23,6 +23,9 @@ add_library(entry SHARED
     render/model.cpp
     render/shader.cpp
     render/camera.cpp
+    render/contact_geometry.cpp
+    render/bubble_surface_system.cpp
+    simulation/display_bubble_simulation.cpp
     simulation/vortex_sheet.cpp
 )
 

@@ -1,3 +1,4 @@
+
 //
 // BubbleRender - DBSTT (Da et al. 2015) Vortex Sheet Simulation
 // Implementation for a single closed soap bubble.
@@ -14,9 +15,9 @@
 // Internal helpers
 // ============================================================
 
-static const float kPi      = 3.14159265358979323846f;
-static const float kFourPi  = 4.0f * kPi;
-static const float kEpsilon = 1e-10f;
+static constexpr float kPi      = 3.14159265358979323846f;
+static constexpr float kFourPi  = 4.0f * kPi;
+static constexpr float kEpsilon = 1e-10f;
 
 namespace {
 
@@ -163,23 +164,23 @@ void VortexSheetSimulation::update(float frameDt)
         // Step 1: Geometry
         computeVertexNormalsAndAreas();
 
-        // Step 2: Mean curvature H (§4.3, Eq 11)
+        // Step 2: Mean curvature H (搂4.3, Eq 11)
         computeMeanCurvature();
 
-        // Step 3: Integrate surface tension → Γ (§4.3, Eq 10)
+        // Step 3: Integrate surface tension 鈫?螕 (搂4.3, Eq 10)
         integrateSurfaceTension(timeStep);
 
-        // Step 4: Circulation diffusion (§6, stability)
+        // Step 4: Circulation diffusion (搂6, stability)
         diffuseCirculation();
 
-        // Step 5: Vortex sheet strength γ = n × ∇_f Γ (§3.1, Eq 1)
+        // Step 5: Vortex sheet strength 纬 = n 脳 鈭嘷f 螕 (搂3.1, Eq 1)
         std::vector<glm::vec3> gamma;
         computeVortexSheetStrength(gamma);
 
-        // Step 6: Biot-Savart velocity (§4.4, Eq 12)
+        // Step 6: Biot-Savart velocity (搂4.4, Eq 12)
         computeBiotSavartVelocities(gamma);
 
-        // Step 7: Advect positions (§4.5)
+        // Step 7: Advect positions (搂4.5)
         advectPositions(timeStep);
     }
 
@@ -295,7 +296,7 @@ void VortexSheetSimulation::computeVertexNormalsAndAreas()
 }
 
 // ============================================================
-// §4.3 Eq (11): Signed scalar mean curvature at each vertex
+// 搂4.3 Eq (11): Signed scalar mean curvature at each vertex
 // ============================================================
 
 void VortexSheetSimulation::computeMeanCurvature()
@@ -329,8 +330,8 @@ void VortexSheetSimulation::computeMeanCurvature()
     }
 
     // Compute mean curvature normal K_i = H_i * n_i * A_i using cotan formula
-    // K_i = -(1/4) * Σ_j (cot α_ij + cot β_ij) * (v_j - v_i)
-    // where α, β are angles opposite edge (i,j) in the two incident triangles.
+    // K_i = -(1/4) * 危_j (cot 伪_ij + cot 尾_ij) * (v_j - v_i)
+    // where 伪, 尾 are angles opposite edge (i,j) in the two incident triangles.
     std::vector<glm::vec3> curvNormal(nv, glm::vec3(0.0f));
 
     for (const auto& [key, faceList] : edgeFaces) {
@@ -376,7 +377,7 @@ void VortexSheetSimulation::computeMeanCurvature()
     }
 
     // Extract scalar mean curvature: H_i = -dot(K_i/A_i, n_i)
-    // (minus sign because K points inward for convex → H > 0 with outward n)
+    // (minus sign because K points inward for convex 鈫?H > 0 with outward n)
     for (int i = 0; i < nv; ++i) {
         float area = m_mesh.voronoiAreas[i];
         if (area < kEpsilon) continue;
@@ -386,18 +387,18 @@ void VortexSheetSimulation::computeMeanCurvature()
 }
 
 // ============================================================
-// §4.3 Eq (10): ΔΓ = -(σΔt/ρA)·(H₁-H₂) = -(σΔt/ρA)·2H
+// 搂4.3 Eq (10): 螖螕 = -(蟽螖t/蟻A)路(H鈧?H鈧? = -(蟽螖t/蟻A)路2H
 // ============================================================
 
 void VortexSheetSimulation::integrateSurfaceTension(float dt)
 {
-    // Eq (10): ΔΓ^v = -(σΔt/ρA_v)(H₁^v - H₂^v)
+    // Eq (10): 螖螕^v = -(蟽螖t/蟻A_v)(H鈧乛v - H鈧俕v)
     //
-    // H₁^v, H₂^v are INTEGRATED mean curvatures (units: length).
+    // H鈧乛v, H鈧俕v are INTEGRATED mean curvatures (units: length).
     // meanCurvature[i] now stores POINTWISE H (units: 1/length) from cotan.
-    // Integrated H = pointwise H × A_v, so:
-    //   ΔΓ = sign × (σΔt/ρA_v) × 2 × (H × A_v)
-    //       = sign × (σΔt/ρ) × 2 × H                    (A_v cancels!)
+    // Integrated H = pointwise H 脳 A_v, so:
+    //   螖螕 = sign 脳 (蟽螖t/蟻A_v) 脳 2 脳 (H 脳 A_v)
+    //       = sign 脳 (蟽螖t/蟻) 脳 2 脳 H                    (A_v cancels!)
     float sigmaOverRho = surfaceTensionStrength;
     float sign = flipSurfaceTensionSign ? 1.0f : -1.0f;
 
@@ -409,7 +410,7 @@ void VortexSheetSimulation::integrateSurfaceTension(float dt)
 }
 
 // ============================================================
-// §3.1 Eq (1): γ = n × ∇_f Γ
+// 搂3.1 Eq (1): 纬 = n 脳 鈭嘷f 螕
 // ============================================================
 
 void VortexSheetSimulation::computeVortexSheetStrength(
@@ -439,19 +440,19 @@ void VortexSheetSimulation::computeVortexSheetStrength(
         glm::vec3 centroid = (p0 + p1 + p2) / 3.0f;
         if (glm::dot(n, centroid) < 0.0f) n = -n;
 
-        // Surface gradient of Γ on the triangle:
-        //   ∇_f Γ = n × (Γ₀(v₂-v₁) + Γ₁(v₀-v₂) + Γ₂(v₁-v₀)) / (2A)
+        // Surface gradient of 螕 on the triangle:
+        //   鈭嘷f 螕 = n 脳 (螕鈧€(v鈧?v鈧? + 螕鈧?v鈧€-v鈧? + 螕鈧?v鈧?v鈧€)) / (2A)
         glm::vec3 gradNum = g0 * (p2 - p1) + g1 * (p0 - p2) + g2 * (p1 - p0);
         glm::vec3 gradGamma = glm::cross(n, gradNum) / (2.0f * area);
 
-        // γ = n × ∇_f Γ
+        // 纬 = n 脳 鈭嘷f 螕
         gamma[ti] = glm::cross(n, gradGamma);
     }
 }
 
 // ============================================================
-// §4.4 Eq (12): Regularized Biot-Savart integral
-// u(x) = (1/4π)·Σ_t γ_t × (x-c_t) / (|x-c_t|²+α²)^{3/2} · A_t
+// 搂4.4 Eq (12): Regularized Biot-Savart integral
+// u(x) = (1/4蟺)路危_t 纬_t 脳 (x-c_t) / (|x-c_t|虏+伪虏)^{3/2} 路 A_t
 // ============================================================
 
 void VortexSheetSimulation::computeBiotSavartVelocities(
@@ -506,7 +507,7 @@ void VortexSheetSimulation::computeBiotSavartVelocities(
 }
 
 // ============================================================
-// §4.5: Integrate vertex positions (forward Euler + safety clamp)
+// 搂4.5: Integrate vertex positions (forward Euler + safety clamp)
 // ============================================================
 
 void VortexSheetSimulation::advectPositions(float dt)
@@ -530,7 +531,86 @@ void VortexSheetSimulation::advectPositions(float dt)
 }
 
 // ============================================================
-// Stability: Laplacian diffusion of circulation (§6)
+// Delete triangles near holeDirection to create an opening,
+// then remap and prune orphaned vertices.
+// ============================================================
+
+void VortexSheetSimulation::punchHole(const glm::vec3 &holeDirection,
+                                      float angularThreshold)
+{
+    glm::vec3 dir = glm::length(holeDirection) > 1e-6f
+        ? glm::normalize(holeDirection) : glm::vec3(0, 1, 0);
+    float cosThreshold = std::cos(angularThreshold);
+
+    // Mark triangles for deletion
+    std::vector<int> oldToNew(m_mesh.positions.size(), -1);
+    std::vector<glm::ivec3> keptTris;
+    keptTris.reserve(m_mesh.triangles.size());
+
+    for (const auto& tri : m_mesh.triangles) {
+        glm::vec3 c = (m_mesh.positions[tri.x] + m_mesh.positions[tri.y]
+                     + m_mesh.positions[tri.z]) / 3.0f;
+        float cl = glm::length(c);
+        if (cl < 1e-6f) { keptTris.push_back(tri); continue; }
+        glm::vec3 cn = c / cl;
+        if (glm::dot(cn, dir) > cosThreshold) {
+            // This triangle is inside the hole 鈥?delete it.
+            continue;
+        }
+        keptTris.push_back(tri);
+    }
+
+    if (keptTris.size() == m_mesh.triangles.size()) {
+        // Nothing was deleted
+        return;
+    }
+
+    // Remap: keep only vertices still referenced by kept triangles
+    std::vector<glm::vec3> newPos;
+    std::vector<glm::ivec3> newTris;
+    newTris.reserve(keptTris.size());
+
+    for (const auto& tri : keptTris) {
+        glm::ivec3 nt;
+        for (int k = 0; k < 3; ++k) {
+            int oldIdx = tri[k];
+            if (oldToNew[oldIdx] < 0) {
+                oldToNew[oldIdx] = (int)newPos.size();
+                newPos.push_back(m_mesh.positions[oldIdx]);
+            }
+            nt[k] = oldToNew[oldIdx];
+        }
+        newTris.push_back(nt);
+    }
+
+    m_mesh.positions = newPos;
+    m_mesh.triangles = newTris;
+    int nv = (int)m_mesh.positions.size();
+    m_mesh.circulation.assign(nv, 0.0f);
+    m_mesh.vertexNormals.assign(nv, glm::vec3(0.0f));
+    m_mesh.voronoiAreas.assign(nv, 0.0f);
+    m_mesh.meanCurvature.assign(nv, 0.0f);
+    m_mesh.velocity.assign(nv, glm::vec3(0.0f));
+
+    computeVertexNormalsAndAreas();
+    m_avgEdgeLength = 0.0f;
+    {
+        int ec = 0;
+        for (const auto& tri : m_mesh.triangles) {
+            for (int k = 0; k < 3; ++k) {
+                glm::vec3 d = m_mesh.positions[tri[k]]
+                            - m_mesh.positions[tri[(k+1)%3]];
+                m_avgEdgeLength += glm::length(d);
+                ++ec;
+            }
+        }
+        if (ec > 0) m_avgEdgeLength /= float(ec);
+    }
+    regularizationAlpha = m_avgEdgeLength * 1.0f;
+}
+
+// ============================================================
+// Stability: Laplacian diffusion of circulation (搂6)
 // ============================================================
 
 void VortexSheetSimulation::diffuseCirculation()

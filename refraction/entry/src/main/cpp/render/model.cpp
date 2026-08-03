@@ -75,6 +75,7 @@ Model* Model::CreateSphere(float radius, int sectors, int stacks, bool withTexCo
             
             vertex.Tangent = glm::vec3(0.0f);
             vertex.Bitangent = glm::vec3(0.0f);
+            vertex.FilmDirection = vertex.Normal;
             
             vertices.push_back(vertex);
         }
@@ -195,10 +196,25 @@ Model* Model::CreateFromVertices(
         vertices[i].TexCoords  = glm::vec2(0.0f);
         vertices[i].Tangent    = glm::vec3(0.0f);
         vertices[i].Bitangent  = glm::vec3(0.0f);
+        vertices[i].FilmDirection = glm::length(positions[i]) > 1e-6f
+            ? glm::normalize(positions[i]) : normals[i];
         model->updateMaxMinXyz(positions[i]);
     }
     Mesh simMesh(vertices, indices, std::vector<Texture>(), true);  // dynamic
     model->m_meshes.push_back(simMesh);
+    return model;
+}
+
+Model* Model::CreateFromVertices(
+    const std::vector<Vertex>& vertices,
+    const std::vector<unsigned int>& indices)
+{
+    Model* model = new Model();
+    for (const Vertex& vertex : vertices) {
+        model->updateMaxMinXyz(vertex.Position);
+    }
+    Mesh mesh(vertices, indices, std::vector<Texture>(), true);
+    model->m_meshes.push_back(mesh);
     return model;
 }
 

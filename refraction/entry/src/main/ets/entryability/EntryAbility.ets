@@ -22,12 +22,12 @@ export default class EntryAbility extends UIAbility {
         // Main window is created, set main page for this ability
         hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-        // try {
-        //     const mainWindow = windowStage.getMainWindowSync();
-        //     mainWindow.setPreferredOrientation(window.Orientation.LANDSCAPE);
-        // } catch (err) {
-        //     hilog.warn(DOMAIN, 'testTag', 'Sync getMainWindow failed, fallback to async: %{public}s', JSON.stringify(err));
-        // }
+        try {
+            const mainWindow = windowStage.getMainWindowSync();
+            mainWindow.setPreferredOrientation(window.Orientation.LANDSCAPE);
+        } catch (err) {
+            hilog.warn(DOMAIN, 'testTag', 'Failed to set landscape orientation: %{public}s', JSON.stringify(err));
+        }
 
         windowStage.loadContent('pages/Index', (err) => {
             if (err.code) {

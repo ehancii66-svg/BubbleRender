@@ -24,24 +24,29 @@ struct Index {
     @State private compW: number = 0;
     @State private compH: number = 0;
     @State private showSettings: boolean = false;
-    @State private showInteractionHint: boolean = true;
+    @State private showInteractionHint: boolean = false;
     @State private fpsText: string = 'FPS: --  RS: 0.50';
     @State private modeText: string = 'Airy';
     @State private simulationText: string = '暂停仿真';
     @State private simPaused: boolean = false;
-    @State private cameraDistance: number = 7.0;
+    @State private cameraDistance: number = 3.75;
     @State private thickness: number = 740;
     @State private thicknessVar: number = 160;
     @State private surfaceTension: number = 15;
     @State private refractionStrength: number = 0.35;
     @State private edgeDistortionBoost: number = 2.2;
     @State private environmentReflection: number = 0.65;
+    @State private touchMode: number = 0;
+    @State private bubbleRadius: number = 0.48;
+    @State private spawnDepth: number = 0.0;
+    @State private windStrength: number = 0.0;
+    @State private demoText: string = '演示';
 
     private lastTouchX: number = 0
     private lastTouchY: number = 0
     private touchMoved: boolean = false
     private pinchDistance: number = 0
-    private pinchCameraDistance: number = 7.0
+    private pinchCameraDistance: number = 3.75
     private suppressSingleTouchAfterPinch: boolean = false
 
     private distanceBetweenTouches(a: TouchObject, b: TouchObject): number {
@@ -51,7 +56,7 @@ struct Index {
     }
 
     private setCameraDistanceValue(value: number): void {
-        this.cameraDistance = Math.min(20.0, Math.max(3.5, value))
+        this.cameraDistance = Math.min(20.0, Math.max(2.0, value))
         try {
             testNapi.setCameraDistance(this.cameraDistance)
         } catch (e) {
@@ -78,6 +83,34 @@ struct Index {
         }
     }
 
+    private resetOpeningScene(): void {
+        try {
+            testNapi.resetOpeningScene()
+            this.demoText = '演示'
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'resetOpeningScene failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
+    private cycleInteractionDemo(): void {
+        try {
+            const mode = testNapi.cycleInteractionDemo()
+            const labels: string[] = ['8字', '融合', '分离']
+            this.demoText = labels[Math.max(0, Math.min(2, mode))]
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'cycleInteractionDemo failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
+    private toggleWind(): void {
+        this.windStrength = this.windStrength > 0 ? 0 : 0.12
+        try {
+            testNapi.setWindStrength(this.windStrength)
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'setWindStrength failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
     private resetAllParameters(): void {
         this.thickness = 740
         this.thicknessVar = 160
@@ -85,7 +118,12 @@ struct Index {
         this.refractionStrength = 0.35
         this.edgeDistortionBoost = 2.2
         this.environmentReflection = 0.65
-        this.cameraDistance = 7.0
+        this.cameraDistance = 3.75
+        this.touchMode = 0
+        this.bubbleRadius = 0.48
+        this.spawnDepth = 0.0
+        this.windStrength = 0.0
+        this.demoText = 'Demo'
         this.simPaused = false
         this.simulationText = '暂停仿真'
 
@@ -234,8 +272,16 @@ struct Index {
             return
         }
 
-        // ---- drag to rotate camera ----
         if (touchType === 2) {
+            const moveX = touch.x - this.lastTouchX
+            const moveY = touch.y - this.lastTouchY
+            if (Math.abs(moveX) > 3 || Math.abs(moveY) > 3) {
+                this.touchMoved = true
+            }
+        }
+
+        // ---- drag to rotate camera ----
+        if (touchType === 2 && this.touchMode === 0) {
             const dx = touch.x - this.lastTouchX
             const dy = touch.y - this.lastTouchY
             if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
@@ -258,6 +304,18 @@ struct Index {
             'Index',
             `onTouch map global=(${touch.x},${touch.y}) local=(${localX},${localY}) type=${touchType} inComp=${inComp}`
         )
+
+        if (touchType === 1 && !this.touchMoved && inComp) {
+            try {
+                if (this.touchMode === 1) {
+                    testNapi.addBubbleAtScreen(localX, localY, this.bubbleRadius, this.spawnDepth)
+                } else if (this.touchMode === 2) {
+                    testNapi.burstBubbleAtScreen(localX, localY)
+                }
+            } catch (err) {
+                hilog.error(DOMAIN, 'Index', 'bubble touch action failed: %{public}s', JSON.stringify(err))
+            }
+        }
 
         try {
             testNapi.onTouch(localX, localY, touchType)
@@ -338,6 +396,9 @@ struct Index {
                 })
                 .width('100%')
                 .height('100%')
+                .onTouch((event: TouchEvent) => {
+                    this.mapAndDispatchTouch(event)
+                })
 
             Text(this.fpsText)
                 .fontSize(12)
@@ -386,6 +447,38 @@ struct Index {
 
             Column() {
                 Row() {
+                    Button('Scene')
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .onClick(() => { this.resetOpeningScene() })
+                    Button(this.demoText)
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .onClick(() => { this.cycleInteractionDemo() })
+                    Button(this.windStrength > 0 ? 'Wind On' : 'Wind Off')
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .onClick(() => { this.toggleWind() })
+                }
+                .width('100%')
+                .justifyContent(FlexAlign.SpaceBetween)
+
+                Row() {
+                    Button('Orbit')
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .backgroundColor(this.touchMode === 0 ? '#2878D0' : '#505050')
+                        .onClick(() => { this.touchMode = 0 })
+                    Button('Add')
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .backgroundColor(this.touchMode === 1 ? '#2878D0' : '#505050')
+                        .onClick(() => { this.touchMode = 1 })
+                    Button('Pop')
+                        .fontSize(12).height(32).layoutWeight(1)
+                        .backgroundColor(this.touchMode === 2 ? '#B43A48' : '#505050')
+                        .onClick(() => { this.touchMode = 2 })
+                }
+                .width('100%')
+                .justifyContent(FlexAlign.SpaceBetween)
+                .padding({ top: 5 })
+
+                Row() {
                     Button('Kim')
                         .fontSize(12)
                         .height(34)
@@ -425,7 +518,7 @@ struct Index {
             .padding({ left: 8, right: 8, top: 8, bottom: 8 })
             .backgroundColor('rgba(18,18,18,0.58)')
             .borderRadius(8)
-            .position({ x: '4%', y: this.showSettings ? '58%' : '82%' })
+            .position({ x: '4%', y: this.showSettings ? '55%' : '72%' })
 
             if (this.showSettings) {
                 Column() {
@@ -434,6 +527,17 @@ struct Index {
                         .fontColor(Color.White)
                         .fontWeight(FontWeight.Medium)
                         .padding({ bottom: 6 })
+
+                    this.ParamSection('泡泡与环境')
+                    this.SettingSlider('泡泡大小', this.bubbleRadius, 0.16, 1.10, 0.02, 2,
+                        (v: number) => { this.bubbleRadius = v })
+                    this.SettingSlider('添加深度', this.spawnDepth, -3.0, 2.0, 0.1, 1,
+                        (v: number) => { this.spawnDepth = v })
+                    this.SettingSlider('风速', this.windStrength, 0.0, 0.45, 0.01, 2,
+                        (v: number) => {
+                            this.windStrength = v
+                            try { testNapi.setWindStrength(v) } catch (e) {}
+                        })
 
                     this.ParamSection('光学参数')
                     Column() {
@@ -545,7 +649,7 @@ struct Index {
                                 .textAlign(TextAlign.End)
                                 .width(48)
                         }.width('100%').justifyContent(FlexAlign.SpaceBetween)
-                        Slider({ value: this.cameraDistance, min: 3.5, max: 20, step: 0.5, style: SliderStyle.OutSet })
+                        Slider({ value: this.cameraDistance, min: 2.0, max: 20, step: 0.25, style: SliderStyle.OutSet })
                             .width('100%').height(28)
                             .onChange((v: number, _mode: SliderChangeMode) => {
                                 this.setCameraDistanceValue(v)
@@ -565,9 +669,6 @@ struct Index {
                 .position({ x: '4%', y: '18%' })
             }
         }
-        .onTouch((event: TouchEvent) => {
-            this.mapAndDispatchTouch(event)
-        })
         .height('100%')
     }
 }

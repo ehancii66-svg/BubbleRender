@@ -54,6 +54,9 @@ public:
         const std::vector<glm::vec3>& positions,
         const std::vector<glm::vec3>& normals,
         const std::vector<unsigned int>& indices);
+    static Model* CreateFromVertices(
+        const std::vector<Vertex>& vertices,
+        const std::vector<unsigned int>& indices);
 
 private:
     string m_directory;

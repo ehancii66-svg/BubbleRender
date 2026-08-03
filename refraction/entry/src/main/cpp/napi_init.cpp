@@ -20,6 +20,10 @@
 #include "shader/shader_skybox.h"
 #include "shader/shader_quad.h"
 #include "simulation/vortex_sheet.h"
+#include "simulation/display_bubble.h"
+#include "simulation/display_bubble_simulation.h"
+#include "render/contact_geometry.h"
+#include "render/bubble_surface_system.h"
 
 #include <cmath>
 #include <cstdint>
@@ -27,8 +31,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <unordered_map>
+#include <memory>
 #include <fstream>
 #include <filesystem>
+#include <iostream>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -52,7 +59,8 @@ NativeResourceManager* g_ResourceManager = nullptr;
 float width = 100.0f, height = 100.0f;
 float g_InputViewportWidth = 0.0f, g_InputViewportHeight = 0.0f;
 float currentAngleX = 0.0f, currentAngleY = 0.0f;
-float g_CameraDistance = 7.0f;
+float g_CameraDistance = 3.75f;
+glm::vec3 g_CameraOrbitTarget{0.20f, -0.10f, 1.10f};
 
 Shader* refractionShader = nullptr;
 Shader* backgroundShader = nullptr;
@@ -76,7 +84,7 @@ Model* g_SkyboxModel;
 std::vector<Model*> g_BackgroundModels;
 std::vector<glm::vec3> g_SpherePositions;
 
-struct DisplayBubble {
+struct RenderOnlyBubble {
     glm::vec3 basePosition;
     float radius;
     float phase;
@@ -85,7 +93,38 @@ struct DisplayBubble {
     float speed;
 };
 
+static std::vector<RenderOnlyBubble> g_RenderOnlyBubbles;
 static std::vector<DisplayBubble> g_DisplayBubbles;
+static std::vector<BubbleContactPair> g_ContactPairs;
+static BubbleSurfaceSystem g_BubbleSurfaces;
+static uint64_t g_NextBubbleId = 1;
+static uint64_t g_InteractionOutcomeSeed = 0;
+static int g_InteractionDemoIndex = -1;
+static bool g_InteractionDemoActive = false;
+static bool g_ShowMainBubble = false;
+static bool g_LogContactDebug = false;
+static constexpr float g_MainBubbleVisualRadius = 1.5f;
+static glm::vec3 g_BridgeDirection = glm::vec3(0.0f, 0.0f, 1.0f);
+static float g_BridgeStrength = 0.0f;
+static float g_AutoTouchStrength = 0.0f;
+static float g_AutoTouchVelocity = 0.0f;
+static bool g_WindEnabled = false;
+static float g_GlobalWindStrength = 0.0f;
+static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
+static constexpr float kMaxGlobalWindStrength = 0.45f;
+
+static constexpr float kSharedFilmTime = 0.22f;
+static constexpr float kNeckFormationTime = 1.15f;
+static constexpr float kFusionTime = 3.45f;
+static constexpr float kContactVisualTransitionTime = 0.35f;
+static constexpr float kFusionFilmThickness = 0.18f;
+static constexpr float kFilmRuptureDuration = 0.24f;
+static constexpr float kNeckExpansionDelay = 0.10f;
+static constexpr float kNeckExpansionDuration = 1.20f;
+static constexpr float kRelaxationDelay = 0.95f;
+static constexpr float kRelaxationDuration = 1.45f;
+static constexpr float kFusionCompletionHold = 0.12f;
+static constexpr float kShellCutDelay = 0.42f;
 
 // ---- Rendering parameters ----
 float g_FresnelPower = 8.0f;
@@ -134,6 +173,8 @@ static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation& sim
         verts[i].TexCoords = glm::vec2(0.0f);
         verts[i].Tangent   = glm::vec3(0.0f);
         verts[i].Bitangent = glm::vec3(0.0f);
+        verts[i].FilmDirection = glm::length(pos[i]) > 1e-6f
+            ? glm::normalize(pos[i]) : nrm[i];
     }
     return verts;
 }
@@ -142,7 +183,7 @@ static float& CurrentThickness() {
     return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
 }
 
-static glm::mat4 BubbleModelMatrix(const DisplayBubble& bubble, float time) {
+static glm::mat4 RenderOnlyBubbleModelMatrix(const RenderOnlyBubble& bubble, float time) {
     glm::vec3 windDir = glm::normalize(glm::vec3(0.75f, 0.22f, 0.0f));
     float wind = sinf(time * bubble.speed + bubble.phase) * bubble.windAmplitude;
     float lift = sinf(time * (bubble.speed * 0.73f) + bubble.phase * 1.7f) * bubble.floatAmplitude;
@@ -161,6 +202,509 @@ glm::vec2 g_TouchPoint{-10.0f, -10.0f};
 float g_TouchStrength = 0.0f;
 float g_TouchVelocity = 0.0f;
 bool  g_TouchPressed = false;
+
+static std::unordered_map<uint64_t, std::unique_ptr<VortexSheetSimulation>> g_BubbleSims;
+
+static float Smooth01(float x) {
+    x = glm::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static float PairHash01(uint64_t a, uint64_t b) {
+    if (a > b) std::swap(a, b);
+    uint64_t x = a * 0x9E3779B185EBCA87ull ^ b * 0xC2B2AE3D27D4EB4Full;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdull;
+    x ^= x >> 33;
+    return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
+}
+
+static VortexSheetSimulation* InitBubbleSim(uint64_t id) {
+    auto sim = std::make_unique<VortexSheetSimulation>();
+    sim->initIcosphere(1.0f, 2, 0.04f);
+    sim->timeStep = 0.001f;
+    sim->substepsPerFrame = 3;
+    sim->surfaceTensionStrength = 15.0f;
+    sim->circulationDiffusion = 0.0008f;
+    sim->flipSurfaceTensionSign = true;
+    sim->diagnosticsEnabled = false;
+    VortexSheetSimulation* ptr = sim.get();
+    g_BubbleSims[id] = std::move(sim);
+    return ptr;
+}
+
+static VortexSheetSimulation* GetBubbleSim(uint64_t id) {
+    auto found = g_BubbleSims.find(id);
+    return found != g_BubbleSims.end() ? found->second.get() : nullptr;
+}
+
+static size_t LiveDisplayBubbleCount() {
+    return static_cast<size_t>(std::count_if(
+        g_DisplayBubbles.begin(), g_DisplayBubbles.end(),
+        [](const DisplayBubble& bubble) { return bubble.state != DisplayBubble::State::Dead; }));
+}
+
+static std::vector<Vertex> BuildVerticesFromSim(const VortexSheetSimulation& sim) {
+    const auto& positions = sim.getPositions();
+    const auto& normals = sim.getNormals();
+    std::vector<Vertex> vertices(positions.size());
+    for (size_t i = 0; i < positions.size(); ++i) {
+        vertices[i].Position = positions[i];
+        vertices[i].Normal = normals[i];
+        vertices[i].TexCoords = glm::vec2(0.0f);
+        vertices[i].Tangent = glm::vec3(0.0f);
+        vertices[i].Bitangent = glm::vec3(0.0f);
+        vertices[i].FilmDirection = glm::length(positions[i]) > 1e-6f
+            ? glm::normalize(positions[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    return vertices;
+}
+
+static std::vector<unsigned int> BuildIndicesFromSim(const VortexSheetSimulation& sim) {
+    std::vector<unsigned int> indices;
+    indices.reserve(sim.getTriangles().size() * 3);
+    for (const glm::ivec3& triangle : sim.getTriangles()) {
+        indices.push_back(static_cast<unsigned int>(triangle.x));
+        indices.push_back(static_cast<unsigned int>(triangle.y));
+        indices.push_back(static_cast<unsigned int>(triangle.z));
+    }
+    return indices;
+}
+
+static DisplayBubble& AddInteractiveBubble(const glm::vec3& position, float radius,
+                                           const glm::vec3& velocity = glm::vec3(0.0f)) {
+    DisplayBubble bubble;
+    bubble.id = g_NextBubbleId++;
+    bubble.basePosition = position;
+    bubble.position = position;
+    bubble.velocity = velocity;
+    bubble.radius = radius;
+    bubble.initialRadius = radius;
+    bubble.targetVolume = BubbleVolume(radius);
+    bubble.phase = static_cast<float>(bubble.id) * 1.37f;
+    bubble.windAmplitude = 0.10f;
+    bubble.floatAmplitude = 0.06f;
+    bubble.speed = 0.55f + 0.08f * static_cast<float>(bubble.id % 5);
+    bubble.surfaceControls = MakeSurfaceControls(bubble.phase);
+    g_DisplayBubbles.push_back(bubble);
+    InitBubbleSim(bubble.id);
+    if (g_DecorativeBubbleModel) {
+        std::vector<Vertex> vertices = BuildBubbleShellVertices(1.0f, 0.0f, false);
+        for (Vertex& vertex : vertices) {
+            vertex.FilmDirection = glm::normalize(vertex.Position);
+        }
+        g_BubbleSurfaces.EnsureBubble(
+            bubble.id, vertices, BuildContactBubblePatchIndices());
+    }
+    return g_DisplayBubbles.back();
+}
+
+static BubbleContactPair& PresetPair(uint64_t a, uint64_t b,
+                                    BubbleContactPair::CoalescenceOutcome outcome) {
+    int index = EnsureContactPairById(g_ContactPairs, a, b);
+    BubbleContactPair& pair = g_ContactPairs[static_cast<size_t>(index)];
+    pair.outcome = outcome;
+    pair.candidate = true;
+    pair.active = true;
+    pair.persistentRenderPair = true;
+    return pair;
+}
+
+static void ClearInteractiveScene() {
+    g_BubbleSurfaces.Clear();
+    g_BubbleSims.clear();
+    g_ContactPairs.clear();
+    g_DisplayBubbles.clear();
+    g_NextBubbleId = 1;
+}
+
+static void ResetOpeningScene() {
+    ClearInteractiveScene();
+    ++g_InteractionOutcomeSeed;
+    g_InteractionDemoIndex = -1;
+    g_InteractionDemoActive = false;
+    g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
+    g_CameraDistance = 3.75f;
+    currentAngleX = 0.0f;
+    currentAngleY = 0.0f;
+
+    struct BubbleSeed {
+        glm::vec3 position;
+        glm::vec3 home;
+        float radius;
+        float phase;
+        float wind;
+        float lift;
+        float speed;
+        glm::vec3 velocity;
+    };
+    const BubbleSeed seeds[] = {
+        {{-0.72f, -0.18f, 1.08f}, {-0.30f, -0.10f, 1.09f}, 0.46f, 0.2f, 0.010f, 0.009f, 0.55f, { 0.090f, 0.018f, 0.000f}},
+        {{ 0.68f, -0.16f, 1.12f}, { 0.28f, -0.08f, 1.11f}, 0.43f, 1.7f, 0.010f, 0.009f, 0.58f, {-0.085f, 0.016f, 0.000f}},
+        {{ 0.00f,  0.78f, 1.08f}, { 0.00f,  0.34f, 1.09f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.62f, { 0.000f,-0.082f, 0.003f}},
+        {{ 1.22f,  0.54f, 1.04f}, { 1.36f,  0.54f, 1.05f}, 0.34f, 3.6f, 0.010f, 0.009f, 0.52f, { 0.045f, 0.000f, 0.000f}},
+        {{ 1.90f,  0.56f, 1.06f}, { 1.78f,  0.55f, 1.05f}, 0.22f, 4.4f, 0.011f, 0.010f, 0.68f, {-0.075f, 0.000f, 0.000f}},
+        {{-1.48f,  0.42f, 1.20f}, {-1.38f,  0.36f, 1.18f}, 0.28f, 5.2f, 0.010f, 0.009f, 0.50f, { 0.018f,-0.012f, 0.000f}}
+    };
+    g_DisplayBubbles.reserve(sizeof(seeds) / sizeof(seeds[0]));
+    for (const BubbleSeed& seed : seeds) {
+        DisplayBubble& bubble = AddInteractiveBubble(seed.position, seed.radius, seed.velocity);
+        bubble.basePosition = seed.home;
+        bubble.phase = seed.phase;
+        bubble.windAmplitude = seed.wind;
+        bubble.floatAmplitude = seed.lift;
+        bubble.speed = seed.speed;
+        bubble.surfaceControls = MakeSurfaceControls(seed.phase);
+    }
+
+    DisplayBubble& outerA = g_DisplayBubbles[3];
+    DisplayBubble& outerB = g_DisplayBubbles[4];
+    float outerFilmRadius = std::min(outerA.radius, outerB.radius) * 0.24f;
+    BubbleContactPair outerFusion;
+    outerFusion.a = outerA.id;
+    outerFusion.b = outerB.id;
+    outerFusion.filmThickness = 1.0f;
+    outerFusion.restDistance =
+        std::sqrt(outerA.radius * outerA.radius - outerFilmRadius * outerFilmRadius) +
+        std::sqrt(outerB.radius * outerB.radius - outerFilmRadius * outerFilmRadius);
+    outerFusion.neckRadius = std::min(outerA.radius, outerB.radius) * 0.05f;
+    outerFusion.targetVolume = outerA.targetVolume + outerB.targetVolume;
+    outerFusion.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+    outerFusion.coalescenceScore = 1.0f;
+    outerFusion.active = true;
+    outerFusion.persistentRenderPair = true;
+    g_ContactPairs.push_back(outerFusion);
+
+    g_RenderOnlyBubbles = {
+        {{-1.72f, -0.72f, 0.92f}, 0.12f, 0.3f, 0.42f, 0.035f, 0.70f},
+        {{-1.35f,  0.92f, 1.34f}, 0.09f, 1.2f, 0.56f, 0.030f, 0.66f},
+        {{-0.84f, -0.96f, 1.28f}, 0.07f, 2.1f, 0.62f, 0.026f, 0.62f},
+        {{-0.28f,  1.12f, 0.82f}, 0.11f, 2.8f, 0.48f, 0.034f, 0.68f},
+        {{ 0.52f, -1.02f, 1.18f}, 0.08f, 3.7f, 0.66f, 0.028f, 0.64f},
+        {{ 0.98f,  0.96f, 0.88f}, 0.13f, 4.5f, 0.44f, 0.038f, 0.72f},
+        {{ 1.48f, -0.70f, 1.38f}, 0.10f, 5.4f, 0.58f, 0.032f, 0.67f},
+        {{ 1.84f,  0.18f, 0.96f}, 0.07f, 6.1f, 0.70f, 0.024f, 0.60f},
+        {{ 0.14f,  1.34f, 1.42f}, 0.06f, 6.8f, 0.74f, 0.022f, 0.58f}
+    };
+}
+
+static void CycleInteractionDemo() {
+    ClearInteractiveScene();
+    g_RenderOnlyBubbles.clear();
+    g_InteractionDemoIndex = (g_InteractionDemoIndex + 1) % 3;
+    g_InteractionDemoActive = true;
+    g_CameraOrbitTarget = glm::vec3(0.0f, 0.0f, 1.10f);
+    g_CameraDistance = 2.75f;
+    currentAngleX = 0.0f;
+    currentAngleY = 0.0f;
+
+    glm::vec3 center(0.0f, 0.0f, 1.10f);
+    glm::vec3 axis = glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f));
+    float radiusA = g_InteractionDemoIndex == 1 ? 0.64f : 0.56f;
+    float radiusB = g_InteractionDemoIndex == 1 ? 0.31f
+        : (g_InteractionDemoIndex == 2 ? 0.50f : 0.56f);
+    float finalFilmRadius = std::min(radiusA, radiusB) * 0.30f;
+    float restDistance = std::sqrt(radiusA * radiusA - finalFilmRadius * finalFilmRadius) +
+                         std::sqrt(radiusB * radiusB - finalFilmRadius * finalFilmRadius);
+    float centerDistance = radiusA + radiusB + std::min(radiusA, radiusB) * 0.065f;
+    float volumeA = BubbleVolume(radiusA);
+    float volumeB = BubbleVolume(radiusB);
+    float totalVolume = volumeA + volumeB;
+    float invMassA = 1.0f / std::max(volumeA, 0.001f);
+    float invMassB = 1.0f / std::max(volumeB, 0.001f);
+    float invMassSum = invMassA + invMassB;
+    float approachSpeed = g_InteractionDemoIndex == 2 ? 0.13f : 0.10f;
+
+    DisplayBubble& a = AddInteractiveBubble(
+        center - axis * (centerDistance * volumeB / totalVolume), radiusA,
+        axis * (approachSpeed * invMassA / invMassSum));
+    a.basePosition = center - axis * (restDistance * volumeB / totalVolume);
+    uint64_t aId = a.id;
+    DisplayBubble& b = AddInteractiveBubble(
+        center + axis * (centerDistance * volumeA / totalVolume), radiusB,
+        -axis * (approachSpeed * invMassB / invMassSum));
+    b.basePosition = center + axis * (restDistance * volumeA / totalVolume);
+
+    BubbleContactPair& pair = PresetPair(
+        aId, b.id,
+        g_InteractionDemoIndex == 0
+            ? BubbleContactPair::CoalescenceOutcome::StayDoubleBubble
+            : (g_InteractionDemoIndex == 1
+                ? BubbleContactPair::CoalescenceOutcome::WillCoalesce
+                : BubbleContactPair::CoalescenceOutcome::SeparateAfterContact));
+    pair.restDistance = restDistance;
+    pair.neckRadius = std::min(radiusA, radiusB) * 0.06f;
+    pair.targetVolume = a.targetVolume + b.targetVolume;
+}
+
+static void DecidePairOutcome(BubbleContactPair& pair,
+                              const DisplayBubble& a, const DisplayBubble& b) {
+    if (pair.outcome != BubbleContactPair::CoalescenceOutcome::Undecided) return;
+    float ratio = std::min(a.radius, b.radius) / std::max(a.radius, b.radius);
+    float random = PairHash01(pair.a, pair.b);
+    pair.coalescenceRandom = random;
+    if (random < 0.015f) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
+    } else if (ratio >= 0.76f && random < 0.84f) {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
+    } else {
+        pair.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+    }
+}
+
+static void UpdateContactPair(BubbleContactPair& pair, float dt) {
+    int ai = -1, bi = -1;
+    if (!ResolveContactPairIndices(g_DisplayBubbles, pair, ai, bi)) return;
+    DisplayBubble& a = g_DisplayBubbles[static_cast<size_t>(ai)];
+    DisplayBubble& b = g_DisplayBubbles[static_cast<size_t>(bi)];
+    if (a.state == DisplayBubble::State::Dead || b.state == DisplayBubble::State::Dead ||
+        a.state == DisplayBubble::State::Burst || b.state == DisplayBubble::State::Burst) {
+        pair.active = false;
+        return;
+    }
+
+    glm::vec3 delta = b.position - a.position;
+    float distance = glm::length(delta);
+    if (distance < 1e-5f) delta = glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec3 normal = glm::normalize(delta);
+    float minRadius = std::min(a.radius, b.radius);
+    float contactDistance = a.radius + b.radius;
+    bool touching = distance <= contactDistance + minRadius * 0.10f || pair.bonded;
+    if (!touching) {
+        pair.active = false;
+        pair.contactActivation *= std::exp(-dt * 7.0f);
+        if (pair.candidate) {
+            float releaseDistance = contactDistance + minRadius * 0.16f;
+            if (distance > releaseDistance) {
+                pair.candidateExitTime += dt;
+                if (pair.candidateExitTime > 0.28f) {
+                    pair.candidate = false;
+                    pair.candidateExitTime = 0.0f;
+                }
+            } else {
+                pair.candidateExitTime = 0.0f;
+            }
+        }
+        return;
+    }
+
+    pair.active = true;
+    pair.candidate = true;
+    pair.candidateExitTime = 0.0f;
+    pair.contactTime += dt;
+    pair.contactActivation = std::min(1.0f, pair.contactActivation + dt * 3.5f);
+    pair.filteredNormal = normal;
+    pair.filteredPlaneCenter = a.position + normal * a.radius * 0.83f;
+    pair.contactFrameInitialized = true;
+    DecidePairOutcome(pair, a, b);
+
+    float filmGrowth = Smooth01(pair.contactTime / 0.75f);
+    pair.contactRadius = minRadius * 0.52f * filmGrowth;
+    pair.bridgeStrength = filmGrowth;
+    pair.geometryBlend = filmGrowth;
+    pair.filmThickness = glm::mix(1.0f, 0.34f, filmGrowth);
+    pair.bonded = pair.contactTime >= 0.24f &&
+        pair.outcome != BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
+
+    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::SeparateAfterContact &&
+        pair.contactTime > 0.72f) {
+        if (!pair.separationImpulseApplied) {
+            a.velocity -= normal * 0.11f;
+            b.velocity += normal * 0.11f;
+            pair.separationImpulseApplied = true;
+        }
+        pair.state = BubbleContactPair::State::Separated;
+        pair.candidate = pair.contactTime < 1.25f;
+        pair.persistentRenderPair = pair.contactTime < 1.45f;
+        pair.contactActivation *= std::exp(-dt * 3.4f);
+        a.state = b.state = DisplayBubble::State::Separated;
+        return;
+    }
+
+    if (pair.bonded) {
+        float contactRatio = pair.contactRadius / std::max(minRadius, 0.001f);
+        float offsetA = std::sqrt(std::max(a.radius * a.radius - pair.contactRadius * pair.contactRadius, 0.0f));
+        float offsetB = std::sqrt(std::max(b.radius * b.radius - pair.contactRadius * pair.contactRadius, 0.0f));
+        float targetDistance = offsetA + offsetB;
+        float error = distance - targetDistance;
+        float relativeSpeed = glm::dot(b.velocity - a.velocity, normal);
+        float impulse = error * 5.5f + relativeSpeed * 1.8f;
+        a.velocity += normal * impulse * dt;
+        b.velocity -= normal * impulse * dt;
+        pair.restDistance = targetDistance;
+        pair.interactionCompression = contactRatio;
+    }
+
+    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce && pair.contactTime > 0.72f) {
+        pair.fusionActive = true;
+        pair.fusionElapsed += dt;
+        pair.ruptureProgress = Smooth01(pair.fusionElapsed / 0.30f);
+        pair.neckProgress = Smooth01((pair.fusionElapsed - 0.12f) / 0.95f);
+        pair.relaxationProgress = Smooth01((pair.fusionElapsed - 0.62f) / 1.45f);
+        pair.fusionComplete = pair.relaxationProgress > 0.999f;
+        pair.state = pair.relaxationProgress > 0.02f
+            ? BubbleContactPair::State::Merged : BubbleContactPair::State::NeckForming;
+        pair.neckRadius = minRadius * glm::mix(0.04f, 0.80f, pair.neckProgress);
+        pair.filmThickness = glm::mix(0.34f, 0.08f, pair.ruptureProgress);
+        glm::vec3 center = (a.position * BubbleMass(a) + b.position * BubbleMass(b)) /
+                           std::max(BubbleMass(a) + BubbleMass(b), 0.001f);
+        glm::vec3 meanVelocity = (a.velocity + b.velocity) * 0.5f;
+        float halfDistance = glm::mix(distance * 0.5f, 0.0f, pair.relaxationProgress);
+        a.position = center - normal * halfDistance;
+        b.position = center + normal * halfDistance;
+        a.velocity = b.velocity = meanVelocity;
+        a.state = b.state = DisplayBubble::State::Merged;
+    } else {
+        pair.state = pair.contactTime < 0.34f
+            ? BubbleContactPair::State::Touch : BubbleContactPair::State::SharedFilm;
+        a.state = b.state = pair.state == BubbleContactPair::State::Touch
+            ? DisplayBubble::State::Touch : DisplayBubble::State::SharedFilm;
+    }
+    a.contactStrength = b.contactStrength = pair.contactActivation;
+    a.filmThickness = b.filmThickness = pair.filmThickness;
+    a.contactAxis = normal;
+    b.contactAxis = -normal;
+}
+
+static void UpdateInteractiveBubbles(float dt) {
+    if (g_SimPaused || g_VisualPaused) return;
+    dt = glm::clamp(dt, 0.0f, 1.0f / 30.0f);
+
+    for (DisplayBubble& bubble : g_DisplayBubbles) {
+        if (bubble.state == DisplayBubble::State::Dead) continue;
+        if (bubble.state == DisplayBubble::State::Burst) {
+            bubble.burstElapsed += dt;
+            bubble.alpha = 1.0f - Smooth01(bubble.burstElapsed / bubble.burstDuration);
+            bubble.burstScale = 1.0f + 0.06f * sinf(Smooth01(bubble.burstElapsed / bubble.burstDuration) * kPi);
+            auto found = g_BubbleSims.find(bubble.id);
+            if (found != g_BubbleSims.end()) found->second->update(dt);
+            if (bubble.burstElapsed >= bubble.burstDuration) bubble.state = DisplayBubble::State::Dead;
+            continue;
+        }
+
+        float phaseTime = static_cast<float>(g_Time) * bubble.speed + bubble.phase;
+        glm::vec3 randomAcceleration(
+            sinf(phaseTime * 0.73f),
+            cosf(phaseTime * 0.59f + 1.3f),
+            sinf(phaseTime * 0.47f + 2.1f));
+        randomAcceleration *= 0.018f;
+        glm::vec3 returnForce = (bubble.basePosition - bubble.position) * 0.035f;
+        glm::vec3 wind = g_WindEnabled ? g_GlobalWindDirection * g_GlobalWindStrength : glm::vec3(0.0f);
+        bubble.velocity += (randomAcceleration + returnForce + wind) * dt;
+        bubble.velocity *= std::exp(-dt * 0.55f);
+        bubble.position += bubble.velocity * dt;
+    }
+
+    for (const auto& broadPair : BuildBubbleBroadPhasePairs(g_DisplayBubbles)) {
+        const DisplayBubble& a = g_DisplayBubbles[static_cast<size_t>(broadPair.first)];
+        const DisplayBubble& b = g_DisplayBubbles[static_cast<size_t>(broadPair.second)];
+        float triggerDistance = a.radius + b.radius + std::min(a.radius, b.radius) * 0.08f;
+        if (glm::length(b.position - a.position) <= triggerDistance) {
+            int pairIndex = EnsureContactPairById(g_ContactPairs, a.id, b.id);
+            g_ContactPairs[static_cast<size_t>(pairIndex)].candidate = true;
+        }
+    }
+    for (BubbleContactPair& pair : g_ContactPairs) UpdateContactPair(pair, dt);
+}
+
+#include "simulation/windows_interaction_port.inc"
+
+static bool RaySphereHit(const glm::vec3& origin, const glm::vec3& direction,
+                         const DisplayBubble& bubble, float& distance) {
+    glm::vec3 oc = origin - bubble.position;
+    float b = glm::dot(oc, direction);
+    float c = glm::dot(oc, oc) - bubble.radius * bubble.radius;
+    float discriminant = b * b - c;
+    if (discriminant < 0.0f) return false;
+    float root = std::sqrt(discriminant);
+    float t = -b - root;
+    if (t < 0.0f) t = -b + root;
+    if (t < 0.0f) return false;
+    distance = t;
+    return true;
+}
+
+static uint64_t PickBubble(float x, float y) {
+    glm::vec3 origin = g_camera.getPosition();
+    glm::vec3 direction = g_camera.getRayDirectionFromScreen(x, y);
+    uint64_t picked = 0;
+    float nearest = 1e30f;
+    for (const DisplayBubble& bubble : g_DisplayBubbles) {
+        if (bubble.state == DisplayBubble::State::Dead) continue;
+        float distance = 0.0f;
+        if (RaySphereHit(origin, direction, bubble, distance) && distance < nearest) {
+            nearest = distance;
+            picked = bubble.id;
+        }
+    }
+    return picked;
+}
+
+static bool TriggerBubbleBurst(uint64_t id) {
+    int index = FindBubbleIndexById(g_DisplayBubbles, id);
+    if (index < 0) return false;
+    DisplayBubble& bubble = g_DisplayBubbles[static_cast<size_t>(index)];
+    if (bubble.state == DisplayBubble::State::Burst || bubble.state == DisplayBubble::State::Dead) return false;
+    bubble.state = DisplayBubble::State::Burst;
+    bubble.burstElapsed = 0.0f;
+    bubble.burstDuration = 0.38f;
+    bubble.alpha = 1.0f;
+    VortexSheetSimulation* sim = InitBubbleSim(id);
+    glm::vec3 localHoleDirection = glm::normalize(g_camera.getPosition() - bubble.position);
+    sim->punchHole(localHoleDirection, glm::radians(26.0f));
+    sim->surfaceTensionStrength = 120.0f;
+    sim->substepsPerFrame = 12;
+    sim->timeStep = 0.002f;
+    g_BubbleSurfaces.EnsureBubble(id, BuildVerticesFromSim(*sim), BuildIndicesFromSim(*sim));
+    for (BubbleContactPair& pair : g_ContactPairs) {
+        if (pair.a == id || pair.b == id) {
+            pair.active = pair.candidate = pair.bonded = pair.fusionActive = false;
+            g_BubbleSurfaces.RemoveContact(pair.a, pair.b);
+        }
+    }
+    for (DisplayBubble& other : g_DisplayBubbles) {
+        if (other.id == id || other.state == DisplayBubble::State::Dead) continue;
+        glm::vec3 delta = other.position - bubble.position;
+        float distance = glm::length(delta);
+        if (distance > 1e-4f && distance < bubble.radius * 4.0f) {
+            other.velocity += glm::normalize(delta) * (0.16f * (1.0f - distance / (bubble.radius * 4.0f)));
+        }
+    }
+    return true;
+}
+
+static glm::mat4 BubbleModelMatrix(const DisplayBubble& bubble) {
+    glm::mat4 model = glm::translate(glm::mat4(1.0f), bubble.position);
+    return glm::scale(model, glm::vec3(bubble.radius * bubble.burstScale));
+}
+
+static glm::mat4 AxisXModel(const glm::vec3& center, const glm::vec3& axis) {
+    glm::vec3 x = glm::normalize(axis);
+    glm::vec3 reference = std::abs(x.y) < 0.90f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                : glm::vec3(0.0f, 0.0f, 1.0f);
+    glm::vec3 z = glm::normalize(glm::cross(x, reference));
+    glm::vec3 y = glm::normalize(glm::cross(z, x));
+    glm::mat4 model(1.0f);
+    model[0] = glm::vec4(x, 0.0f);
+    model[1] = glm::vec4(y, 0.0f);
+    model[2] = glm::vec4(z, 0.0f);
+    model[3] = glm::vec4(center, 1.0f);
+    return model;
+}
+
+static glm::mat4 AxisZModel(const glm::vec3& center, const glm::vec3& normal, float scale) {
+    glm::vec3 z = glm::normalize(normal);
+    glm::vec3 reference = std::abs(z.y) < 0.90f ? glm::vec3(0.0f, 1.0f, 0.0f)
+                                                : glm::vec3(1.0f, 0.0f, 0.0f);
+    glm::vec3 x = glm::normalize(glm::cross(reference, z));
+    glm::vec3 y = glm::normalize(glm::cross(z, x));
+    glm::mat4 model(1.0f);
+    model[0] = glm::vec4(x * scale, 0.0f);
+    model[1] = glm::vec4(y * scale, 0.0f);
+    model[2] = glm::vec4(z * scale, 0.0f);
+    model[3] = glm::vec4(center, 1.0f);
+    return model;
+}
 
 
 GLuint LoadCubemapTexture(NativeResourceManager* resMgr, const std::vector<std::string>& faceFiles){
@@ -304,7 +848,8 @@ static void ReleaseGraphicsResources() {
     }
     g_BackgroundModels.clear();
     g_SpherePositions.clear();
-    g_DisplayBubbles.clear();
+    g_RenderOnlyBubbles.clear();
+    ClearInteractiveScene();
 
     if (cubemapTexture) glDeleteTextures(1, &cubemapTexture);
     if (g_ThinFilmLUTTexture) glDeleteTextures(1, &g_ThinFilmLUTTexture);
@@ -494,11 +1039,11 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
     OH_LOG_INFO(LOG_APP, "GL_VERSION = %{public}s", glVersion ? reinterpret_cast<const char*>(glVersion) : "unknown");
     
     g_camera.setViewportSize(width, height);
-    g_camera.setPosition({0.0f, 0.0f, g_CameraDistance});
+    g_camera.setPosition(g_CameraOrbitTarget + glm::vec3(0.0f, 0.0f, g_CameraDistance));
+    g_camera.setTarget(g_CameraOrbitTarget);
 
     // Shader: concatenate common + main for the fragment shader
-    std::string fsFull = std::string(refractionFragmentCommon) + "\n" + std::string(refractionFragmentMain);
-    refractionShader = new Shader(refractionVertexShader, fsFull.c_str());
+    refractionShader = new Shader(refractionVertexShader, refractionFragmentShader);
     backgroundShader = new Shader(backgroundVertexShader, backgroundFragmentShader);
     skyboxShader = new Shader(skyboxVertexShader, skyboxFragmentShader);
     quadShader = new Shader(quadVertexShader, quadFragmentShader);
@@ -564,25 +1109,7 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
         return MakeBool(env, false);
     }
 
-    // 15 display bubbles distributed around the scene.
-    g_DisplayBubbles = {
-        {{-4.05f,  1.05f, -2.10f}, 0.42f, 0.2f, 0.20f, 0.11f, 0.55f},
-        {{-3.50f, -0.95f, -2.60f}, 0.24f, 1.1f, 0.13f, 0.07f, 0.82f},
-        {{-3.10f,  2.55f, -3.15f}, 0.20f, 2.0f, 0.10f, 0.06f, 0.94f},
-        {{-2.55f,  0.10f, -1.35f}, 0.34f, 2.8f, 0.16f, 0.09f, 0.72f},
-        {{-2.10f, -2.10f, -2.30f}, 0.30f, 3.7f, 0.15f, 0.08f, 0.68f},
-        {{-1.45f,  3.05f, -2.90f}, 0.18f, 4.5f, 0.09f, 0.06f, 1.02f},
-        {{-1.25f, -1.85f,  0.95f}, 0.24f, 5.4f, 0.11f, 0.07f, 0.78f},
-        {{-0.65f,  1.90f, -3.55f}, 0.22f, 6.2f, 0.11f, 0.07f, 0.90f},
-        {{-0.55f, -2.75f,  1.20f}, 0.20f, 7.1f, 0.10f, 0.06f, 0.86f},
-        {{ 0.45f,  2.85f, -2.55f}, 0.24f, 8.0f, 0.12f, 0.07f, 0.86f},
-        {{ 0.85f, -2.05f, -3.15f}, 0.20f, 8.9f, 0.10f, 0.06f, 0.98f},
-        {{ 1.25f, -1.45f,  0.85f}, 0.22f, 9.7f, 0.11f, 0.07f, 0.80f},
-        {{ 1.35f,  1.55f, -1.75f}, 0.38f, 10.6f, 0.18f, 0.11f, 0.62f},
-        {{ 1.85f,  2.95f, -3.45f}, 0.18f, 11.4f, 0.09f, 0.06f, 1.00f},
-        {{ 2.25f, -1.95f, -2.05f}, 0.32f, 12.2f, 0.16f, 0.08f, 0.80f},
-        {{ 3.95f,  1.15f, -2.35f}, 0.34f, 14.8f, 0.17f, 0.09f, 0.70f}
-    };
+    ResetOpeningScene();
 
     // ---- DBSTT simulation init ----
     g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
@@ -689,20 +1216,15 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     float pitch = glm::radians(currentAngleX);
     float yaw   = glm::radians(currentAngleY);
     pitch = glm::clamp(pitch, glm::radians(-89.0f), glm::radians(89.0f));
-    glm::vec3 cameraPos(radius * cos(pitch) * sin(yaw),
+    glm::vec3 cameraPos = g_CameraOrbitTarget + glm::vec3(
+                        radius * cos(pitch) * sin(yaw),
                         radius * sin(pitch),
                         radius * cos(pitch) * cos(yaw));
     g_camera.setPosition(cameraPos);
-    g_camera.setTarget(glm::vec3(0.0f, 0.0f, 0.0f));
+    g_camera.setTarget(g_CameraOrbitTarget);
 
-    // ---- DBSTT simulation ----
-    if (!g_SimPaused && !g_VisualPaused && g_RefractModel && g_RefractModel->getMeshCount() > 0) {
-        if ((g_SimFrameCounter++ % kSimFrameInterval) == 0) {
-            g_Sim.update(1.0f / 60.0f);
-            auto verts = buildVerticesFromSim(g_Sim);
-            Mesh* m = g_RefractModel->getMesh(0);
-            if (m) m->updateVertices(verts);
-        }
+    if (!g_VisualPaused) {
+        windows_parity::UpdateDisplayBubbleInteractions(static_cast<float>(visualDt));
     }
 
     glm::mat4 view = g_camera.getViewMatrix();
@@ -727,6 +1249,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetMat4("uProj", proj);
         refractionShader->SetVec3("uCameraPos", cameraPos);
         refractionShader->SetFloat("uGeometryWobbleStrength", geometryWobbleStrength);
+        refractionShader->SetFloat("uContactDeformStrength", 0.0f);
+        refractionShader->SetInt("uVisualContactCount", 0);
+        refractionShader->SetInt("uForceSharedFilm", 0);
         refractionShader->SetFloat("uFresnelPower", g_FresnelPower);
         refractionShader->SetFloat("uShininess", g_Shininess);
         refractionShader->SetFloat("uDiffuseness", g_Diffuseness);
@@ -766,10 +1291,10 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                                   bool straightComposite) {
         BindRefractionInputs(backgroundTex);
 
-        std::vector<std::pair<float, const DisplayBubble*>> sortedBubbles;
-        sortedBubbles.reserve(g_DisplayBubbles.size());
-        for (const auto& bubble : g_DisplayBubbles) {
-            glm::vec3 center = glm::vec3(BubbleModelMatrix(bubble, (float)g_Time)
+        std::vector<std::pair<float, const RenderOnlyBubble*>> sortedBubbles;
+        sortedBubbles.reserve(g_RenderOnlyBubbles.size());
+        for (const auto& bubble : g_RenderOnlyBubbles) {
+            glm::vec3 center = glm::vec3(RenderOnlyBubbleModelMatrix(bubble, (float)g_Time)
                 * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
             glm::vec3 toCamera = center - cameraPos;
             sortedBubbles.emplace_back(glm::dot(toCamera, toCamera), &bubble);
@@ -786,7 +1311,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
 
         for (const auto& item : sortedBubbles) {
             const auto& bubble = *item.second;
-            glm::mat4 bubbleModel = BubbleModelMatrix(bubble, (float)g_Time);
+            glm::mat4 bubbleModel = RenderOnlyBubbleModelMatrix(bubble, (float)g_Time);
             float alpha = straightComposite ? 0.72f : 1.0f;
             SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO,
                                false, 0.055f, 2, alpha);
@@ -799,12 +1324,227 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         }
     };
 
-    auto DrawMainBubble = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTex) {
+    auto SetBubbleContactPlanes = [&](const DisplayBubble& bubble) {
+        int count = 0;
+        for (const BubbleContactPair& pair : g_ContactPairs) {
+            if (count >= 4 || !pair.active || pair.contactActivation <= 0.001f ||
+                pair.state == BubbleContactPair::State::Separated) continue;
+            bool isA = pair.a == bubble.id;
+            bool isB = pair.b == bubble.id;
+            if (!isA && !isB) continue;
+            glm::vec3 normal = isA ? pair.filteredNormal : -pair.filteredNormal;
+            float fusionRetention = 1.0f - Smooth01(pair.relaxationProgress);
+            std::string suffix = "[" + std::to_string(count) + "]";
+            GLint pointLocation = glGetUniformLocation(
+                refractionShader->m_id, ("uVisualContactPlanePoints" + suffix).c_str());
+            GLint normalLocation = glGetUniformLocation(
+                refractionShader->m_id, ("uVisualContactPlaneNormals" + suffix).c_str());
+            glUniform3fv(pointLocation, 1, glm::value_ptr(pair.filteredPlaneCenter));
+            glUniform3fv(normalLocation, 1, glm::value_ptr(normal));
+            glUniform1f(glGetUniformLocation(
+                refractionShader->m_id, ("uVisualContactBlendWidths" + suffix).c_str()),
+                std::max(0.008f, bubble.radius * 0.025f));
+            glUniform1f(glGetUniformLocation(
+                refractionShader->m_id, ("uVisualContactStrengths" + suffix).c_str()),
+                pair.contactActivation * fusionRetention);
+            ++count;
+        }
+        refractionShader->SetInt("uVisualContactCount", count);
+    };
+
+    bool interactiveMeshesUpdated = false;
+    bool fusionMeshesUpdated = false;
+    bool contactMeshesUpdated = false;
+    auto DrawInteractiveBubbles = [&](bool isBackFace, bool renderToFBO, GLuint backgroundTex) {
         BindRefractionInputs(backgroundTex);
-        glm::mat4 mainModel = glm::mat4(1.0f);
-        SetRefractUniforms(mainModel, g_BubbleRadius, isBackFace, renderToFBO,
-                           true, 0.085f, g_IridescenceMode, 1.0f);
-        g_RefractModel->Draw(*refractionShader);
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        if (!isBackFace) {
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            glDepthMask(GL_FALSE);
+        }
+
+        std::vector<std::pair<float, DisplayBubble*>> sortedBubbles;
+        for (DisplayBubble& bubble : g_DisplayBubbles) {
+            if (bubble.state == DisplayBubble::State::Dead) continue;
+            bool worldScaleSurface = g_BubbleSurfaces.BubbleUsesWorldScale(bubble.id);
+            glm::vec3 center = glm::vec3(
+                windows_parity::PersistentBubbleModelMatrix(
+                    bubble, static_cast<float>(g_Time), worldScaleSurface) *
+                glm::vec4(0.0f, 0.0f, 0.0f, 1.0f));
+            float distanceSq = glm::dot(center - cameraPos, center - cameraPos);
+            sortedBubbles.emplace_back(distanceSq, &bubble);
+        }
+        std::sort(sortedBubbles.begin(), sortedBubbles.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+
+        for (const auto& entry : sortedBubbles) {
+            DisplayBubble& bubble = *entry.second;
+            bool worldScaleSurface = g_BubbleSurfaces.BubbleUsesWorldScale(bubble.id);
+            float fusionVisibility = windows_parity::BubbleFusionSurfaceVisibility(bubble.id);
+            float shellAlpha = (g_InteractionDemoActive ? 0.62f : 0.72f) *
+                               bubble.alpha;
+            if (bubble.state != DisplayBubble::State::Burst) {
+                shellAlpha *= 1.0f - fusionVisibility;
+            }
+            if (shellAlpha <= 0.005f) continue;
+            glm::mat4 model = windows_parity::PersistentBubbleModelMatrix(
+                bubble, static_cast<float>(g_Time), worldScaleSurface);
+            SetRefractUniforms(model, bubble.radius, isBackFace, renderToFBO,
+                               false, 0.0f,
+                               g_IridescenceMode, shellAlpha);
+            SetBubbleContactPlanes(bubble);
+
+            Model* modelToDraw = g_BubbleSurfaces.FindBubble(bubble.id);
+            if (bubble.state == DisplayBubble::State::Burst) {
+                VortexSheetSimulation* sim = GetBubbleSim(bubble.id);
+                if (sim && modelToDraw) {
+                    Mesh* mesh = modelToDraw->getMesh(0);
+                    if (mesh) mesh->updateVertices(BuildVerticesFromSim(*sim));
+                }
+                refractionShader->SetInt("uVisualContactCount", 0);
+            } else if (modelToDraw && !bubble.volumeTransferred && !interactiveMeshesUpdated) {
+                Mesh* mesh = modelToDraw->getMesh(0);
+                if (mesh) {
+                    const std::vector<Vertex>* restVertices =
+                        g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
+                    mesh->updateVertices(windows_parity::BuildPersistentBubbleVertices(
+                        FindBubbleIndexById(g_DisplayBubbles, bubble.id),
+                        static_cast<float>(g_Time), restVertices,
+                        worldScaleSurface, &mesh->vertices));
+                }
+            }
+            if (!modelToDraw) modelToDraw = g_DecorativeBubbleModel;
+            if (modelToDraw) modelToDraw->Draw(*refractionShader);
+        }
+        interactiveMeshesUpdated = true;
+
+        for (BubbleContactPair& pair : g_ContactPairs) {
+            int ai = -1, bi = -1;
+            if (!pair.active || !ResolveContactPairIndices(g_DisplayBubbles, pair, ai, bi)) continue;
+            DisplayBubble& a = g_DisplayBubbles[static_cast<size_t>(ai)];
+            DisplayBubble& b = g_DisplayBubbles[static_cast<size_t>(bi)];
+            if (a.state == DisplayBubble::State::Dead || b.state == DisplayBubble::State::Dead) continue;
+
+            float fusionVisibility = windows_parity::FusionSurfaceVisibility(pair);
+            if (fusionVisibility > 0.001f) {
+                float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
+                float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
+                float targetVolume = std::max(volumeA + volumeB, 0.001f);
+                float targetRadius = RadiusFromVolume(targetVolume);
+                glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) / targetVolume;
+                glm::vec3 axis = pair.fusionFrameInitialized
+                    ? pair.fusionAxis : b.position - a.position;
+                if (!windows_parity::IsFiniteDirection(axis) || glm::length(axis) <= 1e-5f) {
+                    axis = pair.contactFrameInitialized
+                        ? pair.filteredNormal : glm::vec3(1.0f, 0.0f, 0.0f);
+                }
+                axis = windows_parity::SafeNormalizeDirection(axis, glm::vec3(1.0f, 0.0f, 0.0f));
+                glm::vec3 side;
+                glm::vec3 binormal;
+                if (pair.fusionFrameInitialized) {
+                    side = windows_parity::SafeNormalizeDirection(
+                        pair.fusionSide - axis * glm::dot(pair.fusionSide, axis), pair.fusionSide);
+                    binormal = windows_parity::SafeNormalizeDirection(
+                        glm::cross(axis, side), pair.fusionBinormal);
+                } else {
+                    windows_parity::BuildStableOrthonormalFrame(axis, side, binormal);
+                }
+                glm::mat3 fusionBasis(1.0f);
+                fusionBasis[0] = axis;
+                fusionBasis[1] = side;
+                fusionBasis[2] = binormal;
+                FusionSurfaceParameters parameters;
+                parameters.centerA = glm::dot(a.position - targetCenter, axis);
+                parameters.centerB = glm::dot(b.position - targetCenter, axis);
+                parameters.radiusA = a.radius;
+                parameters.radiusB = b.radius;
+                parameters.targetRadius = targetRadius;
+                parameters.neckProgress = pair.neckProgress;
+                parameters.relaxationProgress = pair.relaxationProgress;
+                float oscillationEnvelope = (1.0f - pair.relaxationProgress) * pair.relaxationProgress;
+                parameters.oscillation = std::sin(pair.relaxationProgress * 3.0f * kPi) *
+                                         oscillationEnvelope * 0.12f;
+                std::vector<Vertex> fusionVertices = BuildFusionSurfaceVertices(parameters);
+                for (Vertex& vertex : fusionVertices) {
+                    vertex.Position = fusionBasis * vertex.Position;
+                    vertex.Normal = windows_parity::SafeNormalizeDirection(
+                        fusionBasis * vertex.Normal, vertex.Normal);
+                    vertex.FilmDirection = windows_parity::SafeNormalizeDirection(
+                        fusionBasis * vertex.FilmDirection, vertex.Normal);
+                }
+                Model* fusionModel = g_BubbleSurfaces.FindFusion(pair.a, pair.b);
+                if (!fusionModel) {
+                    fusionModel = g_BubbleSurfaces.EnsureFusion(
+                        pair.a, pair.b, fusionVertices, BuildFusionSurfaceIndices());
+                } else if (!fusionMeshesUpdated) {
+                    Mesh* mesh = fusionModel->getMesh(0);
+                    if (mesh) {
+                        windows_parity::PreserveFilmCoordinates(fusionVertices, mesh->vertices);
+                        mesh->updateVertices(fusionVertices);
+                    }
+                }
+                float avgRadius = (volumeA * a.radius + volumeB * b.radius) / targetVolume;
+                float totalFusionDuration = kRelaxationDelay + kRelaxationDuration;
+                float fusionProgress = windows_parity::Smooth01(
+                    pair.fusionElapsed / std::max(totalFusionDuration, 0.001f));
+                float refractionRadius = glm::mix(avgRadius, targetRadius, fusionProgress);
+                glm::mat4 fusionMatrix = glm::translate(glm::mat4(1.0f), targetCenter);
+                SetRefractUniforms(fusionMatrix, refractionRadius, isBackFace, renderToFBO,
+                                   false, 0.0f, g_IridescenceMode,
+                                   (g_InteractionDemoActive ? 0.62f : 0.72f) *
+                                   std::max(a.alpha, b.alpha) * fusionVisibility);
+                refractionShader->SetInt("uVisualContactCount", 0);
+                refractionShader->SetInt("uForceSharedFilm", 0);
+                if (fusionModel) fusionModel->Draw(*refractionShader);
+            }
+
+            float filmVisibility = pair.contactActivation * pair.contactActivation;
+            float ruptureFade = pair.fusionActive ? 1.0f - pair.ruptureProgress : 1.0f;
+            float filmAlpha = 0.16f * filmVisibility * ruptureFade;
+            if (filmAlpha > 0.002f && pair.contactRadius > 0.002f) {
+                float pulse = 1.0f + std::sin(static_cast<float>(g_Time) * 0.70f +
+                    static_cast<float>(pair.a * 0.37f + pair.b * 0.19f)) * 0.008f;
+                float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
+                float normalizedCurvature =
+                    windows_parity::ContactFilmWorldCurvature(a, b, pair) * filmRadius;
+                float holeRadius = pair.fusionActive
+                    ? windows_parity::Smooth01(pair.ruptureProgress) * 0.98f : 0.0f;
+                std::vector<Vertex> contactVertices =
+                    BuildCurvedContactFilmVertices(normalizedCurvature, holeRadius);
+                for (Vertex& vertex : contactVertices) {
+                    glm::vec3 materialDirection(
+                        vertex.Position.x, vertex.Position.y, 0.35f + vertex.Position.z);
+                    vertex.FilmDirection = windows_parity::SafeNormalizeDirection(
+                        materialDirection, glm::vec3(0.0f, 0.0f, 1.0f));
+                }
+                Model* filmModel = g_BubbleSurfaces.FindContact(pair.a, pair.b);
+                if (!filmModel) {
+                    filmModel = g_BubbleSurfaces.EnsureContact(
+                        pair.a, pair.b, contactVertices, BuildContactFilmDisc(72).indices);
+                } else if (!contactMeshesUpdated) {
+                    Mesh* mesh = filmModel->getMesh(0);
+                    if (mesh) {
+                        windows_parity::PreserveFilmCoordinates(contactVertices, mesh->vertices);
+                        mesh->updateVertices(contactVertices);
+                    }
+                }
+                glm::mat4 filmMatrix = windows_parity::MakeContactFilmModel(
+                    a, b, pair, static_cast<float>(g_Time));
+                SetRefractUniforms(filmMatrix, pair.contactRadius, isBackFace, renderToFBO,
+                                   false, 0.0f, g_IridescenceMode, filmAlpha);
+                refractionShader->SetInt("uVisualContactCount", 0);
+                refractionShader->SetInt("uForceSharedFilm", 1);
+                if (filmModel) filmModel->Draw(*refractionShader);
+            }
+        }
+        fusionMeshesUpdated = true;
+        contactMeshesUpdated = true;
+
+        if (!isBackFace) {
+            glDepthMask(GL_TRUE);
+            if (!blendWasEnabled) glDisable(GL_BLEND);
+        }
     };
 
     auto SetBackgroundUniforms = [&]() {
@@ -852,6 +1592,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
     DrawDisplayBubbles(false, true, backgroundTexture, true);
+    DrawInteractiveBubbles(false, true, backgroundTexture);
 
     // ===== Pass 3: Render main bubble back faces =====
     // The main bubble samples the scene behind it, including decorative bubbles.
@@ -859,7 +1600,6 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glViewport(0, 0, fboW, fboH);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glCullFace(GL_FRONT);
-    DrawMainBubble(true, true, sceneBehindTexture);
 
     // ===== Pass 4: Render main-only scene =====
     // Foreground decorative bubbles sample the main-only scene.
@@ -871,7 +1611,6 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     DrawSkybox();
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
-    DrawMainBubble(false, true, backFaceTexture);
 
     // ===== Pass 5: Composite complete scene into the low-res final target =====
     glBindFramebuffer(GL_FRAMEBUFFER, finalSceneFBO);
@@ -883,7 +1622,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     DrawSkybox();
     glDepthMask(GL_TRUE); glDepthFunc(GL_LESS);
     SetBackgroundUniforms();
-    DrawMainBubble(false, true, backFaceTexture);
+    DrawInteractiveBubbles(false, true, mainSceneTexture);
     DrawDisplayBubbles(false, true, mainSceneTexture, true);
 
     // ===== Pass 6: Upscale final scene to the screen =====
@@ -1041,7 +1780,7 @@ static napi_value SetCameraDistance(napi_env env, napi_callback_info info) {
     size_t argc = 1; napi_value args[1];
     napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
     double val; napi_get_value_double(env, args[0], &val);
-    g_CameraDistance = glm::clamp((float)val, 3.5f, 20.0f);
+    g_CameraDistance = glm::clamp((float)val, 2.0f, 20.0f);
     return nullptr;
 }
 static napi_value ToggleSimulation(napi_env env, napi_callback_info info) {
@@ -1075,6 +1814,78 @@ static napi_value RotateCamera(napi_env env, napi_callback_info info) {
     currentAngleX = glm::clamp(currentAngleX, -89.0f, 89.0f);
     return nullptr;
 }
+
+static void MapLogicalPointToSurface(float& x, float& y) {
+    if (g_InputViewportWidth > 1e-3f && g_InputViewportHeight > 1e-3f &&
+        width > 1e-3f && height > 1e-3f) {
+        x *= width / g_InputViewportWidth;
+        y *= height / g_InputViewportHeight;
+    }
+}
+
+static napi_value ResetOpeningSceneApi(napi_env env, napi_callback_info info) {
+    ResetOpeningScene();
+    return nullptr;
+}
+
+static napi_value CycleInteractionDemoApi(napi_env env, napi_callback_info info) {
+    CycleInteractionDemo();
+    napi_value result;
+    napi_create_int32(env, g_InteractionDemoIndex, &result);
+    return result;
+}
+
+static napi_value SetWindStrengthApi(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value args[1];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double value = 0.0;
+    if (argc >= 1) napi_get_value_double(env, args[0], &value);
+    g_GlobalWindStrength = glm::clamp(static_cast<float>(value), 0.0f, 0.45f);
+    g_WindEnabled = g_GlobalWindStrength > 0.001f;
+    return nullptr;
+}
+
+static napi_value AddBubbleAtScreenApi(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value args[4];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double x = 0.0, y = 0.0, radius = 0.48, depth = 0.0;
+    if (argc >= 1) napi_get_value_double(env, args[0], &x);
+    if (argc >= 2) napi_get_value_double(env, args[1], &y);
+    if (argc >= 3) napi_get_value_double(env, args[2], &radius);
+    if (argc >= 4) napi_get_value_double(env, args[3], &depth);
+    float fx = static_cast<float>(x);
+    float fy = static_cast<float>(y);
+    MapLogicalPointToSurface(fx, fy);
+    glm::vec3 origin = g_camera.getPosition();
+    glm::vec3 direction = g_camera.getRayDirectionFromScreen(fx, fy);
+    float denominator = direction.z;
+    float t = std::abs(denominator) > 1e-5f
+        ? (static_cast<float>(depth) - origin.z) / denominator
+        : g_CameraDistance;
+    if (t < 0.25f) t = g_CameraDistance;
+    glm::vec3 position = origin + direction * t;
+    if (g_DisplayBubbles.size() >= 24) {
+        return MakeBool(env, false);
+    }
+    AddInteractiveBubble(position, glm::clamp(static_cast<float>(radius), 0.16f, 1.10f));
+    return MakeBool(env, true);
+}
+
+static napi_value BurstBubbleAtScreenApi(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double x = 0.0, y = 0.0;
+    if (argc >= 1) napi_get_value_double(env, args[0], &x);
+    if (argc >= 2) napi_get_value_double(env, args[1], &y);
+    float fx = static_cast<float>(x);
+    float fy = static_cast<float>(y);
+    MapLogicalPointToSurface(fx, fy);
+    return MakeBool(env, TriggerBubbleBurst(PickBubble(fx, fy)));
+}
+
 static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
     g_Sim.timeStep = 0.001f;
@@ -1091,7 +1902,9 @@ static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_RefractionStrength = 0.35f;
     g_EdgeDistortionBoost = 2.2f;
     g_EnvironmentReflectionStrength = 0.65f;
-    g_CameraDistance = 7.0f;
+    g_CameraDistance = 3.75f;
+    g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
+    ResetOpeningScene();
     return nullptr;
 }
 
@@ -1122,6 +1935,11 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "toggleSimulation", nullptr, ToggleSimulation, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setThickness", nullptr, SetThickness, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setThicknessVar", nullptr, SetThicknessVar, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "resetOpeningScene", nullptr, ResetOpeningSceneApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "cycleInteractionDemo", nullptr, CycleInteractionDemoApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setWindStrength", nullptr, SetWindStrengthApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "addBubbleAtScreen", nullptr, AddBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "burstBubbleAtScreen", nullptr, BurstBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -34,6 +34,7 @@ struct Vertex {
     glm::vec2 TexCoords;
     glm::vec3 Tangent;
     glm::vec3 Bitangent;
+    glm::vec3 FilmDirection = glm::vec3(0.0f);
 };
 
 struct Texture {
@@ -63,6 +64,21 @@ public:
         vertices = newVertices;
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
         glBufferSubData(GL_ARRAY_BUFFER, 0, vertices.size() * sizeof(Vertex), &vertices[0]);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    void updateGeometry(const vector<Vertex>& newVertices,
+                        const vector<unsigned int>& newIndices) {
+        vertices = newVertices;
+        indices = newIndices;
+        glBindVertexArray(VAO);
+        glBindBuffer(GL_ARRAY_BUFFER, VBO);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(Vertex),
+                     vertices.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int),
+                     indices.data(), GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
@@ -132,6 +148,8 @@ private:
         glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Tangent));
         glEnableVertexAttribArray(4);
         glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
+        glEnableVertexAttribArray(5);
+        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, FilmDirection));
         glBindVertexArray(0);
     }
 };
