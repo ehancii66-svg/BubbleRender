@@ -511,7 +511,7 @@ static bool RemoveBubble(uint64_t id)
         g_ContactPairs.end());
 
     g_BubbleSurfaces.RemoveBubble(id);
-    g_BubbleSims.erase(id);
+    RetireBubbleSim(id);
     return true;
 }
 

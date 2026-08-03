@@ -23,13 +23,22 @@ struct Index {
     @State private compY: number = 0;
     @State private compW: number = 0;
     @State private compH: number = 0;
+    @State private controlsX: number = 0;
+    @State private controlsY: number = 0;
+    @State private controlsW: number = 0;
+    @State private controlsH: number = 0;
+    @State private menuX: number = 0;
+    @State private menuY: number = 0;
+    @State private menuW: number = 0;
+    @State private menuH: number = 0;
+    @State private showControls: boolean = false;
     @State private showSettings: boolean = false;
     @State private showInteractionHint: boolean = false;
     @State private fpsText: string = 'FPS: --  RS: 0.50';
     @State private modeText: string = 'Airy';
     @State private simulationText: string = '暂停仿真';
     @State private simPaused: boolean = false;
-    @State private cameraDistance: number = 3.75;
+    @State private cameraDistance: number = 5.40;
     @State private thickness: number = 740;
     @State private thicknessVar: number = 160;
     @State private surfaceTension: number = 15;
@@ -46,13 +55,28 @@ struct Index {
     private lastTouchY: number = 0
     private touchMoved: boolean = false
     private pinchDistance: number = 0
-    private pinchCameraDistance: number = 3.75
+    private pinchCameraDistance: number = 5.40
     private suppressSingleTouchAfterPinch: boolean = false
+    private lastTapTime: number = 0
+    private lastTapX: number = 0
+    private lastTapY: number = 0
+    private suppressToolGestureUntilUp: boolean = false
 
     private distanceBetweenTouches(a: TouchObject, b: TouchObject): number {
         const dx = a.x - b.x
         const dy = a.y - b.y
         return Math.sqrt(dx * dx + dy * dy)
+    }
+
+    private isInsideControls(x: number, y: number): boolean {
+        const insidePanel = this.showControls &&
+            this.controlsW > 0 && this.controlsH > 0 &&
+            x >= this.controlsX && x <= this.controlsX + this.controlsW &&
+            y >= this.controlsY && y <= this.controlsY + this.controlsH
+        const insideMenu = this.menuW > 0 && this.menuH > 0 &&
+            x >= this.menuX && x <= this.menuX + this.menuW &&
+            y >= this.menuY && y <= this.menuY + this.menuH
+        return insidePanel || insideMenu
     }
 
     private setCameraDistanceValue(value: number): void {
@@ -62,6 +86,67 @@ struct Index {
         } catch (e) {
             hilog.error(DOMAIN, 'Index', 'setCameraDistance failed: %{public}s', JSON.stringify(e))
         }
+    }
+
+    private selectTouchMode(mode: number): void {
+        this.hideAddPreview()
+        this.touchMode = this.touchMode === mode ? 0 : mode
+        this.showControls = false
+    }
+
+    private toggleControlMenu(): void {
+        if (this.showSettings) {
+            this.showSettings = false
+            this.showControls = false
+            return
+        }
+        this.showControls = !this.showControls
+    }
+
+    private hideAddPreview(): void {
+        try {
+            testNapi.setAddPreview(0, 0, this.bubbleRadius, this.spawnDepth, false)
+        } catch (e) {}
+    }
+
+    private updateAddPreview(x: number, y: number): void {
+        try {
+            testNapi.setAddPreview(x, y, this.bubbleRadius, this.spawnDepth, true)
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'setAddPreview failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
+    private resetCameraView(): void {
+        try {
+            this.cameraDistance = testNapi.resetCameraView()
+            this.pinchCameraDistance = this.cameraDistance
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'resetCameraView failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
+    private handleOrbitTap(localX: number, localY: number): boolean {
+        const now = Date.now()
+        const dx = localX - this.lastTapX
+        const dy = localY - this.lastTapY
+        const isDoubleTap = now - this.lastTapTime <= 320 && dx * dx + dy * dy <= 24 * 24
+        this.lastTapTime = now
+        this.lastTapX = localX
+        this.lastTapY = localY
+        if (!isDoubleTap) {
+            return false
+        }
+        try {
+            if (!testNapi.hasBubbleAtScreen(localX, localY)) {
+                this.resetCameraView()
+                this.lastTapTime = 0
+                return true
+            }
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'hasBubbleAtScreen failed: %{public}s', JSON.stringify(e))
+        }
+        return false
     }
 
     private setMode(mode: number, label: string): void {
@@ -87,6 +172,10 @@ struct Index {
         try {
             testNapi.resetOpeningScene()
             this.demoText = '演示'
+            this.cameraDistance = 5.40
+            this.pinchCameraDistance = this.cameraDistance
+            this.touchMode = 0
+            this.hideAddPreview()
         } catch (e) {
             hilog.error(DOMAIN, 'Index', 'resetOpeningScene failed: %{public}s', JSON.stringify(e))
         }
@@ -97,6 +186,10 @@ struct Index {
             const mode = testNapi.cycleInteractionDemo()
             const labels: string[] = ['8字', '融合', '分离']
             this.demoText = labels[Math.max(0, Math.min(2, mode))]
+            this.cameraDistance = 5.60
+            this.pinchCameraDistance = this.cameraDistance
+            this.touchMode = 0
+            this.hideAddPreview()
         } catch (e) {
             hilog.error(DOMAIN, 'Index', 'cycleInteractionDemo failed: %{public}s', JSON.stringify(e))
         }
@@ -118,7 +211,7 @@ struct Index {
         this.refractionStrength = 0.35
         this.edgeDistortionBoost = 2.2
         this.environmentReflection = 0.65
-        this.cameraDistance = 3.75
+        this.cameraDistance = 5.40
         this.touchMode = 0
         this.bubbleRadius = 0.48
         this.spawnDepth = 0.0
@@ -227,7 +320,16 @@ struct Index {
             return
         }
 
+        if (this.isInsideControls(points[0].x, points[0].y)) {
+            return
+        }
+        if (this.showControls && event.type === TouchType.Down) {
+            this.showControls = false
+            return
+        }
+
         if (points.length >= 2) {
+            this.hideAddPreview()
             this.suppressSingleTouchAfterPinch = true
             const currentPinch = this.distanceBetweenTouches(points[0], points[1])
             if (event.type === TouchType.Down || this.pinchDistance <= 1) {
@@ -263,6 +365,12 @@ struct Index {
         if (this.suppressSingleTouchAfterPinch) {
             return
         }
+        if (this.suppressToolGestureUntilUp) {
+            if (touchType === 1) {
+                this.suppressToolGestureUntilUp = false
+            }
+            return
+        }
         const hasArea = this.compW > 0 && this.compH > 0
         const localX = hasArea ? (touch.x - this.compX) : touch.x
         const localY = hasArea ? (touch.y - this.compY) : touch.y
@@ -272,7 +380,7 @@ struct Index {
             return
         }
 
-        if (touchType === 2) {
+        if (touchType === 2 && this.touchMode !== 1) {
             const moveX = touch.x - this.lastTouchX
             const moveY = touch.y - this.lastTouchY
             if (Math.abs(moveX) > 3 || Math.abs(moveY) > 3) {
@@ -280,8 +388,39 @@ struct Index {
             }
         }
 
+        const activeMode = this.touchMode
+
+        if (activeMode === 1) {
+            if ((touchType === 0 || touchType === 2) && inComp) {
+                this.updateAddPreview(localX, localY)
+            } else if (touchType === 1) {
+                this.hideAddPreview()
+            }
+            if (touchType === 1 && inComp) {
+                try {
+                    testNapi.addBubbleAtScreen(localX, localY, this.bubbleRadius, this.spawnDepth)
+                } catch (err) {
+                    hilog.error(DOMAIN, 'Index', 'add bubble failed: %{public}s', JSON.stringify(err))
+                }
+            }
+            return
+        }
+
+        if (activeMode === 2) {
+            if (touchType === 0 && inComp) {
+                try {
+                    if (testNapi.burstBubbleAtScreen(localX, localY)) {
+                        this.suppressToolGestureUntilUp = true
+                    }
+                } catch (err) {
+                    hilog.error(DOMAIN, 'Index', 'burst bubble failed: %{public}s', JSON.stringify(err))
+                }
+            }
+            return
+        }
+
         // ---- drag to rotate camera ----
-        if (touchType === 2 && this.touchMode === 0) {
+        if (touchType === 2) {
             const dx = touch.x - this.lastTouchX
             const dy = touch.y - this.lastTouchY
             if (Math.abs(dx) > 1 || Math.abs(dy) > 1) {
@@ -306,15 +445,7 @@ struct Index {
         )
 
         if (touchType === 1 && !this.touchMoved && inComp) {
-            try {
-                if (this.touchMode === 1) {
-                    testNapi.addBubbleAtScreen(localX, localY, this.bubbleRadius, this.spawnDepth)
-                } else if (this.touchMode === 2) {
-                    testNapi.burstBubbleAtScreen(localX, localY)
-                }
-            } catch (err) {
-                hilog.error(DOMAIN, 'Index', 'bubble touch action failed: %{public}s', JSON.stringify(err))
-            }
+            this.handleOrbitTap(localX, localY)
         }
 
         try {
@@ -396,9 +527,6 @@ struct Index {
                 })
                 .width('100%')
                 .height('100%')
-                .onTouch((event: TouchEvent) => {
-                    this.mapAndDispatchTouch(event)
-                })
 
             Text(this.fpsText)
                 .fontSize(12)
@@ -445,7 +573,24 @@ struct Index {
                 .position({ x: '11%', y: '10%' })
             }
 
-            Column() {
+            Button(this.showControls || this.showSettings ? '×' : '☰')
+                .fontSize(20)
+                .fontColor(Color.White)
+                .width(42)
+                .height(38)
+                .backgroundColor('rgba(18,18,18,0.68)')
+                .borderRadius(6)
+                .position({ x: '84%', y: 8 })
+                .onClick(() => { this.toggleControlMenu() })
+                .onAreaChange((_oldValue: Area, newValue: Area) => {
+                    this.menuX = Number(newValue.position.x)
+                    this.menuY = Number(newValue.position.y)
+                    this.menuW = Number(newValue.width)
+                    this.menuH = Number(newValue.height)
+                })
+
+            if (this.showControls) {
+                Column() {
                 Row() {
                     Button('Scene')
                         .fontSize(12).height(32).layoutWeight(1)
@@ -461,22 +606,70 @@ struct Index {
                 .justifyContent(FlexAlign.SpaceBetween)
 
                 Row() {
-                    Button('Orbit')
+                    Button('旋转')
                         .fontSize(12).height(32).layoutWeight(1)
                         .backgroundColor(this.touchMode === 0 ? '#2878D0' : '#505050')
-                        .onClick(() => { this.touchMode = 0 })
-                    Button('Add')
+                        .onClick(() => {
+                            this.hideAddPreview()
+                            this.touchMode = 0
+                            this.showControls = false
+                        })
+                    Button(this.touchMode === 1 ? '取消添加' : '添加')
                         .fontSize(12).height(32).layoutWeight(1)
                         .backgroundColor(this.touchMode === 1 ? '#2878D0' : '#505050')
-                        .onClick(() => { this.touchMode = 1 })
-                    Button('Pop')
+                        .onClick(() => { this.selectTouchMode(1) })
+                    Button(this.touchMode === 2 ? '取消破裂' : '破裂')
                         .fontSize(12).height(32).layoutWeight(1)
                         .backgroundColor(this.touchMode === 2 ? '#B43A48' : '#505050')
-                        .onClick(() => { this.touchMode = 2 })
+                        .onClick(() => { this.selectTouchMode(2) })
                 }
                 .width('100%')
                 .justifyContent(FlexAlign.SpaceBetween)
                 .padding({ top: 5 })
+
+                if (this.touchMode === 1) {
+                    Column() {
+                        Row() {
+                            Text('泡泡大小')
+                                .fontSize(11)
+                                .fontColor(Color.White)
+                                .width(72)
+                            Slider({ value: this.bubbleRadius, min: 0.16, max: 1.10, step: 0.02,
+                                style: SliderStyle.OutSet })
+                                .height(28)
+                                .layoutWeight(1)
+                                .onChange((v: number, _mode: SliderChangeMode) => { this.bubbleRadius = v })
+                            Text(this.bubbleRadius.toFixed(2))
+                                .fontSize(11)
+                                .fontColor('rgba(255,255,255,0.76)')
+                                .width(36)
+                                .textAlign(TextAlign.End)
+                        }
+                        .width('100%')
+
+                        Row() {
+                            Text('添加深度')
+                                .fontSize(11)
+                                .fontColor(Color.White)
+                                .width(72)
+                            Button('近')
+                                .fontSize(11).height(28).layoutWeight(1)
+                                .backgroundColor(this.spawnDepth === 2.0 ? '#2878D0' : '#505050')
+                                .onClick(() => { this.spawnDepth = 2.0 })
+                            Button('中')
+                                .fontSize(11).height(28).layoutWeight(1)
+                                .backgroundColor(this.spawnDepth === 0.0 ? '#2878D0' : '#505050')
+                                .onClick(() => { this.spawnDepth = 0.0 })
+                            Button('远')
+                                .fontSize(11).height(28).layoutWeight(1)
+                                .backgroundColor(this.spawnDepth === -2.0 ? '#2878D0' : '#505050')
+                                .onClick(() => { this.spawnDepth = -2.0 })
+                        }
+                        .width('100%')
+                    }
+                    .width('100%')
+                    .padding({ top: 4, bottom: 2 })
+                }
 
                 Row() {
                     Button('Kim')
@@ -503,7 +696,12 @@ struct Index {
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
-                        .onClick(() => { this.showSettings = !this.showSettings })
+                        .onClick(() => {
+                            this.touchMode = 0
+                            this.hideAddPreview()
+                            this.showSettings = true
+                            this.showControls = false
+                        })
                     Button('重置')
                         .fontSize(12)
                         .height(34)
@@ -513,12 +711,19 @@ struct Index {
                 .width('100%')
                 .justifyContent(FlexAlign.SpaceBetween)
                 .padding({ top: 6 })
+                }
+                .width('92%')
+                .padding({ left: 8, right: 8, top: 8, bottom: 8 })
+                .backgroundColor('rgba(18,18,18,0.68)')
+                .borderRadius(8)
+                .position({ x: '4%', y: 68 })
+                .onAreaChange((_oldValue: Area, newValue: Area) => {
+                    this.controlsX = Number(newValue.position.x)
+                    this.controlsY = Number(newValue.position.y)
+                    this.controlsW = Number(newValue.width)
+                    this.controlsH = Number(newValue.height)
+                })
             }
-            .width('92%')
-            .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-            .backgroundColor('rgba(18,18,18,0.58)')
-            .borderRadius(8)
-            .position({ x: '4%', y: this.showSettings ? '55%' : '72%' })
 
             if (this.showSettings) {
                 Column() {
@@ -670,5 +875,8 @@ struct Index {
             }
         }
         .height('100%')
+        .onTouch((event: TouchEvent) => {
+            this.mapAndDispatchTouch(event)
+        })
     }
 }

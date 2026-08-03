@@ -24,9 +24,9 @@ export default class EntryAbility extends UIAbility {
 
         try {
             const mainWindow = windowStage.getMainWindowSync();
-            mainWindow.setPreferredOrientation(window.Orientation.LANDSCAPE);
+            mainWindow.setPreferredOrientation(window.Orientation.PORTRAIT);
         } catch (err) {
-            hilog.warn(DOMAIN, 'testTag', 'Failed to set landscape orientation: %{public}s', JSON.stringify(err));
+            hilog.warn(DOMAIN, 'testTag', 'Failed to set portrait orientation: %{public}s', JSON.stringify(err));
         }
 
         windowStage.loadContent('pages/Index', (err) => {

@@ -28,7 +28,10 @@
 #include <cmath>
 #include <cstdint>
 #include <algorithm>
+#include <condition_variable>
 #include <string>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 #include <unordered_map>
@@ -59,8 +62,8 @@ NativeResourceManager* g_ResourceManager = nullptr;
 float width = 100.0f, height = 100.0f;
 float g_InputViewportWidth = 0.0f, g_InputViewportHeight = 0.0f;
 float currentAngleX = 0.0f, currentAngleY = 0.0f;
-float g_CameraDistance = 3.75f;
-glm::vec3 g_CameraOrbitTarget{0.20f, -0.10f, 1.10f};
+float g_CameraDistance = 5.40f;
+glm::vec3 g_CameraOrbitTarget{0.0f, 0.18f, 1.10f};
 
 Shader* refractionShader = nullptr;
 Shader* backgroundShader = nullptr;
@@ -112,6 +115,12 @@ static bool g_WindEnabled = false;
 static float g_GlobalWindStrength = 0.0f;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static constexpr float kMaxGlobalWindStrength = 0.45f;
+static constexpr float kBurstNeighborImpulseStrength = 0.25f;
+static constexpr int kMobileBurstSimSubsteps = 6;
+static constexpr float kMobileBurstSimTimeStep = 0.003f;
+static bool g_AddPreviewVisible = false;
+static glm::vec3 g_AddPreviewPosition{0.0f};
+static float g_AddPreviewRadius = 0.48f;
 
 static constexpr float kSharedFilmTime = 0.22f;
 static constexpr float kNeckFormationTime = 1.15f;
@@ -161,23 +170,6 @@ static float g_SimPerturb  = 0.16f;
 static bool  g_SimPaused   = false;
 static bool  g_VisualPaused = false;
 static constexpr int kSimFrameInterval = 6;
-static int g_SimFrameCounter = 0;
-
-static std::vector<Vertex> buildVerticesFromSim(const VortexSheetSimulation& sim) {
-    const auto& pos = sim.getPositions();
-    const auto& nrm = sim.getNormals();
-    std::vector<Vertex> verts(pos.size());
-    for (size_t i = 0; i < pos.size(); ++i) {
-        verts[i].Position  = pos[i];
-        verts[i].Normal    = nrm[i];
-        verts[i].TexCoords = glm::vec2(0.0f);
-        verts[i].Tangent   = glm::vec3(0.0f);
-        verts[i].Bitangent = glm::vec3(0.0f);
-        verts[i].FilmDirection = glm::length(pos[i]) > 1e-6f
-            ? glm::normalize(pos[i]) : nrm[i];
-    }
-    return verts;
-}
 
 static float& CurrentThickness() {
     return (g_IridescenceMode == 2) ? g_AiryThickness : g_KimLutThickness;
@@ -205,21 +197,23 @@ bool  g_TouchPressed = false;
 
 static std::unordered_map<uint64_t, std::unique_ptr<VortexSheetSimulation>> g_BubbleSims;
 
-static float Smooth01(float x) {
-    x = glm::clamp(x, 0.0f, 1.0f);
-    return x * x * (3.0f - 2.0f * x);
-}
+struct BurstSimSnapshot {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    uint64_t version = 0;
+};
 
-static float PairHash01(uint64_t a, uint64_t b) {
-    if (a > b) std::swap(a, b);
-    uint64_t x = a * 0x9E3779B185EBCA87ull ^ b * 0xC2B2AE3D27D4EB4Full;
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdull;
-    x ^= x >> 33;
-    return static_cast<float>(x & 0x00ffffffu) / static_cast<float>(0x01000000u);
-}
+static std::mutex g_BurstSimMutex;
+static std::condition_variable g_BurstSimCondition;
+static std::thread g_BurstSimThread;
+static bool g_BurstSimStop = false;
+static bool g_BurstSimWorkPending = false;
+static bool g_BurstSimWorkerBusy = false;
+static std::vector<uint64_t> g_BurstSimRequestedIds;
+static std::unordered_map<uint64_t, BurstSimSnapshot> g_BurstSimSnapshots;
+static std::unordered_map<uint64_t, uint64_t> g_AppliedBurstSnapshotVersions;
 
-static VortexSheetSimulation* InitBubbleSim(uint64_t id) {
+static std::unique_ptr<VortexSheetSimulation> CreateBubbleSim() {
     auto sim = std::make_unique<VortexSheetSimulation>();
     sim->initIcosphere(1.0f, 2, 0.04f);
     sim->timeStep = 0.001f;
@@ -228,7 +222,18 @@ static VortexSheetSimulation* InitBubbleSim(uint64_t id) {
     sim->circulationDiffusion = 0.0008f;
     sim->flipSurfaceTensionSign = true;
     sim->diagnosticsEnabled = false;
+    return sim;
+}
+
+static float Smooth01(float x) {
+    x = glm::clamp(x, 0.0f, 1.0f);
+    return x * x * (3.0f - 2.0f * x);
+}
+
+static VortexSheetSimulation* InitBubbleSim(uint64_t id) {
+    auto sim = CreateBubbleSim();
     VortexSheetSimulation* ptr = sim.get();
+    std::lock_guard<std::mutex> lock(g_BurstSimMutex);
     g_BubbleSims[id] = std::move(sim);
     return ptr;
 }
@@ -269,6 +274,116 @@ static std::vector<unsigned int> BuildIndicesFromSim(const VortexSheetSimulation
         indices.push_back(static_cast<unsigned int>(triangle.z));
     }
     return indices;
+}
+
+static void UpdateMeshFromSnapshot(Mesh* mesh,
+                                   const std::vector<glm::vec3>& positions,
+                                   const std::vector<glm::vec3>& normals) {
+    if (!mesh) return;
+    auto& vertices = mesh->vertices;
+    if (vertices.size() != positions.size()) return;
+    for (size_t i = 0; i < positions.size(); ++i) {
+        vertices[i].Position = positions[i];
+        vertices[i].Normal = normals[i];
+        if (glm::dot(vertices[i].FilmDirection, vertices[i].FilmDirection) < 1e-6f) {
+            vertices[i].FilmDirection = glm::length(positions[i]) > 1e-6f
+                ? glm::normalize(positions[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+        }
+    }
+    mesh->updateVertices(vertices);
+}
+
+static void BurstSimWorkerMain() {
+    std::unique_lock<std::mutex> lock(g_BurstSimMutex);
+    while (true) {
+        g_BurstSimCondition.wait(lock, [] {
+            return g_BurstSimStop || g_BurstSimWorkPending;
+        });
+        if (g_BurstSimStop) break;
+
+        std::vector<uint64_t> ids = std::move(g_BurstSimRequestedIds);
+        g_BurstSimRequestedIds.clear();
+        g_BurstSimWorkPending = false;
+        g_BurstSimWorkerBusy = true;
+
+        for (uint64_t id : ids) {
+            auto found = g_BubbleSims.find(id);
+            if (found == g_BubbleSims.end()) continue;
+            VortexSheetSimulation& sim = *found->second;
+            sim.update(0.0f);
+
+            BurstSimSnapshot& snapshot = g_BurstSimSnapshots[id];
+            snapshot.positions = sim.getPositions();
+            snapshot.normals = sim.getNormals();
+            ++snapshot.version;
+        }
+        g_BurstSimWorkerBusy = false;
+    }
+}
+
+static void StartBurstSimWorker() {
+    if (g_BurstSimThread.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+        g_BurstSimStop = false;
+        g_BurstSimWorkPending = false;
+        g_BurstSimWorkerBusy = false;
+    }
+    g_BurstSimThread = std::thread(BurstSimWorkerMain);
+}
+
+static void StopBurstSimWorker() {
+    if (!g_BurstSimThread.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+        g_BurstSimStop = true;
+        g_BurstSimCondition.notify_all();
+    }
+    g_BurstSimThread.join();
+    std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+    g_BurstSimStop = false;
+    g_BurstSimWorkPending = false;
+    g_BurstSimWorkerBusy = false;
+    g_BurstSimRequestedIds.clear();
+}
+
+static void RequestBubbleSimUpdates() {
+    if (g_SimPaused || g_VisualPaused) return;
+    std::vector<uint64_t> ids;
+    for (const DisplayBubble& bubble : g_DisplayBubbles) {
+        if (bubble.state == DisplayBubble::State::Burst) ids.push_back(bubble.id);
+    }
+    if (ids.empty()) return;
+
+    std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (g_BurstSimStop || g_BurstSimWorkPending || g_BurstSimWorkerBusy) return;
+    g_BurstSimRequestedIds = std::move(ids);
+    g_BurstSimWorkPending = true;
+    g_BurstSimCondition.notify_one();
+}
+
+static void ApplyLatestBurstSnapshot(uint64_t id, Mesh* mesh) {
+    if (!mesh) return;
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    uint64_t version = 0;
+    {
+        std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
+        if (!lock.owns_lock()) return;
+        auto found = g_BurstSimSnapshots.find(id);
+        if (found == g_BurstSimSnapshots.end()) return;
+        version = found->second.version;
+        if (g_AppliedBurstSnapshotVersions[id] >= version) return;
+        positions = found->second.positions;
+        normals = found->second.normals;
+    }
+    UpdateMeshFromSnapshot(mesh, positions, normals);
+    g_AppliedBurstSnapshotVersions[id] = version;
+}
+
+static void RetireBubbleSim(uint64_t id) {
+    g_AppliedBurstSnapshotVersions.erase(id);
 }
 
 static DisplayBubble& AddInteractiveBubble(const glm::vec3& position, float radius,
@@ -312,7 +427,14 @@ static BubbleContactPair& PresetPair(uint64_t a, uint64_t b,
 
 static void ClearInteractiveScene() {
     g_BubbleSurfaces.Clear();
-    g_BubbleSims.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+        g_BubbleSims.clear();
+        g_BurstSimSnapshots.clear();
+        g_BurstSimRequestedIds.clear();
+        g_BurstSimWorkPending = false;
+    }
+    g_AppliedBurstSnapshotVersions.clear();
     g_ContactPairs.clear();
     g_DisplayBubbles.clear();
     g_NextBubbleId = 1;
@@ -323,8 +445,8 @@ static void ResetOpeningScene() {
     ++g_InteractionOutcomeSeed;
     g_InteractionDemoIndex = -1;
     g_InteractionDemoActive = false;
-    g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
-    g_CameraDistance = 3.75f;
+    g_CameraOrbitTarget = glm::vec3(0.0f, 0.18f, 1.10f);
+    g_CameraDistance = 5.40f;
     currentAngleX = 0.0f;
     currentAngleY = 0.0f;
 
@@ -339,12 +461,10 @@ static void ResetOpeningScene() {
         glm::vec3 velocity;
     };
     const BubbleSeed seeds[] = {
-        {{-0.72f, -0.18f, 1.08f}, {-0.30f, -0.10f, 1.09f}, 0.46f, 0.2f, 0.010f, 0.009f, 0.55f, { 0.090f, 0.018f, 0.000f}},
-        {{ 0.68f, -0.16f, 1.12f}, { 0.28f, -0.08f, 1.11f}, 0.43f, 1.7f, 0.010f, 0.009f, 0.58f, {-0.085f, 0.016f, 0.000f}},
-        {{ 0.00f,  0.78f, 1.08f}, { 0.00f,  0.34f, 1.09f}, 0.40f, 2.8f, 0.012f, 0.010f, 0.62f, { 0.000f,-0.082f, 0.003f}},
-        {{ 1.22f,  0.54f, 1.04f}, { 1.36f,  0.54f, 1.05f}, 0.34f, 3.6f, 0.010f, 0.009f, 0.52f, { 0.045f, 0.000f, 0.000f}},
-        {{ 1.90f,  0.56f, 1.06f}, { 1.78f,  0.55f, 1.05f}, 0.22f, 4.4f, 0.011f, 0.010f, 0.68f, {-0.075f, 0.000f, 0.000f}},
-        {{-1.48f,  0.42f, 1.20f}, {-1.38f,  0.36f, 1.18f}, 0.28f, 5.2f, 0.010f, 0.009f, 0.50f, { 0.018f,-0.012f, 0.000f}}
+        {{-0.38f, -0.20f, 1.08f}, {-0.22f, -0.12f, 1.09f}, 0.34f, 0.2f, 0.008f, 0.008f, 0.55f, { 0.050f, 0.014f, 0.000f}},
+        {{ 0.38f, -0.18f, 1.12f}, { 0.22f, -0.10f, 1.11f}, 0.33f, 1.7f, 0.008f, 0.008f, 0.58f, {-0.048f, 0.013f, 0.000f}},
+        {{ 0.00f,  0.62f, 1.08f}, { 0.00f,  0.31f, 1.09f}, 0.32f, 2.8f, 0.009f, 0.009f, 0.62f, { 0.000f,-0.050f, 0.002f}},
+        {{ 0.54f,  1.12f, 1.20f}, { 0.48f,  1.04f, 1.18f}, 0.20f, 5.2f, 0.008f, 0.008f, 0.50f, {-0.010f,-0.010f, 0.000f}}
     };
     g_DisplayBubbles.reserve(sizeof(seeds) / sizeof(seeds[0]));
     for (const BubbleSeed& seed : seeds) {
@@ -357,34 +477,16 @@ static void ResetOpeningScene() {
         bubble.surfaceControls = MakeSurfaceControls(seed.phase);
     }
 
-    DisplayBubble& outerA = g_DisplayBubbles[3];
-    DisplayBubble& outerB = g_DisplayBubbles[4];
-    float outerFilmRadius = std::min(outerA.radius, outerB.radius) * 0.24f;
-    BubbleContactPair outerFusion;
-    outerFusion.a = outerA.id;
-    outerFusion.b = outerB.id;
-    outerFusion.filmThickness = 1.0f;
-    outerFusion.restDistance =
-        std::sqrt(outerA.radius * outerA.radius - outerFilmRadius * outerFilmRadius) +
-        std::sqrt(outerB.radius * outerB.radius - outerFilmRadius * outerFilmRadius);
-    outerFusion.neckRadius = std::min(outerA.radius, outerB.radius) * 0.05f;
-    outerFusion.targetVolume = outerA.targetVolume + outerB.targetVolume;
-    outerFusion.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
-    outerFusion.coalescenceScore = 1.0f;
-    outerFusion.active = true;
-    outerFusion.persistentRenderPair = true;
-    g_ContactPairs.push_back(outerFusion);
-
     g_RenderOnlyBubbles = {
-        {{-1.72f, -0.72f, 0.92f}, 0.12f, 0.3f, 0.42f, 0.035f, 0.70f},
-        {{-1.35f,  0.92f, 1.34f}, 0.09f, 1.2f, 0.56f, 0.030f, 0.66f},
-        {{-0.84f, -0.96f, 1.28f}, 0.07f, 2.1f, 0.62f, 0.026f, 0.62f},
-        {{-0.28f,  1.12f, 0.82f}, 0.11f, 2.8f, 0.48f, 0.034f, 0.68f},
-        {{ 0.52f, -1.02f, 1.18f}, 0.08f, 3.7f, 0.66f, 0.028f, 0.64f},
-        {{ 0.98f,  0.96f, 0.88f}, 0.13f, 4.5f, 0.44f, 0.038f, 0.72f},
-        {{ 1.48f, -0.70f, 1.38f}, 0.10f, 5.4f, 0.58f, 0.032f, 0.67f},
-        {{ 1.84f,  0.18f, 0.96f}, 0.07f, 6.1f, 0.70f, 0.024f, 0.60f},
-        {{ 0.14f,  1.34f, 1.42f}, 0.06f, 6.8f, 0.74f, 0.022f, 0.58f}
+        {{-0.68f, -0.92f, 0.92f}, 0.09f, 0.3f, 0.30f, 0.030f, 0.70f},
+        {{-0.62f,  0.48f, 1.34f}, 0.07f, 1.2f, 0.34f, 0.026f, 0.66f},
+        {{-0.40f, -1.18f, 1.28f}, 0.06f, 2.1f, 0.36f, 0.022f, 0.62f},
+        {{-0.18f,  1.52f, 0.82f}, 0.08f, 2.8f, 0.30f, 0.028f, 0.68f},
+        {{ 0.24f, -1.08f, 1.18f}, 0.06f, 3.7f, 0.38f, 0.023f, 0.64f},
+        {{ 0.58f,  1.44f, 0.88f}, 0.09f, 4.5f, 0.28f, 0.030f, 0.72f},
+        {{ 0.66f, -0.68f, 1.38f}, 0.07f, 5.4f, 0.34f, 0.026f, 0.67f},
+        {{ 0.72f,  0.22f, 0.96f}, 0.05f, 6.1f, 0.40f, 0.020f, 0.60f},
+        {{ 0.12f,  1.82f, 1.42f}, 0.05f, 6.8f, 0.42f, 0.018f, 0.58f}
     };
 }
 
@@ -393,8 +495,8 @@ static void CycleInteractionDemo() {
     g_RenderOnlyBubbles.clear();
     g_InteractionDemoIndex = (g_InteractionDemoIndex + 1) % 3;
     g_InteractionDemoActive = true;
-    g_CameraOrbitTarget = glm::vec3(0.0f, 0.0f, 1.10f);
-    g_CameraDistance = 2.75f;
+    g_CameraOrbitTarget = glm::vec3(0.0f, 0.12f, 1.10f);
+    g_CameraDistance = 5.60f;
     currentAngleX = 0.0f;
     currentAngleY = 0.0f;
 
@@ -437,183 +539,14 @@ static void CycleInteractionDemo() {
     pair.targetVolume = a.targetVolume + b.targetVolume;
 }
 
-static void DecidePairOutcome(BubbleContactPair& pair,
-                              const DisplayBubble& a, const DisplayBubble& b) {
-    if (pair.outcome != BubbleContactPair::CoalescenceOutcome::Undecided) return;
-    float ratio = std::min(a.radius, b.radius) / std::max(a.radius, b.radius);
-    float random = PairHash01(pair.a, pair.b);
-    pair.coalescenceRandom = random;
-    if (random < 0.015f) {
-        pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
-    } else if (ratio >= 0.76f && random < 0.84f) {
-        pair.outcome = BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
-    } else {
-        pair.outcome = BubbleContactPair::CoalescenceOutcome::WillCoalesce;
-    }
-}
-
-static void UpdateContactPair(BubbleContactPair& pair, float dt) {
-    int ai = -1, bi = -1;
-    if (!ResolveContactPairIndices(g_DisplayBubbles, pair, ai, bi)) return;
-    DisplayBubble& a = g_DisplayBubbles[static_cast<size_t>(ai)];
-    DisplayBubble& b = g_DisplayBubbles[static_cast<size_t>(bi)];
-    if (a.state == DisplayBubble::State::Dead || b.state == DisplayBubble::State::Dead ||
-        a.state == DisplayBubble::State::Burst || b.state == DisplayBubble::State::Burst) {
-        pair.active = false;
-        return;
-    }
-
-    glm::vec3 delta = b.position - a.position;
-    float distance = glm::length(delta);
-    if (distance < 1e-5f) delta = glm::vec3(1.0f, 0.0f, 0.0f);
-    glm::vec3 normal = glm::normalize(delta);
-    float minRadius = std::min(a.radius, b.radius);
-    float contactDistance = a.radius + b.radius;
-    bool touching = distance <= contactDistance + minRadius * 0.10f || pair.bonded;
-    if (!touching) {
-        pair.active = false;
-        pair.contactActivation *= std::exp(-dt * 7.0f);
-        if (pair.candidate) {
-            float releaseDistance = contactDistance + minRadius * 0.16f;
-            if (distance > releaseDistance) {
-                pair.candidateExitTime += dt;
-                if (pair.candidateExitTime > 0.28f) {
-                    pair.candidate = false;
-                    pair.candidateExitTime = 0.0f;
-                }
-            } else {
-                pair.candidateExitTime = 0.0f;
-            }
-        }
-        return;
-    }
-
-    pair.active = true;
-    pair.candidate = true;
-    pair.candidateExitTime = 0.0f;
-    pair.contactTime += dt;
-    pair.contactActivation = std::min(1.0f, pair.contactActivation + dt * 3.5f);
-    pair.filteredNormal = normal;
-    pair.filteredPlaneCenter = a.position + normal * a.radius * 0.83f;
-    pair.contactFrameInitialized = true;
-    DecidePairOutcome(pair, a, b);
-
-    float filmGrowth = Smooth01(pair.contactTime / 0.75f);
-    pair.contactRadius = minRadius * 0.52f * filmGrowth;
-    pair.bridgeStrength = filmGrowth;
-    pair.geometryBlend = filmGrowth;
-    pair.filmThickness = glm::mix(1.0f, 0.34f, filmGrowth);
-    pair.bonded = pair.contactTime >= 0.24f &&
-        pair.outcome != BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
-
-    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::SeparateAfterContact &&
-        pair.contactTime > 0.72f) {
-        if (!pair.separationImpulseApplied) {
-            a.velocity -= normal * 0.11f;
-            b.velocity += normal * 0.11f;
-            pair.separationImpulseApplied = true;
-        }
-        pair.state = BubbleContactPair::State::Separated;
-        pair.candidate = pair.contactTime < 1.25f;
-        pair.persistentRenderPair = pair.contactTime < 1.45f;
-        pair.contactActivation *= std::exp(-dt * 3.4f);
-        a.state = b.state = DisplayBubble::State::Separated;
-        return;
-    }
-
-    if (pair.bonded) {
-        float contactRatio = pair.contactRadius / std::max(minRadius, 0.001f);
-        float offsetA = std::sqrt(std::max(a.radius * a.radius - pair.contactRadius * pair.contactRadius, 0.0f));
-        float offsetB = std::sqrt(std::max(b.radius * b.radius - pair.contactRadius * pair.contactRadius, 0.0f));
-        float targetDistance = offsetA + offsetB;
-        float error = distance - targetDistance;
-        float relativeSpeed = glm::dot(b.velocity - a.velocity, normal);
-        float impulse = error * 5.5f + relativeSpeed * 1.8f;
-        a.velocity += normal * impulse * dt;
-        b.velocity -= normal * impulse * dt;
-        pair.restDistance = targetDistance;
-        pair.interactionCompression = contactRatio;
-    }
-
-    if (pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce && pair.contactTime > 0.72f) {
-        pair.fusionActive = true;
-        pair.fusionElapsed += dt;
-        pair.ruptureProgress = Smooth01(pair.fusionElapsed / 0.30f);
-        pair.neckProgress = Smooth01((pair.fusionElapsed - 0.12f) / 0.95f);
-        pair.relaxationProgress = Smooth01((pair.fusionElapsed - 0.62f) / 1.45f);
-        pair.fusionComplete = pair.relaxationProgress > 0.999f;
-        pair.state = pair.relaxationProgress > 0.02f
-            ? BubbleContactPair::State::Merged : BubbleContactPair::State::NeckForming;
-        pair.neckRadius = minRadius * glm::mix(0.04f, 0.80f, pair.neckProgress);
-        pair.filmThickness = glm::mix(0.34f, 0.08f, pair.ruptureProgress);
-        glm::vec3 center = (a.position * BubbleMass(a) + b.position * BubbleMass(b)) /
-                           std::max(BubbleMass(a) + BubbleMass(b), 0.001f);
-        glm::vec3 meanVelocity = (a.velocity + b.velocity) * 0.5f;
-        float halfDistance = glm::mix(distance * 0.5f, 0.0f, pair.relaxationProgress);
-        a.position = center - normal * halfDistance;
-        b.position = center + normal * halfDistance;
-        a.velocity = b.velocity = meanVelocity;
-        a.state = b.state = DisplayBubble::State::Merged;
-    } else {
-        pair.state = pair.contactTime < 0.34f
-            ? BubbleContactPair::State::Touch : BubbleContactPair::State::SharedFilm;
-        a.state = b.state = pair.state == BubbleContactPair::State::Touch
-            ? DisplayBubble::State::Touch : DisplayBubble::State::SharedFilm;
-    }
-    a.contactStrength = b.contactStrength = pair.contactActivation;
-    a.filmThickness = b.filmThickness = pair.filmThickness;
-    a.contactAxis = normal;
-    b.contactAxis = -normal;
-}
-
-static void UpdateInteractiveBubbles(float dt) {
-    if (g_SimPaused || g_VisualPaused) return;
-    dt = glm::clamp(dt, 0.0f, 1.0f / 30.0f);
-
-    for (DisplayBubble& bubble : g_DisplayBubbles) {
-        if (bubble.state == DisplayBubble::State::Dead) continue;
-        if (bubble.state == DisplayBubble::State::Burst) {
-            bubble.burstElapsed += dt;
-            bubble.alpha = 1.0f - Smooth01(bubble.burstElapsed / bubble.burstDuration);
-            bubble.burstScale = 1.0f + 0.06f * sinf(Smooth01(bubble.burstElapsed / bubble.burstDuration) * kPi);
-            auto found = g_BubbleSims.find(bubble.id);
-            if (found != g_BubbleSims.end()) found->second->update(dt);
-            if (bubble.burstElapsed >= bubble.burstDuration) bubble.state = DisplayBubble::State::Dead;
-            continue;
-        }
-
-        float phaseTime = static_cast<float>(g_Time) * bubble.speed + bubble.phase;
-        glm::vec3 randomAcceleration(
-            sinf(phaseTime * 0.73f),
-            cosf(phaseTime * 0.59f + 1.3f),
-            sinf(phaseTime * 0.47f + 2.1f));
-        randomAcceleration *= 0.018f;
-        glm::vec3 returnForce = (bubble.basePosition - bubble.position) * 0.035f;
-        glm::vec3 wind = g_WindEnabled ? g_GlobalWindDirection * g_GlobalWindStrength : glm::vec3(0.0f);
-        bubble.velocity += (randomAcceleration + returnForce + wind) * dt;
-        bubble.velocity *= std::exp(-dt * 0.55f);
-        bubble.position += bubble.velocity * dt;
-    }
-
-    for (const auto& broadPair : BuildBubbleBroadPhasePairs(g_DisplayBubbles)) {
-        const DisplayBubble& a = g_DisplayBubbles[static_cast<size_t>(broadPair.first)];
-        const DisplayBubble& b = g_DisplayBubbles[static_cast<size_t>(broadPair.second)];
-        float triggerDistance = a.radius + b.radius + std::min(a.radius, b.radius) * 0.08f;
-        if (glm::length(b.position - a.position) <= triggerDistance) {
-            int pairIndex = EnsureContactPairById(g_ContactPairs, a.id, b.id);
-            g_ContactPairs[static_cast<size_t>(pairIndex)].candidate = true;
-        }
-    }
-    for (BubbleContactPair& pair : g_ContactPairs) UpdateContactPair(pair, dt);
-}
-
 #include "simulation/windows_interaction_port.inc"
 
 static bool RaySphereHit(const glm::vec3& origin, const glm::vec3& direction,
                          const DisplayBubble& bubble, float& distance) {
     glm::vec3 oc = origin - bubble.position;
     float b = glm::dot(oc, direction);
-    float c = glm::dot(oc, oc) - bubble.radius * bubble.radius;
+    float pickRadius = bubble.radius * 1.32f + 0.06f;
+    float c = glm::dot(oc, oc) - pickRadius * pickRadius;
     float discriminant = b * b - c;
     if (discriminant < 0.0f) return false;
     float root = std::sqrt(discriminant);
@@ -647,35 +580,86 @@ static bool TriggerBubbleBurst(uint64_t id) {
     if (bubble.state == DisplayBubble::State::Burst || bubble.state == DisplayBubble::State::Dead) return false;
     bubble.state = DisplayBubble::State::Burst;
     bubble.burstElapsed = 0.0f;
-    bubble.burstDuration = 0.38f;
+    bubble.burstDuration = 0.35f;
+    bubble.burstScale = 1.0f;
     bubble.alpha = 1.0f;
-    VortexSheetSimulation* sim = InitBubbleSim(id);
-    glm::vec3 localHoleDirection = glm::normalize(g_camera.getPosition() - bubble.position);
-    sim->punchHole(localHoleDirection, glm::radians(26.0f));
-    sim->surfaceTensionStrength = 120.0f;
-    sim->substepsPerFrame = 12;
-    sim->timeStep = 0.002f;
-    g_BubbleSurfaces.EnsureBubble(id, BuildVerticesFromSim(*sim), BuildIndicesFromSim(*sim));
+    bubble.contactStrength = 0.0f;
+    bubble.surfaceDynamicsBlend = 0.0f;
+
+    std::vector<Vertex> burstVertices;
+    std::vector<unsigned int> burstIndices;
+    {
+        std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+        auto found = g_BubbleSims.find(id);
+        if (found == g_BubbleSims.end()) {
+            found = g_BubbleSims.emplace(id, CreateBubbleSim()).first;
+        }
+        VortexSheetSimulation* sim = found->second.get();
+        sim->initIcosphere(bubble.radius, 2, 0.04f);
+        glm::vec3 holeDirection = glm::normalize(g_camera.getPosition() - bubble.position);
+        sim->punchHole(holeDirection, 0.45f);
+        sim->surfaceTensionStrength = 120.0f;
+        sim->substepsPerFrame = kMobileBurstSimSubsteps;
+        sim->timeStep = kMobileBurstSimTimeStep;
+        sim->circulationDiffusion = 0.0001f;
+        sim->diagnosticsEnabled = false;
+        burstVertices = BuildVerticesFromSim(*sim);
+        burstIndices = BuildIndicesFromSim(*sim);
+        g_BurstSimSnapshots.erase(id);
+        g_AppliedBurstSnapshotVersions.erase(id);
+    }
+    Model* shellModel = g_BubbleSurfaces.FindBubble(id);
+    if (shellModel) {
+        Mesh* mesh = shellModel->getMesh(0);
+        if (mesh) {
+            mesh->updateGeometry(burstVertices, burstIndices);
+        }
+    }
+
     for (BubbleContactPair& pair : g_ContactPairs) {
         if (pair.a == id || pair.b == id) {
-            pair.active = pair.candidate = pair.bonded = pair.fusionActive = false;
+            pair.bonded = false;
+            pair.candidate = false;
+            pair.active = false;
+            pair.contactActivation = 0.0f;
+            pair.bridgeStrength = 0.0f;
+            pair.fusionActive = false;
+            pair.fusionComplete = false;
+            pair.persistentRenderPair = false;
+            pair.contactRadius = 0.0f;
+            pair.contactRadiusVelocity = 0.0f;
+            pair.geometryBlend = 0.0f;
+            pair.interactionCompression = 0.0f;
             g_BubbleSurfaces.RemoveContact(pair.a, pair.b);
         }
     }
+
+    glm::vec3 burstCenter = bubble.position;
+    float impulseRange = bubble.radius * 4.0f;
     for (DisplayBubble& other : g_DisplayBubbles) {
-        if (other.id == id || other.state == DisplayBubble::State::Dead) continue;
-        glm::vec3 delta = other.position - bubble.position;
+        if (other.id == id || other.state == DisplayBubble::State::Burst ||
+            other.state == DisplayBubble::State::Dead) continue;
+        glm::vec3 delta = other.position - burstCenter;
         float distance = glm::length(delta);
-        if (distance > 1e-4f && distance < bubble.radius * 4.0f) {
-            other.velocity += glm::normalize(delta) * (0.16f * (1.0f - distance / (bubble.radius * 4.0f)));
+        if (distance <= 1e-4f || distance > impulseRange) continue;
+        float falloff = 1.0f - distance / impulseRange;
+        glm::vec3 impulseDirection = glm::normalize(delta);
+        other.position += impulseDirection * (0.010f * falloff);
+        other.velocity += impulseDirection *
+                          (kBurstNeighborImpulseStrength * falloff);
+        other.contactStrength = std::max(other.contactStrength, 0.85f * falloff);
+        for (const BubbleContactPair& pair : g_ContactPairs) {
+            if ((pair.a == id && pair.b == other.id) ||
+                (pair.b == id && pair.a == other.id)) {
+                other.radius += 1.15f * falloff * 0.04f;
+                other.contactStrength = std::max(other.contactStrength, 1.0f);
+                break;
+            }
         }
     }
+    g_InteractionDemoActive = false;
+    g_ShowMainBubble = false;
     return true;
-}
-
-static glm::mat4 BubbleModelMatrix(const DisplayBubble& bubble) {
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), bubble.position);
-    return glm::scale(model, glm::vec3(bubble.radius * bubble.burstScale));
 }
 
 static glm::mat4 AxisXModel(const glm::vec3& center, const glm::vec3& axis) {
@@ -837,6 +821,7 @@ static napi_value MakeBool(napi_env env, bool value) {
 }
 
 static void ReleaseGraphicsResources() {
+    StopBurstSimWorker();
     delete g_RefractModel;
     delete g_DecorativeBubbleModel;
     delete g_SkyboxModel;
@@ -1148,6 +1133,7 @@ static napi_value InitGraphics(napi_env env, napi_callback_info info) {
 
     InitFBO(surfW, surfH);
     InitFullscreenQuad();
+    StartBurstSimWorker();
     OH_LOG_INFO(LOG_APP, "FBO size = %{public}dx%{public}d, renderScale = %{public}.2f, display bubbles = %{public}zu, sim substeps = %{public}d, sim interval = %{public}d",
         g_FBOWidth, g_FBOHeight, kRenderScale, g_DisplayBubbles.size(),
         g_Sim.substepsPerFrame, kSimFrameInterval);
@@ -1397,10 +1383,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
 
             Model* modelToDraw = g_BubbleSurfaces.FindBubble(bubble.id);
             if (bubble.state == DisplayBubble::State::Burst) {
-                VortexSheetSimulation* sim = GetBubbleSim(bubble.id);
-                if (sim && modelToDraw) {
+                if (modelToDraw && !interactiveMeshesUpdated) {
                     Mesh* mesh = modelToDraw->getMesh(0);
-                    if (mesh) mesh->updateVertices(BuildVerticesFromSim(*sim));
+                    if (mesh) ApplyLatestBurstSnapshot(bubble.id, mesh);
                 }
                 refractionShader->SetInt("uVisualContactCount", 0);
             } else if (modelToDraw && !bubble.volumeTransferred && !interactiveMeshesUpdated) {
@@ -1416,6 +1401,15 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             }
             if (!modelToDraw) modelToDraw = g_DecorativeBubbleModel;
             if (modelToDraw) modelToDraw->Draw(*refractionShader);
+        }
+
+        if (g_AddPreviewVisible && !isBackFace && g_DecorativeBubbleModel) {
+            glm::mat4 previewModel = glm::translate(glm::mat4(1.0f), g_AddPreviewPosition);
+            previewModel = glm::scale(previewModel, glm::vec3(g_AddPreviewRadius));
+            SetRefractUniforms(previewModel, g_AddPreviewRadius, false, renderToFBO,
+                               false, 0.0f, g_IridescenceMode, 0.34f);
+            refractionShader->SetInt("uVisualContactCount", 0);
+            g_DecorativeBubbleModel->Draw(*refractionShader);
         }
         interactiveMeshesUpdated = true;
 
@@ -1643,6 +1637,11 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     glEnable(GL_DEPTH_TEST);
 
     eglSwapBuffers(display, surface);
+    if (!g_VisualPaused) {
+        // Present contact and shock-wave motion first; prepare the next burst
+        // membrane state afterward so DBSTT cannot delay visible feedback.
+        RequestBubbleSimUpdates();
+    }
     return MakeBool(env, true);
 }
 
@@ -1815,12 +1814,32 @@ static napi_value RotateCamera(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+static napi_value ResetCameraViewApi(napi_env env, napi_callback_info info) {
+    currentAngleX = 0.0f;
+    currentAngleY = 0.0f;
+    g_CameraDistance = g_InteractionDemoActive ? 5.60f : 5.40f;
+    napi_value result;
+    napi_create_double(env, g_CameraDistance, &result);
+    return result;
+}
+
 static void MapLogicalPointToSurface(float& x, float& y) {
     if (g_InputViewportWidth > 1e-3f && g_InputViewportHeight > 1e-3f &&
         width > 1e-3f && height > 1e-3f) {
         x *= width / g_InputViewportWidth;
         y *= height / g_InputViewportHeight;
     }
+}
+
+static glm::vec3 SpawnPositionFromSurfacePoint(float x, float y, float depth) {
+    glm::vec3 origin = g_camera.getPosition();
+    glm::vec3 direction = g_camera.getRayDirectionFromScreen(x, y);
+    float denominator = direction.z;
+    float t = std::abs(denominator) > 1e-5f
+        ? (depth - origin.z) / denominator
+        : g_CameraDistance;
+    if (t < 0.25f) t = g_CameraDistance;
+    return origin + direction * t;
 }
 
 static napi_value ResetOpeningSceneApi(napi_env env, napi_callback_info info) {
@@ -1858,19 +1877,36 @@ static napi_value AddBubbleAtScreenApi(napi_env env, napi_callback_info info) {
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
     MapLogicalPointToSurface(fx, fy);
-    glm::vec3 origin = g_camera.getPosition();
-    glm::vec3 direction = g_camera.getRayDirectionFromScreen(fx, fy);
-    float denominator = direction.z;
-    float t = std::abs(denominator) > 1e-5f
-        ? (static_cast<float>(depth) - origin.z) / denominator
-        : g_CameraDistance;
-    if (t < 0.25f) t = g_CameraDistance;
-    glm::vec3 position = origin + direction * t;
+    glm::vec3 position = SpawnPositionFromSurfacePoint(
+        fx, fy, static_cast<float>(depth));
     if (g_DisplayBubbles.size() >= 24) {
         return MakeBool(env, false);
     }
     AddInteractiveBubble(position, glm::clamp(static_cast<float>(radius), 0.16f, 1.10f));
     return MakeBool(env, true);
+}
+
+static napi_value SetAddPreviewApi(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value args[5];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double x = 0.0, y = 0.0, radius = 0.48, depth = 0.0;
+    bool visible = false;
+    if (argc >= 1) napi_get_value_double(env, args[0], &x);
+    if (argc >= 2) napi_get_value_double(env, args[1], &y);
+    if (argc >= 3) napi_get_value_double(env, args[2], &radius);
+    if (argc >= 4) napi_get_value_double(env, args[3], &depth);
+    if (argc >= 5) napi_get_value_bool(env, args[4], &visible);
+    g_AddPreviewVisible = visible;
+    if (visible) {
+        float fx = static_cast<float>(x);
+        float fy = static_cast<float>(y);
+        MapLogicalPointToSurface(fx, fy);
+        g_AddPreviewPosition = SpawnPositionFromSurfacePoint(
+            fx, fy, static_cast<float>(depth));
+        g_AddPreviewRadius = glm::clamp(static_cast<float>(radius), 0.16f, 1.10f);
+    }
+    return nullptr;
 }
 
 static napi_value BurstBubbleAtScreenApi(napi_env env, napi_callback_info info) {
@@ -1886,11 +1922,23 @@ static napi_value BurstBubbleAtScreenApi(napi_env env, napi_callback_info info) 
     return MakeBool(env, TriggerBubbleBurst(PickBubble(fx, fy)));
 }
 
+static napi_value HasBubbleAtScreenApi(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double x = 0.0, y = 0.0;
+    if (argc >= 1) napi_get_value_double(env, args[0], &x);
+    if (argc >= 2) napi_get_value_double(env, args[1], &y);
+    float fx = static_cast<float>(x);
+    float fy = static_cast<float>(y);
+    MapLogicalPointToSurface(fx, fy);
+    return MakeBool(env, PickBubble(fx, fy) != 0);
+}
+
 static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_Sim.initIcosphere(g_BubbleRadius, g_SimSubdivs, g_SimPerturb);
     g_Sim.timeStep = 0.001f;
     g_Sim.substepsPerFrame = 1;
-    g_SimFrameCounter = 0;
     g_SimPaused = false;
     g_VisualPaused = false;
     g_Sim.surfaceTensionStrength = 15.0f;
@@ -1902,8 +1950,8 @@ static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_RefractionStrength = 0.35f;
     g_EdgeDistortionBoost = 2.2f;
     g_EnvironmentReflectionStrength = 0.65f;
-    g_CameraDistance = 3.75f;
-    g_CameraOrbitTarget = glm::vec3(0.20f, -0.10f, 1.10f);
+    g_CameraDistance = 5.40f;
+    g_CameraOrbitTarget = glm::vec3(0.0f, 0.18f, 1.10f);
     ResetOpeningScene();
     return nullptr;
 }
@@ -1927,6 +1975,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "setRefractionStrength", nullptr, SetRefractionStrength, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "resetSimulation", nullptr, ResetSimulation, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "rotateCamera", nullptr, RotateCamera, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "resetCameraView", nullptr, ResetCameraViewApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setFresnelPower", nullptr, SetFresnelPower, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setEdgeDistortionBoost", nullptr, SetEdgeDistortionBoost, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setMaxOffsetRatio", nullptr, SetMaxOffsetRatio, nullptr, nullptr, nullptr, napi_default, nullptr },
@@ -1939,7 +1988,9 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "cycleInteractionDemo", nullptr, CycleInteractionDemoApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setWindStrength", nullptr, SetWindStrengthApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "addBubbleAtScreen", nullptr, AddBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setAddPreview", nullptr, SetAddPreviewApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "burstBubbleAtScreen", nullptr, BurstBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "hasBubbleAtScreen", nullptr, HasBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

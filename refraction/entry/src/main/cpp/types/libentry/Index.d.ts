@@ -22,6 +22,8 @@ declare namespace libentry {
     function resetSimulation(): void;
 
     function rotateCamera(dx: number, dy: number): void;
+    /** Restore the current scene's default camera without resetting bubbles. */
+    function resetCameraView(): number;
 
     /** Fresnel edge power (0.5 – 20, default 8). */
     function setFresnelPower(val: number): void;
@@ -31,7 +33,7 @@ declare namespace libentry {
     function setMaxOffsetRatio(val: number): void;
     /** Environment reflection strength (0.0 – 1.5, default 0.65). */
     function setEnvironmentReflectionStrength(val: number): void;
-    /** Camera orbit distance (2.0-20, opening default 3.75). */
+    /** Camera orbit distance (2.0-20, portrait opening default 5.40). */
     function setCameraDistance(val: number): void;
 
     /** Pause / resume the DBSTT simulation. */
@@ -47,6 +49,8 @@ declare namespace libentry {
     function cycleInteractionDemo(): number;
     function setWindStrength(val: number): void;
     function addBubbleAtScreen(x: number, y: number, radius: number, depth: number): boolean;
+    function setAddPreview(x: number, y: number, radius: number, depth: number, visible: boolean): void;
     function burstBubbleAtScreen(x: number, y: number): boolean;
+    function hasBubbleAtScreen(x: number, y: number): boolean;
 }
 export default libentry;
