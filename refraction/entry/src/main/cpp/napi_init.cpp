@@ -102,6 +102,7 @@ static std::vector<BubbleContactPair> g_ContactPairs;
 static BubbleSurfaceSystem g_BubbleSurfaces;
 static uint64_t g_NextBubbleId = 1;
 static uint64_t g_InteractionOutcomeSeed = 0;
+static uint64_t g_ContactOutcomeSequence = 0;
 static int g_InteractionDemoIndex = -1;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = false;
@@ -116,8 +117,9 @@ static float g_GlobalWindStrength = 0.0f;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static constexpr float kMaxGlobalWindStrength = 0.45f;
 static constexpr float kBurstNeighborImpulseStrength = 0.25f;
-static constexpr int kMobileBurstSimSubsteps = 6;
-static constexpr float kMobileBurstSimTimeStep = 0.003f;
+static constexpr float kBurstNeighborImmediateDisplacement = 0.032f;
+static constexpr int kMobileBurstSimSubsteps = 12;
+static constexpr float kMobileBurstSimTimeStep = 0.002f;
 static bool g_AddPreviewVisible = false;
 static glm::vec3 g_AddPreviewPosition{0.0f};
 static float g_AddPreviewRadius = 0.48f;
@@ -644,7 +646,8 @@ static bool TriggerBubbleBurst(uint64_t id) {
         if (distance <= 1e-4f || distance > impulseRange) continue;
         float falloff = 1.0f - distance / impulseRange;
         glm::vec3 impulseDirection = glm::normalize(delta);
-        other.position += impulseDirection * (0.010f * falloff);
+        other.position += impulseDirection *
+                          (kBurstNeighborImmediateDisplacement * falloff);
         other.velocity += impulseDirection *
                           (kBurstNeighborImpulseStrength * falloff);
         other.contactStrength = std::max(other.contactStrength, 0.85f * falloff);

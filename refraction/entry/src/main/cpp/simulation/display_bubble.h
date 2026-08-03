@@ -95,6 +95,7 @@ struct BubbleContactPair {
     float ruptureRisk = 0.0f;
     float coalescenceScore = 0.0f;
     float coalescenceRandom = 0.0f;
+    bool outcomeRandomSampled = false;
     float fusionElapsed = 0.0f;
     float ruptureProgress = 0.0f;
     float neckProgress = 0.0f;

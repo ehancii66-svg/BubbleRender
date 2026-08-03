@@ -224,6 +224,7 @@ struct RenderOnlyBubble
 static std::vector<RenderOnlyBubble> g_RenderOnlyBubbles;
 static uint64_t g_NextBubbleId = 1;
 static uint64_t g_InteractionOutcomeSeed = 0;
+static uint64_t g_ContactOutcomeSequence = 0;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = true;
 static BubbleSurfaceSystem g_BubbleSurfaces;
@@ -376,11 +377,10 @@ static void UpdateTransportedFusionFrame(BubbleContactPair &pair,
     pair.fusionSide = side;
 }
 
-static float PairHash01(uint64_t a, uint64_t b, uint64_t sceneSeed)
+static float NextContactOutcomeRandom01()
 {
-    uint64_t x = a * 0x9E3779B97F4A7C15ull ^
-                 b * 0xBF58476D1CE4E5B9ull ^
-                 sceneSeed * 0xD6E8FEB86659FD93ull;
+    uint64_t x = (++g_ContactOutcomeSequence) * 0x9E3779B97F4A7C15ull ^
+                 g_InteractionOutcomeSeed * 0xD6E8FEB86659FD93ull;
     x ^= x >> 30;
     x *= 0xBF58476D1CE4E5B9ull;
     x ^= x >> 27;
@@ -779,11 +779,11 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
                                 : 0.0f;
 
     float separationProbability = glm::clamp(
-        0.02f +
-            (1.0f - contactSize) * 0.03f +
-            impact * 0.02f +
-            windInstability * 0.01f,
-        0.02f, 0.08f);
+        0.005f +
+            (1.0f - contactSize) * 0.010f +
+            impact * 0.005f +
+            windInstability * 0.0025f,
+        0.005f, 0.025f);
     float fusionProbability = glm::clamp(
         0.14f +
             sizeMismatch * 0.68f +
@@ -799,8 +799,11 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
         fusionProbability *= scale;
     }
     pair.coalescenceScore = fusionProbability;
-    pair.coalescenceRandom = PairHash01(
-        pair.a, pair.b, g_InteractionOutcomeSeed);
+    if (!pair.outcomeRandomSampled)
+    {
+        pair.coalescenceRandom = NextContactOutcomeRandom01();
+        pair.outcomeRandomSampled = true;
+    }
     if (pair.coalescenceRandom < separationProbability)
     {
         pair.outcome = BubbleContactPair::CoalescenceOutcome::SeparateAfterContact;
@@ -2434,6 +2437,15 @@ static void UpdateDisplayBubbleInteractions(float dt)
                 continue;
             }
             BubbleContactPair &pair = g_ContactPairs[(size_t)pairIndex];
+            if (pair.outcome == BubbleContactPair::CoalescenceOutcome::Undecided &&
+                !pair.outcomeRandomSampled)
+            {
+                // Sample once when this pair first enters the contact zone.
+                // The stored value survives brief bounce/re-contact cycles and
+                // is discarded only when the contact pair itself expires.
+                pair.coalescenceRandom = NextContactOutcomeRandom01();
+                pair.outcomeRandomSampled = true;
+            }
             pair.active = true;
             pair.candidate = true;
             pair.candidateExitTime = 0.0f;
