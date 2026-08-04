@@ -407,7 +407,13 @@ static const char *CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome 
 
 static float FusionSurfaceVisibility(const BubbleContactPair &pair)
 {
-    return pair.fusionActive ? 1.0f : 0.0f;
+    if (!pair.fusionActive)
+    {
+        return 0.0f;
+    }
+
+    return Smooth01(pair.fusionElapsed /
+                    std::max(kContactVisualTransitionTime, 0.001f));
 }
 
 static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)
@@ -3104,6 +3110,7 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
         g_RefractionShader->SetFloat("uOutputAlpha", outputAlpha);
+        g_RefractionShader->SetFloat("uOpticalNormalBlend", 0.0f);
         glm::vec2 touchPoint = glm::vec2(-10.0f, -10.0f);
         float touchStrength = 0.0f;
         float touchVelocity = 0.0f;
@@ -3526,6 +3533,9 @@ static void RenderFrame()
             SetRefractUniforms(fusionModel, refractionRadius,
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
+            g_RefractionShader->SetFloat(
+                "uOpticalNormalBlend",
+                1.0f - Smooth01(pair.relaxationProgress));
             g_RefractionShader->SetInt("uVisualContactCount", 0);
             fusionSurface->Draw(*g_RefractionShader);
         }

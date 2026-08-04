@@ -107,7 +107,13 @@ static const char *CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome 
 
 static float FusionSurfaceVisibility(const BubbleContactPair &pair)
 {
-    return pair.fusionActive ? 1.0f : 0.0f;
+    if (!pair.fusionActive)
+    {
+        return 0.0f;
+    }
+
+    return Smooth01(pair.fusionElapsed /
+                    std::max(kContactVisualTransitionTime, 0.001f));
 }
 
 static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)

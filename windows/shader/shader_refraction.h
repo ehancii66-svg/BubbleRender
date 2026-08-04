@@ -120,6 +120,7 @@ uniform samplerCube uEnvironmentMap;
 uniform sampler2D uThinFilmLUT;
 uniform float uEnvironmentReflectionStrength;
 uniform float uOutputAlpha;
+uniform float uOpticalNormalBlend;
 
 uniform float uThickness;       // film thickness d (nm)
 uniform float uThicknessVar;    // thickness variation amplitude (nm)
@@ -404,7 +405,15 @@ R"(
 void main() {
     float iorRatio = 1.0 / 1.33;
 
-    vec3 normal = normalize(vWorldNormal);
+    vec3 geometricNormal = normalize(vWorldNormal);
+    float filmDirectionLengthSquared = dot(vFilmDirection, vFilmDirection);
+    vec3 filmDir = filmDirectionLengthSquared > 1e-10
+        ? vFilmDirection * inversesqrt(filmDirectionLengthSquared)
+        : geometricNormal;
+    vec3 blendedNormal = mix(geometricNormal, filmDir, clamp(uOpticalNormalBlend, 0.0, 1.0));
+    vec3 normal = dot(blendedNormal, blendedNormal) > 1e-10
+        ? normalize(blendedNormal)
+        : geometricNormal;
     if (uIsBackFace == 1) {
         normal = -normal;
     }
@@ -421,10 +430,6 @@ void main() {
 
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
-    float filmDirectionLengthSquared = dot(vFilmDirection, vFilmDirection);
-    vec3 filmDir = filmDirectionLengthSquared > 1e-10
-        ? vFilmDirection * inversesqrt(filmDirectionLengthSquared)
-        : normalize(vWorldNormal);
     float flowSpeed = 1.45;
     vec3 slowFlow = vec3(uTime * 0.10, -uTime * 0.20, uTime * 0.08) * flowSpeed;
     vec3 warp = vec3(

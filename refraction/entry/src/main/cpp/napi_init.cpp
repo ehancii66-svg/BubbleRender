@@ -1271,6 +1271,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         refractionShader->SetFloat("uTime", (float)g_Time);
         refractionShader->SetFloat("uOutputAlpha", outputAlpha);
+        refractionShader->SetFloat("uOpticalNormalBlend", 0.0f);
         refractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
         refractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
         refractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
@@ -1500,6 +1501,9 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                                    false, 0.0f, g_IridescenceMode,
                                    (g_InteractionDemoActive ? 0.62f : 0.72f) *
                                    std::max(a.alpha, b.alpha) * fusionVisibility);
+                refractionShader->SetFloat(
+                    "uOpticalNormalBlend",
+                    1.0f - windows_parity::Smooth01(pair.relaxationProgress));
                 refractionShader->SetInt("uVisualContactCount", 0);
                 refractionShader->SetInt("uForceSharedFilm", 0);
                 if (fusionModel) fusionModel->Draw(*refractionShader);
