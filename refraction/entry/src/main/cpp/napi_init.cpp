@@ -118,7 +118,8 @@ static bool g_WindEnabled = false;
 static float g_GlobalWindStrength = 0.0f;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static constexpr float kMaxGlobalWindStrength = 0.45f;
-static constexpr float kBurstNeighborImpulseStrength = 0.0f;
+static constexpr float kBurstAmbientImpulseStrength = 0.028f;
+static constexpr float kBurstAmbientReachScale = 2.2f;
 static constexpr float kBurstNeighborImmediateDisplacement = 0.045f;
 static constexpr int kMobileBurstSimSubsteps = 12;
 static constexpr float kMobileBurstSimTimeStep = 0.002f;
@@ -753,11 +754,28 @@ static bool TriggerBubbleBurst(uint64_t id) {
     for (DisplayBubble& other : g_DisplayBubbles) {
         if (other.id == id || other.state == DisplayBubble::State::Burst ||
             other.state == DisplayBubble::State::Dead) continue;
-        if (contactPartnerIds.find(other.id) == contactPartnerIds.end()) continue;
 
         glm::vec3 delta = other.position - burstCenter;
         float distance = glm::length(delta);
         if (distance <= 1e-4f) continue;
+
+        glm::vec3 impulseDirection = delta / distance;
+        float mobility = glm::clamp(
+            std::pow(bubble.radius / std::max(other.radius, 0.08f), 1.25f),
+            0.35f, 1.35f);
+        float surfaceGap = std::max(
+            distance - bubble.radius - other.radius, 0.0f);
+        float ambientReach = std::max(
+            bubble.radius * kBurstAmbientReachScale, 0.20f);
+        if (surfaceGap < ambientReach) {
+            float ambientFalloff = Smooth01(
+                1.0f - surfaceGap / ambientReach);
+            ambientFalloff *= ambientFalloff;
+            other.velocity += impulseDirection *
+                (kBurstAmbientImpulseStrength * ambientFalloff * mobility);
+        }
+
+        if (contactPartnerIds.find(other.id) == contactPartnerIds.end()) continue;
 
         float contactDistance = bubble.radius + other.radius;
         float contactTolerance = std::max(
@@ -770,21 +788,15 @@ static bool TriggerBubbleBurst(uint64_t id) {
         float contactProximity = 1.0f - gap / contactTolerance;
         float responseStrength = 0.70f *
             std::sqrt(glm::clamp(contactProximity, 0.0f, 1.0f));
-        glm::vec3 impulseDirection = glm::normalize(delta);
 
         // Make the shock visible on the first presented frame without
         // restoring the old excessive sustained velocity. Only bubbles that
         // were genuinely touching when the burst began receive this response.
-        float mobility = glm::clamp(
-            std::pow(bubble.radius / std::max(other.radius, 0.08f), 1.25f),
-            0.35f, 1.35f);
         glm::vec3 immediateDisplacement = impulseDirection *
             (kBurstNeighborImmediateDisplacement * responseStrength *
              mobility * 1.20f);
         other.position += immediateDisplacement;
         other.basePosition += immediateDisplacement * 0.75f;
-        other.velocity += impulseDirection *
-                          (kBurstNeighborImpulseStrength * responseStrength * mobility);
         other.contactAxis = -impulseDirection;
         other.contactStrength = std::max(other.contactStrength, responseStrength);
         other.surfaceDynamicsBlend = std::max(

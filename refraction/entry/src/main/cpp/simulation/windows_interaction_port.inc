@@ -493,9 +493,28 @@ static void DecideCoalescenceOutcome(BubbleContactPair &pair,
     }
 }
 
+static float StableDoubleDepthProgress(const BubbleContactPair &pair)
+{
+    if (pair.outcome != BubbleContactPair::CoalescenceOutcome::StayDoubleBubble)
+    {
+        return 0.0f;
+    }
+    return Smooth01((pair.contactTime - 0.90f) / 1.15f);
+}
+
+static float StableDoubleDepthRandom(const BubbleContactPair &pair)
+{
+    return Smooth01(glm::clamp(pair.stableDepthRandom, 0.0f, 1.0f));
+}
+
 static float PlateauContactRadius(const BubbleContactPair &pair, const DisplayBubble &a, const DisplayBubble &b)
 {
-    float stableRadius = std::min(a.radius, b.radius) * 0.44f;
+    float depthProgress = StableDoubleDepthProgress(pair);
+    float depthRandom = StableDoubleDepthRandom(pair);
+    float deepStableRatio = glm::mix(0.57f, 0.68f, depthRandom) +
+                            0.03f * pair.interactionCompression;
+    float stableRatio = glm::mix(0.44f, deepStableRatio, depthProgress);
+    float stableRadius = std::min(a.radius, b.radius) * stableRatio;
     float formingRadius = stableRadius * 0.08f;
     float relaxedRadius = glm::mix(formingRadius, stableRadius, Smooth01(pair.geometryBlend));
     float breathing = 1.0f + std::sin((float)g_Time * 1.15f + (float)(pair.a + pair.b) * 0.71f) * 0.025f * pair.geometryBlend;
@@ -1021,6 +1040,11 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
     }
     bool keepStableDouble =
         pair.outcome == BubbleContactPair::CoalescenceOutcome::StayDoubleBubble;
+    if (keepStableDouble && !pair.stableDepthRandomSampled)
+    {
+        pair.stableDepthRandom = NextContactOutcomeRandom01();
+        pair.stableDepthRandomSampled = true;
+    }
     if (keepStableDouble)
     {
         pair.filmThickness = std::max(pair.filmThickness, 0.31f);
@@ -1099,10 +1123,23 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
         std::pow(Smooth01(pair.contactTime / 1.05f), 0.55f),
         0.45f * pair.contactActivation);
     float crowdingRetention = std::pow(crowdingScale, 0.12f);
-    float stableDoubleScale = keepStableDouble ? 0.82f : 1.0f;
-    float targetContactRatio = (0.52f + 0.22f * pair.interactionCompression) *
-                               stableDoubleScale *
-                               crowdingRetention;
+    float standardContactRatio =
+        (0.52f + 0.22f * pair.interactionCompression) * crowdingRetention;
+    float targetContactRatio = standardContactRatio;
+    if (keepStableDouble)
+    {
+        float depthProgress = StableDoubleDepthProgress(pair);
+        float depthRandom = StableDoubleDepthRandom(pair);
+        float shallowContactRatio = standardContactRatio * 0.82f;
+        float deepCrowdingRetention = std::pow(crowdingScale, 0.40f);
+        float deepContactRatio =
+            (glm::mix(0.60f, 0.72f, depthRandom) +
+             0.03f * pair.interactionCompression) *
+            deepCrowdingRetention;
+        targetContactRatio = glm::mix(shallowContactRatio,
+                                      deepContactRatio,
+                                      depthProgress);
+    }
     float targetContactRadius = minRadius * targetContactRatio * filmGrowth;
     float radiusAcceleration = (targetContactRadius - pair.contactRadius) * 42.0f -
                                pair.contactRadiusVelocity * 14.0f;
@@ -1137,7 +1174,11 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
     float geometryTarget = glm::mix(sharedFilmProgress, 1.0f, effectiveFusionProgress) * contactAmount;
     if (keepStableDouble)
     {
-        geometryTarget = std::min(geometryTarget, 0.78f);
+        float deepGeometryLimit = glm::mix(
+            0.88f, 0.98f, StableDoubleDepthRandom(pair));
+        float stableGeometryLimit = glm::mix(
+            0.78f, deepGeometryLimit, StableDoubleDepthProgress(pair));
+        geometryTarget = std::min(geometryTarget, stableGeometryLimit);
     }
     pair.geometryBlend = glm::clamp(geometryTarget, 0.0f, 1.0f);
     if (pair.contactTime < kSharedFilmTime || contactAmount < 0.10f)
