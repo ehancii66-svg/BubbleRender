@@ -36,6 +36,7 @@
 #include <utility>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <memory>
 #include <fstream>
 #include <filesystem>
@@ -117,8 +118,8 @@ static bool g_WindEnabled = false;
 static float g_GlobalWindStrength = 0.0f;
 static glm::vec3 g_GlobalWindDirection = glm::normalize(glm::vec3(1.0f, 0.20f, 0.0f));
 static constexpr float kMaxGlobalWindStrength = 0.45f;
-static constexpr float kBurstNeighborImpulseStrength = 0.25f;
-static constexpr float kBurstNeighborImmediateDisplacement = 0.032f;
+static constexpr float kBurstNeighborImpulseStrength = 0.0f;
+static constexpr float kBurstNeighborImmediateDisplacement = 0.045f;
 static constexpr int kMobileBurstSimSubsteps = 12;
 static constexpr float kMobileBurstSimTimeStep = 0.002f;
 static bool g_AddPreviewVisible = false;
@@ -720,6 +721,16 @@ static bool TriggerBubbleBurst(uint64_t id) {
         }
     }
 
+    std::unordered_set<uint64_t> contactPartnerIds;
+    for (const BubbleContactPair& pair : g_ContactPairs) {
+        if (pair.a != id && pair.b != id) continue;
+        if (!pair.active && !pair.bonded && !pair.persistentRenderPair &&
+            pair.contactActivation <= 0.0f && pair.contactRadius <= 0.0f) {
+            continue;
+        }
+        contactPartnerIds.insert(pair.a == id ? pair.b : pair.a);
+    }
+
     for (BubbleContactPair& pair : g_ContactPairs) {
         if (pair.a == id || pair.b == id) {
             pair.bonded = false;
@@ -739,30 +750,46 @@ static bool TriggerBubbleBurst(uint64_t id) {
     }
 
     glm::vec3 burstCenter = bubble.position;
-    float impulseRange = bubble.radius * 4.0f;
     for (DisplayBubble& other : g_DisplayBubbles) {
         if (other.id == id || other.state == DisplayBubble::State::Burst ||
             other.state == DisplayBubble::State::Dead) continue;
+        if (contactPartnerIds.find(other.id) == contactPartnerIds.end()) continue;
+
         glm::vec3 delta = other.position - burstCenter;
         float distance = glm::length(delta);
-        if (distance <= 1e-4f || distance > impulseRange) continue;
-        float falloff = 1.0f - distance / impulseRange;
+        if (distance <= 1e-4f) continue;
+
+        float contactDistance = bubble.radius + other.radius;
+        float contactTolerance = std::max(
+            std::min(bubble.radius, other.radius) * 0.05f, 0.001f);
+        float gap = std::max(distance - contactDistance, 0.0f);
+        if (gap > contactTolerance) continue;
+
+        // Keep approximately the previous response at actual contact while
+        // fading out stale pairs near the edge of the geometric tolerance.
+        float contactProximity = 1.0f - gap / contactTolerance;
+        float responseStrength = 0.70f *
+            std::sqrt(glm::clamp(contactProximity, 0.0f, 1.0f));
         glm::vec3 impulseDirection = glm::normalize(delta);
-        other.position += impulseDirection *
-                          (kBurstNeighborImmediateDisplacement * falloff);
+
+        // Make the shock visible on the first presented frame without
+        // restoring the old excessive sustained velocity. Only bubbles that
+        // were genuinely touching when the burst began receive this response.
+        float mobility = glm::clamp(
+            std::pow(bubble.radius / std::max(other.radius, 0.08f), 1.25f),
+            0.35f, 1.35f);
+        glm::vec3 immediateDisplacement = impulseDirection *
+            (kBurstNeighborImmediateDisplacement * responseStrength *
+             mobility * 1.20f);
+        other.position += immediateDisplacement;
+        other.basePosition += immediateDisplacement * 0.75f;
         other.velocity += impulseDirection *
-                          (kBurstNeighborImpulseStrength * falloff);
-        other.contactStrength = std::max(other.contactStrength, 0.85f * falloff);
-        for (const BubbleContactPair& pair : g_ContactPairs) {
-            if ((pair.a == id && pair.b == other.id) ||
-                (pair.b == id && pair.a == other.id)) {
-                other.radius += 1.15f * falloff * 0.04f;
-                other.contactStrength = std::max(other.contactStrength, 1.0f);
-                break;
-            }
-        }
+                          (kBurstNeighborImpulseStrength * responseStrength * mobility);
+        other.contactAxis = -impulseDirection;
+        other.contactStrength = std::max(other.contactStrength, responseStrength);
+        other.surfaceDynamicsBlend = std::max(
+            other.surfaceDynamicsBlend, 0.85f * responseStrength);
     }
-    g_InteractionDemoActive = false;
     g_ShowMainBubble = false;
     return true;
 }

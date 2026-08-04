@@ -558,6 +558,16 @@ static void FinalizeCompletedFusions()
         glm::vec3 mergedVelocity =
             (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
             mergedVolume;
+        // Contact constraints are converted back into center velocity at the
+        // end of each frame. Near fusion completion that numerical correction
+        // can be much larger than the bubbles' actual drift, so do not let it
+        // launch the merged bubble across the scene.
+        constexpr float kMaxPostFusionSpeed = 0.12f;
+        float mergedSpeed = glm::length(mergedVelocity);
+        if (mergedSpeed > kMaxPostFusionSpeed)
+        {
+            mergedVelocity *= kMaxPostFusionSpeed / mergedSpeed;
+        }
         float mergedRadius = RadiusFromVolume(mergedVolume);
 
         if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
@@ -1205,11 +1215,11 @@ static void UpdateDisplayBubbleInteractions(float dt)
         return;
     }
 
-    std::vector<glm::vec3> previousPositions;
+    std::unordered_map<uint64_t, glm::vec3> previousPositions;
     previousPositions.reserve(g_DisplayBubbles.size());
     for (const auto &bubble : g_DisplayBubbles)
     {
-        previousPositions.push_back(bubble.position);
+        previousPositions.emplace(bubble.id, bubble.position);
     }
 
     for (auto &pair : g_ContactPairs)
@@ -1252,6 +1262,15 @@ static void UpdateDisplayBubbleInteractions(float dt)
             int bIndex = -1;
             if (ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex))
             {
+                const DisplayBubble &a = g_DisplayBubbles[(size_t)aIndex];
+                const DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
+                if (a.state == DisplayBubble::State::Burst ||
+                    a.state == DisplayBubble::State::Dead ||
+                    b.state == DisplayBubble::State::Burst ||
+                    b.state == DisplayBubble::State::Dead)
+                {
+                    continue;
+                }
                 pair.active = true;
             }
         }
@@ -1372,6 +1391,13 @@ static void UpdateDisplayBubbleInteractions(float dt)
             }
             DisplayBubble &a = g_DisplayBubbles[(size_t)aIndex];
             DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
+            if (a.state == DisplayBubble::State::Burst ||
+                a.state == DisplayBubble::State::Dead ||
+                b.state == DisplayBubble::State::Burst ||
+                b.state == DisplayBubble::State::Dead)
+            {
+                continue;
+            }
             glm::vec3 delta = b.position - a.position;
             float dist = glm::length(delta);
             if (dist <= 1e-5f)
@@ -1436,8 +1462,12 @@ static void UpdateDisplayBubbleInteractions(float dt)
             float contactActivation = Smooth01((nearRange - gap) /
                                                std::max(nearRange, 0.001f));
             float capillaryPull = 0.100f * contactActivation;
-            a.velocity += n * capillaryPull * dt;
-            b.velocity -= n * capillaryPull * dt;
+            float invMassA = BubbleInvMass(a);
+            float invMassB = BubbleInvMass(b);
+            float invMassSum = std::max(invMassA + invMassB, 0.001f);
+            float capillaryImpulse = 2.0f * capillaryPull * dt / invMassSum;
+            a.velocity += n * capillaryImpulse * invMassA;
+            b.velocity -= n * capillaryImpulse * invMassB;
 
             int pairIndex = EnsureContactPairByIndex(g_DisplayBubbles, g_ContactPairs, i, j);
             if (pairIndex < 0)
@@ -1538,7 +1568,10 @@ static void UpdateDisplayBubbleInteractions(float dt)
 
             DisplayBubble &a = g_DisplayBubbles[(size_t)aIndex];
             DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
-            if (a.state == DisplayBubble::State::Dead || b.state == DisplayBubble::State::Dead)
+            if (a.state == DisplayBubble::State::Burst ||
+                a.state == DisplayBubble::State::Dead ||
+                b.state == DisplayBubble::State::Burst ||
+                b.state == DisplayBubble::State::Dead)
             {
                 continue;
             }
@@ -1637,7 +1670,12 @@ static void UpdateDisplayBubbleInteractions(float dt)
                 continue;
             }
 
-            bubble.velocity = (bubble.position - previousPositions[i]) / dt;
+            auto previousPosition = previousPositions.find(bubble.id);
+            if (previousPosition == previousPositions.end())
+            {
+                continue;
+            }
+            bubble.velocity = (bubble.position - previousPosition->second) / dt;
             float speed = glm::length(bubble.velocity);
             if (speed > 1.20f)
             {
