@@ -27,6 +27,12 @@ refraction/entry/oh_modules/
 windows/build-ninja/
 bubble-current.jpeg
 
+# Local HarmonyOS visual diagnostics
+/refraction/*.jpeg
+/refraction/*.png
+/refraction/*.json
+/windows-current.png
+
 # Local presentation source
 /presentation/beamer.tex
 /presentation/*.aux

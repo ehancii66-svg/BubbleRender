@@ -1268,18 +1268,22 @@ static void UpdateDisplayBubbleInteractions(float dt)
     {
         // If we have a sim, physics drives the retraction 鈥?only manage
         // alpha fade.  Otherwise fall back to manual burstScale shrink.
-        bubble.burstElapsed += dt;
+        float desiredBurstElapsed = bubble.burstElapsed + dt;
+        auto *sim = GetBubbleSim(bubble.id);
+        bubble.burstElapsed = sim
+            ? std::min(desiredBurstElapsed, LatestBurstVisualTime(bubble.id))
+            : desiredBurstElapsed;
         float t = glm::clamp(bubble.burstElapsed / bubble.burstDuration,
                              0.0f, 1.0f);
-        auto *sim = GetBubbleSim(bubble.id);
         if (!sim)
         {
             float shrink = 1.0f - t * t * (3.0f - 2.0f * t);
             bubble.burstScale = std::max(shrink, 0.0f);
         }
-        // The asynchronous mobile worker needs the full burst lifetime to
-        // expose the opening and free-edge retraction snapshots.
-        bubble.alpha = 1.0f - Smooth01(t);
+        // Match Windows: show the clean opening and outward free-edge
+        // retraction, then hide the sheet before late DBSTT motion becomes
+        // visually chaotic.
+        bubble.alpha = std::max(1.0f - t * 2.5f, 0.0f);
         bubble.velocity *= expf(dt * -2.5f);
         bubble.position += bubble.velocity * dt;
         if (t >= 1.0f)

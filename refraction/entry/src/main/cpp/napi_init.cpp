@@ -29,6 +29,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <condition_variable>
+#include <deque>
 #include <string>
 #include <mutex>
 #include <thread>
@@ -197,26 +198,46 @@ float g_TouchStrength = 0.0f;
 float g_TouchVelocity = 0.0f;
 bool  g_TouchPressed = false;
 
-static std::unordered_map<uint64_t, std::unique_ptr<VortexSheetSimulation>> g_BubbleSims;
-
-struct BurstSimSnapshot {
+struct BurstSimFrame {
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
-    uint64_t version = 0;
+    float simulationTime = 0.0f;
+};
+
+struct BurstSimTimeline {
+    std::deque<BurstSimFrame> frames;
+    uint64_t generation = 0;
+};
+
+struct BurstSimState {
+    std::shared_ptr<VortexSheetSimulation> sim;
+    uint64_t generation = 0;
+    float simulationTime = 0.0f;
+};
+
+struct BurstSimRequest {
+    uint64_t id = 0;
+    uint64_t generation = 0;
+    float targetTime = 0.0f;
 };
 
 static std::mutex g_BurstSimMutex;
 static std::condition_variable g_BurstSimCondition;
 static std::thread g_BurstSimThread;
 static bool g_BurstSimStop = false;
-static bool g_BurstSimWorkPending = false;
 static bool g_BurstSimWorkerBusy = false;
-static std::vector<uint64_t> g_BurstSimRequestedIds;
-static std::unordered_map<uint64_t, BurstSimSnapshot> g_BurstSimSnapshots;
-static std::unordered_map<uint64_t, uint64_t> g_AppliedBurstSnapshotVersions;
+static uint64_t g_NextBurstSimGeneration = 1;
+static std::unordered_map<uint64_t, BurstSimState> g_BubbleSims;
+static std::unordered_map<uint64_t, BurstSimRequest> g_BurstSimRequests;
+static std::unordered_map<uint64_t, BurstSimTimeline> g_BurstSimTimelines;
+static constexpr size_t kBurstTimelineFrameLimit = 24;
+static constexpr float kBurstSimulationLookAhead = 0.12f;
+// Windows advances twelve 0.002 s DBSTT substeps per rendered frame. At the
+// target 60 FPS this is about 1.5 seconds of simulation per visual second.
+static constexpr float kBurstSimulationTimeScale = 1.5f;
 
-static std::unique_ptr<VortexSheetSimulation> CreateBubbleSim() {
-    auto sim = std::make_unique<VortexSheetSimulation>();
+static std::shared_ptr<VortexSheetSimulation> CreateBubbleSim() {
+    auto sim = std::make_shared<VortexSheetSimulation>();
     sim->initIcosphere(1.0f, 2, 0.04f);
     sim->timeStep = 0.001f;
     sim->substepsPerFrame = 3;
@@ -236,13 +257,16 @@ static VortexSheetSimulation* InitBubbleSim(uint64_t id) {
     auto sim = CreateBubbleSim();
     VortexSheetSimulation* ptr = sim.get();
     std::lock_guard<std::mutex> lock(g_BurstSimMutex);
-    g_BubbleSims[id] = std::move(sim);
+    BurstSimState state;
+    state.sim = std::move(sim);
+    state.generation = g_NextBurstSimGeneration++;
+    g_BubbleSims[id] = std::move(state);
     return ptr;
 }
 
 static VortexSheetSimulation* GetBubbleSim(uint64_t id) {
     auto found = g_BubbleSims.find(id);
-    return found != g_BubbleSims.end() ? found->second.get() : nullptr;
+    return found != g_BubbleSims.end() ? found->second.sim.get() : nullptr;
 }
 
 static size_t LiveDisplayBubbleCount() {
@@ -279,17 +303,22 @@ static std::vector<unsigned int> BuildIndicesFromSim(const VortexSheetSimulation
 }
 
 static void UpdateMeshFromSnapshot(Mesh* mesh,
-                                   const std::vector<glm::vec3>& positions,
-                                   const std::vector<glm::vec3>& normals) {
+                                   const BurstSimFrame& previous,
+                                   const BurstSimFrame& current,
+                                   float blend) {
     if (!mesh) return;
     auto& vertices = mesh->vertices;
-    if (vertices.size() != positions.size()) return;
-    for (size_t i = 0; i < positions.size(); ++i) {
-        vertices[i].Position = positions[i];
-        vertices[i].Normal = normals[i];
+    if (vertices.size() != previous.positions.size() ||
+        vertices.size() != current.positions.size()) return;
+    blend = glm::clamp(blend, 0.0f, 1.0f);
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        vertices[i].Position = glm::mix(previous.positions[i], current.positions[i], blend);
+        glm::vec3 blendedNormal = glm::mix(previous.normals[i], current.normals[i], blend);
+        vertices[i].Normal = glm::length(blendedNormal) > 1e-6f
+            ? glm::normalize(blendedNormal) : current.normals[i];
         if (glm::dot(vertices[i].FilmDirection, vertices[i].FilmDirection) < 1e-6f) {
-            vertices[i].FilmDirection = glm::length(positions[i]) > 1e-6f
-                ? glm::normalize(positions[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
+            vertices[i].FilmDirection = glm::length(current.positions[i]) > 1e-6f
+                ? glm::normalize(current.positions[i]) : glm::vec3(0.0f, 1.0f, 0.0f);
         }
     }
     mesh->updateVertices(vertices);
@@ -299,26 +328,60 @@ static void BurstSimWorkerMain() {
     std::unique_lock<std::mutex> lock(g_BurstSimMutex);
     while (true) {
         g_BurstSimCondition.wait(lock, [] {
-            return g_BurstSimStop || g_BurstSimWorkPending;
+            return g_BurstSimStop || !g_BurstSimRequests.empty();
         });
         if (g_BurstSimStop) break;
 
-        std::vector<uint64_t> ids = std::move(g_BurstSimRequestedIds);
-        g_BurstSimRequestedIds.clear();
-        g_BurstSimWorkPending = false;
+        std::vector<BurstSimRequest> requests;
+        requests.reserve(g_BurstSimRequests.size());
+        for (const auto& item : g_BurstSimRequests) requests.push_back(item.second);
+        g_BurstSimRequests.clear();
         g_BurstSimWorkerBusy = true;
+        lock.unlock();
 
-        for (uint64_t id : ids) {
-            auto found = g_BubbleSims.find(id);
-            if (found == g_BubbleSims.end()) continue;
-            VortexSheetSimulation& sim = *found->second;
-            sim.update(0.0f);
+        for (const BurstSimRequest& request : requests) {
+            std::shared_ptr<VortexSheetSimulation> sim;
+            float simulationTime = 0.0f;
+            {
+                std::lock_guard<std::mutex> stateLock(g_BurstSimMutex);
+                auto found = g_BubbleSims.find(request.id);
+                if (found == g_BubbleSims.end() ||
+                    found->second.generation != request.generation) continue;
+                sim = found->second.sim;
+                simulationTime = found->second.simulationTime;
+            }
+            if (!sim) continue;
 
-            BurstSimSnapshot& snapshot = g_BurstSimSnapshots[id];
-            snapshot.positions = sim.getPositions();
-            snapshot.normals = sim.getNormals();
-            ++snapshot.version;
+            float stepTime = std::max(
+                sim->timeStep * static_cast<float>(sim->substepsPerFrame), 0.001f);
+            while (simulationTime + 1e-6f < request.targetTime) {
+                sim->update(0.0f);
+                simulationTime += stepTime;
+
+                BurstSimFrame frame;
+                frame.positions = sim->getPositions();
+                frame.normals = sim->getNormals();
+                frame.simulationTime = simulationTime;
+
+                std::lock_guard<std::mutex> stateLock(g_BurstSimMutex);
+                auto found = g_BubbleSims.find(request.id);
+                if (found == g_BubbleSims.end() ||
+                    found->second.generation != request.generation ||
+                    found->second.sim.get() != sim.get()) break;
+                found->second.simulationTime = simulationTime;
+                BurstSimTimeline& timeline = g_BurstSimTimelines[request.id];
+                if (timeline.generation != request.generation) {
+                    timeline.frames.clear();
+                    timeline.generation = request.generation;
+                }
+                timeline.frames.push_back(std::move(frame));
+                while (timeline.frames.size() > kBurstTimelineFrameLimit) {
+                    timeline.frames.pop_front();
+                }
+            }
         }
+
+        lock.lock();
         g_BurstSimWorkerBusy = false;
     }
 }
@@ -328,7 +391,6 @@ static void StartBurstSimWorker() {
     {
         std::lock_guard<std::mutex> lock(g_BurstSimMutex);
         g_BurstSimStop = false;
-        g_BurstSimWorkPending = false;
         g_BurstSimWorkerBusy = false;
     }
     g_BurstSimThread = std::thread(BurstSimWorkerMain);
@@ -344,48 +406,70 @@ static void StopBurstSimWorker() {
     g_BurstSimThread.join();
     std::lock_guard<std::mutex> lock(g_BurstSimMutex);
     g_BurstSimStop = false;
-    g_BurstSimWorkPending = false;
     g_BurstSimWorkerBusy = false;
-    g_BurstSimRequestedIds.clear();
+    g_BurstSimRequests.clear();
 }
 
 static void RequestBubbleSimUpdates() {
     if (g_SimPaused || g_VisualPaused) return;
-    std::vector<uint64_t> ids;
-    for (const DisplayBubble& bubble : g_DisplayBubbles) {
-        if (bubble.state == DisplayBubble::State::Burst) ids.push_back(bubble.id);
-    }
-    if (ids.empty()) return;
-
     std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
-    if (g_BurstSimStop || g_BurstSimWorkPending || g_BurstSimWorkerBusy) return;
-    g_BurstSimRequestedIds = std::move(ids);
-    g_BurstSimWorkPending = true;
+    if (g_BurstSimStop) return;
+    for (const DisplayBubble& bubble : g_DisplayBubbles) {
+        if (bubble.state != DisplayBubble::State::Burst) continue;
+        auto found = g_BubbleSims.find(bubble.id);
+        if (found == g_BubbleSims.end()) continue;
+        BurstSimRequest& request = g_BurstSimRequests[bubble.id];
+        request.id = bubble.id;
+        request.generation = found->second.generation;
+        request.targetTime = std::max(
+            request.targetTime,
+            std::min(bubble.burstDuration * kBurstSimulationTimeScale,
+                     bubble.burstElapsed * kBurstSimulationTimeScale +
+                         kBurstSimulationLookAhead));
+    }
+    if (g_BurstSimRequests.empty()) return;
     g_BurstSimCondition.notify_one();
 }
 
-static void ApplyLatestBurstSnapshot(uint64_t id, Mesh* mesh) {
+static float LatestBurstVisualTime(uint64_t id) {
+    std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+    auto found = g_BurstSimTimelines.find(id);
+    if (found == g_BurstSimTimelines.end() || found->second.frames.empty()) return 0.0f;
+    return found->second.frames.back().simulationTime / kBurstSimulationTimeScale;
+}
+
+static void ApplyBurstSnapshot(uint64_t id, float sampleTime, Mesh* mesh) {
     if (!mesh) return;
-    std::vector<glm::vec3> positions;
-    std::vector<glm::vec3> normals;
-    uint64_t version = 0;
+    BurstSimFrame previous;
+    BurstSimFrame current;
     {
         std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
         if (!lock.owns_lock()) return;
-        auto found = g_BurstSimSnapshots.find(id);
-        if (found == g_BurstSimSnapshots.end()) return;
-        version = found->second.version;
-        if (g_AppliedBurstSnapshotVersions[id] >= version) return;
-        positions = found->second.positions;
-        normals = found->second.normals;
+        auto found = g_BurstSimTimelines.find(id);
+        if (found == g_BurstSimTimelines.end() || found->second.frames.empty()) return;
+        const std::deque<BurstSimFrame>& frames = found->second.frames;
+        current = frames.back();
+        previous = current;
+        for (size_t i = 1; i < frames.size(); ++i) {
+            if (frames[i].simulationTime >= sampleTime) {
+                previous = frames[i - 1];
+                current = frames[i];
+                break;
+            }
+        }
     }
-    UpdateMeshFromSnapshot(mesh, positions, normals);
-    g_AppliedBurstSnapshotVersions[id] = version;
+    float interval = current.simulationTime - previous.simulationTime;
+    float blend = interval > 1e-6f
+        ? (sampleTime - previous.simulationTime) / interval : 1.0f;
+    UpdateMeshFromSnapshot(mesh, previous, current, blend);
 }
 
 static void RetireBubbleSim(uint64_t id) {
-    g_AppliedBurstSnapshotVersions.erase(id);
+    std::lock_guard<std::mutex> lock(g_BurstSimMutex);
+    g_BubbleSims.erase(id);
+    g_BurstSimRequests.erase(id);
+    g_BurstSimTimelines.erase(id);
 }
 
 static DisplayBubble& AddInteractiveBubble(const glm::vec3& position, float radius,
@@ -432,11 +516,9 @@ static void ClearInteractiveScene() {
     {
         std::lock_guard<std::mutex> lock(g_BurstSimMutex);
         g_BubbleSims.clear();
-        g_BurstSimSnapshots.clear();
-        g_BurstSimRequestedIds.clear();
-        g_BurstSimWorkPending = false;
+        g_BurstSimTimelines.clear();
+        g_BurstSimRequests.clear();
     }
-    g_AppliedBurstSnapshotVersions.clear();
     g_ContactPairs.clear();
     g_DisplayBubbles.clear();
     g_NextBubbleId = 1;
@@ -603,9 +685,14 @@ static bool TriggerBubbleBurst(uint64_t id) {
         std::lock_guard<std::mutex> lock(g_BurstSimMutex);
         auto found = g_BubbleSims.find(id);
         if (found == g_BubbleSims.end()) {
-            found = g_BubbleSims.emplace(id, CreateBubbleSim()).first;
+            BurstSimState state;
+            state.sim = CreateBubbleSim();
+            state.generation = g_NextBurstSimGeneration++;
+            found = g_BubbleSims.emplace(id, std::move(state)).first;
         }
-        VortexSheetSimulation* sim = found->second.get();
+        found->second.generation = g_NextBurstSimGeneration++;
+        found->second.simulationTime = 0.0f;
+        VortexSheetSimulation* sim = found->second.sim.get();
         sim->initIcosphere(bubble.radius, 2, 0.04f);
         glm::vec3 holeDirection = glm::normalize(g_camera.getPosition() - bubble.position);
         sim->punchHole(holeDirection, 0.45f);
@@ -616,8 +703,14 @@ static bool TriggerBubbleBurst(uint64_t id) {
         sim->diagnosticsEnabled = false;
         burstVertices = BuildVerticesFromSim(*sim);
         burstIndices = BuildIndicesFromSim(*sim);
-        g_BurstSimSnapshots.erase(id);
-        g_AppliedBurstSnapshotVersions.erase(id);
+        BurstSimTimeline& timeline = g_BurstSimTimelines[id];
+        timeline.frames.clear();
+        timeline.generation = found->second.generation;
+        BurstSimFrame initialFrame;
+        initialFrame.positions = sim->getPositions();
+        initialFrame.normals = sim->getNormals();
+        timeline.frames.push_back(std::move(initialFrame));
+        g_BurstSimRequests.erase(id);
     }
     Model* shellModel = g_BubbleSurfaces.FindBubble(id);
     if (shellModel) {
@@ -1398,7 +1491,12 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             if (bubble.state == DisplayBubble::State::Burst) {
                 if (modelToDraw && !interactiveMeshesUpdated) {
                     Mesh* mesh = modelToDraw->getMesh(0);
-                    if (mesh) ApplyLatestBurstSnapshot(bubble.id, mesh);
+                    if (mesh) {
+                        ApplyBurstSnapshot(
+                            bubble.id,
+                            bubble.burstElapsed * kBurstSimulationTimeScale,
+                            mesh);
+                    }
                 }
                 refractionShader->SetInt("uVisualContactCount", 0);
             } else if (modelToDraw && !bubble.volumeTransferred && !interactiveMeshesUpdated) {
