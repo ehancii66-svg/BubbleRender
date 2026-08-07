@@ -38,7 +38,7 @@ struct Index {
     @State private modeText: string = 'Airy';
     @State private simulationText: string = '暂停仿真';
     @State private simPaused: boolean = false;
-    @State private cameraDistance: number = 5.40;
+    @State private cameraDistance: number = 4.0;
     @State private thickness: number = 740;
     @State private thicknessVar: number = 160;
     @State private surfaceTension: number = 15;
@@ -49,13 +49,14 @@ struct Index {
     @State private bubbleRadius: number = 0.48;
     @State private spawnDepth: number = 0.0;
     @State private windStrength: number = 0.0;
+    @State private windDirection: number = 0;
     @State private demoText: string = '演示';
 
     private lastTouchX: number = 0
     private lastTouchY: number = 0
     private touchMoved: boolean = false
     private pinchDistance: number = 0
-    private pinchCameraDistance: number = 5.40
+    private pinchCameraDistance: number = 4.0
     private suppressSingleTouchAfterPinch: boolean = false
     private lastTapTime: number = 0
     private lastTapX: number = 0
@@ -172,7 +173,7 @@ struct Index {
         try {
             testNapi.resetOpeningScene()
             this.demoText = '演示'
-            this.cameraDistance = 5.40
+            this.cameraDistance = 4.0
             this.pinchCameraDistance = this.cameraDistance
             this.touchMode = 0
             this.hideAddPreview()
@@ -186,7 +187,7 @@ struct Index {
             const mode = testNapi.cycleInteractionDemo()
             const labels: string[] = ['8字', '融合', '分离']
             this.demoText = labels[Math.max(0, Math.min(2, mode))]
-            this.cameraDistance = 5.60
+            this.cameraDistance = 5.10
             this.pinchCameraDistance = this.cameraDistance
             this.touchMode = 0
             this.hideAddPreview()
@@ -204,6 +205,15 @@ struct Index {
         }
     }
 
+    private setWindDirection(index: number, x: number, y: number): void {
+        this.windDirection = index
+        try {
+            testNapi.setWindDirection(x, y)
+        } catch (e) {
+            hilog.error(DOMAIN, 'Index', 'setWindDirection failed: %{public}s', JSON.stringify(e))
+        }
+    }
+
     private resetAllParameters(): void {
         this.thickness = 740
         this.thicknessVar = 160
@@ -211,11 +221,12 @@ struct Index {
         this.refractionStrength = 0.35
         this.edgeDistortionBoost = 2.2
         this.environmentReflection = 0.65
-        this.cameraDistance = 5.40
+        this.cameraDistance = 4.0
         this.touchMode = 0
         this.bubbleRadius = 0.48
         this.spawnDepth = 0.0
         this.windStrength = 0.0
+        this.windDirection = 0
         this.demoText = 'Demo'
         this.simPaused = false
         this.simulationText = '暂停仿真'
@@ -228,6 +239,7 @@ struct Index {
             testNapi.setRefractionStrength(this.refractionStrength)
             testNapi.setEdgeDistortionBoost(this.edgeDistortionBoost)
             testNapi.setEnvironmentReflectionStrength(this.environmentReflection)
+            testNapi.setWindDirection(0.92, 0.38)
             testNapi.setCameraDistance(this.cameraDistance)
         } catch (e) {
             hilog.error(DOMAIN, 'Index', 'resetAllParameters failed: %{public}s', JSON.stringify(e))
@@ -528,22 +540,23 @@ struct Index {
                 .width('100%')
                 .height('100%')
 
-            Text(this.fpsText)
-                .fontSize(12)
-                .fontColor(Color.White)
-                .fontWeight(FontWeight.Medium)
-                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-                .backgroundColor('rgba(0,0,0,0.46)')
+            if (this.showControls || this.showSettings) {
+                Row() {
+                    Text(this.fpsText)
+                        .fontSize(11)
+                        .fontColor('rgba(255,255,255,0.82)')
+                    Text(this.modeText)
+                        .fontSize(11)
+                        .fontColor('rgba(255,255,255,0.58)')
+                        .padding({ left: 10 })
+                }
+                .height(30)
+                .padding({ left: 10, right: 10 })
+                .backgroundColor('rgba(10,18,24,0.66)')
+                .border({ width: 1, color: 'rgba(255,255,255,0.12)' })
                 .borderRadius(6)
-                .position({ x: 10, y: 8 })
-
-            Text(`模式: ${this.modeText}`)
-                .fontSize(12)
-                .fontColor(Color.White)
-                .padding({ left: 10, right: 10, top: 5, bottom: 5 })
-                .backgroundColor('rgba(0,0,0,0.46)')
-                .borderRadius(6)
-                .position({ x: 10, y: 40 })
+                .position({ x: 10, y: 10 })
+            }
 
             if (this.showInteractionHint && !this.showSettings) {
                 Column() {
@@ -573,14 +586,15 @@ struct Index {
                 .position({ x: '11%', y: '10%' })
             }
 
-            Button(this.showControls || this.showSettings ? '×' : '☰')
-                .fontSize(20)
+            Button(this.showControls || this.showSettings ? '×' : '≡')
+                .fontSize(19)
                 .fontColor(Color.White)
-                .width(42)
-                .height(38)
-                .backgroundColor('rgba(18,18,18,0.68)')
-                .borderRadius(6)
-                .position({ x: '84%', y: 8 })
+                .width(40)
+                .height(40)
+                .backgroundColor('rgba(10,18,24,0.72)')
+                .border({ width: 1, color: 'rgba(255,255,255,0.16)' })
+                .borderRadius(8)
+                .position({ x: '86%', y: 10 })
                 .onClick(() => { this.toggleControlMenu() })
                 .onAreaChange((_oldValue: Area, newValue: Area) => {
                     this.menuX = Number(newValue.position.x)
@@ -592,22 +606,65 @@ struct Index {
             if (this.showControls) {
                 Column() {
                 Row() {
-                    Button('Scene')
-                        .fontSize(12).height(32).layoutWeight(1)
+                    Text('场景控制')
+                        .fontSize(14)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(Color.White)
+                    Text(this.windStrength > 0 ? '风已开启' : '无风')
+                        .fontSize(11)
+                        .fontColor(this.windStrength > 0 ? '#8ED7C5' : 'rgba(255,255,255,0.52)')
+                }
+                .width('100%')
+                .height(28)
+                .justifyContent(FlexAlign.SpaceBetween)
+
+                Row() {
+                    Button('场景')
+                        .fontSize(12).height(34).layoutWeight(1).borderRadius(6)
+                        .backgroundColor('#355D72')
                         .onClick(() => { this.resetOpeningScene() })
                     Button(this.demoText)
-                        .fontSize(12).height(32).layoutWeight(1)
+                        .fontSize(12).height(34).layoutWeight(1).borderRadius(6)
+                        .backgroundColor('#355D72')
                         .onClick(() => { this.cycleInteractionDemo() })
-                    Button(this.windStrength > 0 ? 'Wind On' : 'Wind Off')
-                        .fontSize(12).height(32).layoutWeight(1)
+                    Button(this.windStrength > 0 ? '关闭风' : '开启风')
+                        .fontSize(12).height(34).layoutWeight(1).borderRadius(6)
+                        .backgroundColor(this.windStrength > 0 ? '#2D8B78' : '#4A555C')
                         .onClick(() => { this.toggleWind() })
                 }
                 .width('100%')
                 .justifyContent(FlexAlign.SpaceBetween)
 
+                if (this.windStrength > 0) {
+                    Row() {
+                        Text('风向')
+                            .fontSize(11)
+                            .fontColor('rgba(255,255,255,0.72)')
+                            .width(42)
+                        Button('↖')
+                            .fontSize(18).height(32).layoutWeight(1).borderRadius(6)
+                            .backgroundColor(this.windDirection === 1 ? '#2D8B78' : '#39464D')
+                            .onClick(() => { this.setWindDirection(1, -0.92, 0.38) })
+                        Button('↗')
+                            .fontSize(18).height(32).layoutWeight(1).borderRadius(6)
+                            .backgroundColor(this.windDirection === 0 ? '#2D8B78' : '#39464D')
+                            .onClick(() => { this.setWindDirection(0, 0.92, 0.38) })
+                        Button('↙')
+                            .fontSize(18).height(32).layoutWeight(1).borderRadius(6)
+                            .backgroundColor(this.windDirection === 2 ? '#2D8B78' : '#39464D')
+                            .onClick(() => { this.setWindDirection(2, -0.92, -0.38) })
+                        Button('↘')
+                            .fontSize(18).height(32).layoutWeight(1).borderRadius(6)
+                            .backgroundColor(this.windDirection === 3 ? '#2D8B78' : '#39464D')
+                            .onClick(() => { this.setWindDirection(3, 0.92, -0.38) })
+                    }
+                    .width('100%')
+                    .padding({ top: 6 })
+                }
+
                 Row() {
                     Button('旋转')
-                        .fontSize(12).height(32).layoutWeight(1)
+                        .fontSize(12).height(32).layoutWeight(1).borderRadius(6)
                         .backgroundColor(this.touchMode === 0 ? '#2878D0' : '#505050')
                         .onClick(() => {
                             this.hideAddPreview()
@@ -615,11 +672,11 @@ struct Index {
                             this.showControls = false
                         })
                     Button(this.touchMode === 1 ? '取消添加' : '添加')
-                        .fontSize(12).height(32).layoutWeight(1)
+                        .fontSize(12).height(32).layoutWeight(1).borderRadius(6)
                         .backgroundColor(this.touchMode === 1 ? '#2878D0' : '#505050')
                         .onClick(() => { this.selectTouchMode(1) })
                     Button(this.touchMode === 2 ? '取消破裂' : '破裂')
-                        .fontSize(12).height(32).layoutWeight(1)
+                        .fontSize(12).height(32).layoutWeight(1).borderRadius(6)
                         .backgroundColor(this.touchMode === 2 ? '#B43A48' : '#505050')
                         .onClick(() => { this.selectTouchMode(2) })
                 }
@@ -676,11 +733,15 @@ struct Index {
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
+                        .borderRadius(6)
+                        .backgroundColor(this.modeText === 'Kim' ? '#2878D0' : '#4A555C')
                         .onClick(() => { this.setMode(0, 'Kim') })
                     Button('Airy')
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
+                        .borderRadius(6)
+                        .backgroundColor(this.modeText === 'Airy' ? '#2878D0' : '#4A555C')
                         .onClick(() => { this.setMode(2, 'Airy') })
                 }
                 .width('100%')
@@ -691,11 +752,15 @@ struct Index {
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
+                        .borderRadius(6)
+                        .backgroundColor('#4A555C')
                         .onClick(() => { this.toggleSimulationState() })
                     Button(this.showSettings ? '收起参数' : '参数')
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
+                        .borderRadius(6)
+                        .backgroundColor('#4A555C')
                         .onClick(() => {
                             this.touchMode = 0
                             this.hideAddPreview()
@@ -706,6 +771,8 @@ struct Index {
                         .fontSize(12)
                         .height(34)
                         .layoutWeight(1)
+                        .borderRadius(6)
+                        .backgroundColor('#4A555C')
                         .onClick(() => { this.resetAllParameters() })
                 }
                 .width('100%')
@@ -713,10 +780,11 @@ struct Index {
                 .padding({ top: 6 })
                 }
                 .width('92%')
-                .padding({ left: 8, right: 8, top: 8, bottom: 8 })
-                .backgroundColor('rgba(18,18,18,0.68)')
+                .padding({ left: 10, right: 10, top: 8, bottom: 10 })
+                .backgroundColor('rgba(10,18,24,0.86)')
+                .border({ width: 1, color: 'rgba(255,255,255,0.13)' })
                 .borderRadius(8)
-                .position({ x: '4%', y: 68 })
+                .position({ x: '4%', y: 60 })
                 .onAreaChange((_oldValue: Area, newValue: Area) => {
                     this.controlsX = Number(newValue.position.x)
                     this.controlsY = Number(newValue.position.y)

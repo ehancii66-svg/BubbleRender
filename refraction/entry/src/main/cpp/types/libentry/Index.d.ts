@@ -33,7 +33,7 @@ declare namespace libentry {
     function setMaxOffsetRatio(val: number): void;
     /** Environment reflection strength (0.0 – 1.5, default 0.65). */
     function setEnvironmentReflectionStrength(val: number): void;
-    /** Camera orbit distance (2.0-20, portrait opening default 5.40). */
+    /** Camera orbit distance (2.0-20, portrait opening default 4.0). */
     function setCameraDistance(val: number): void;
 
     /** Pause / resume the DBSTT simulation. */
@@ -48,6 +48,7 @@ declare namespace libentry {
     /** Cycle stable double, unequal fusion and separation demos (desktop G equivalent). */
     function cycleInteractionDemo(): number;
     function setWindStrength(val: number): void;
+    function setWindDirection(x: number, y: number): void;
     function addBubbleAtScreen(x: number, y: number, radius: number, depth: number): boolean;
     function setAddPreview(x: number, y: number, radius: number, depth: number, visible: boolean): void;
     function burstBubbleAtScreen(x: number, y: number): boolean;

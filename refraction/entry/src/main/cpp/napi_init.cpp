@@ -64,7 +64,7 @@ NativeResourceManager* g_ResourceManager = nullptr;
 float width = 100.0f, height = 100.0f;
 float g_InputViewportWidth = 0.0f, g_InputViewportHeight = 0.0f;
 float currentAngleX = 0.0f, currentAngleY = 0.0f;
-float g_CameraDistance = 5.40f;
+float g_CameraDistance = 4.0f;
 glm::vec3 g_CameraOrbitTarget{0.0f, 0.18f, 1.10f};
 
 Shader* refractionShader = nullptr;
@@ -532,7 +532,7 @@ static void ResetOpeningScene() {
     g_InteractionDemoIndex = -1;
     g_InteractionDemoActive = false;
     g_CameraOrbitTarget = glm::vec3(0.0f, 0.18f, 1.10f);
-    g_CameraDistance = 5.40f;
+    g_CameraDistance = 4.0f;
     currentAngleX = 0.0f;
     currentAngleY = 0.0f;
 
@@ -591,7 +591,7 @@ static void CycleInteractionDemo() {
     g_InteractionDemoIndex = (g_InteractionDemoIndex + 1) % 3;
     g_InteractionDemoActive = true;
     g_CameraOrbitTarget = glm::vec3(0.0f, 0.12f, 1.10f);
-    g_CameraDistance = 5.60f;
+    g_CameraDistance = 5.10f;
     currentAngleX = 0.0f;
     currentAngleY = 0.0f;
 
@@ -1970,7 +1970,7 @@ static napi_value RotateCamera(napi_env env, napi_callback_info info) {
 static napi_value ResetCameraViewApi(napi_env env, napi_callback_info info) {
     currentAngleX = 0.0f;
     currentAngleY = 0.0f;
-    g_CameraDistance = g_InteractionDemoActive ? 5.60f : 5.40f;
+    g_CameraDistance = g_InteractionDemoActive ? 5.10f : 4.0f;
     napi_value result;
     napi_create_double(env, g_CameraDistance, &result);
     return result;
@@ -2015,6 +2015,21 @@ static napi_value SetWindStrengthApi(napi_env env, napi_callback_info info) {
     if (argc >= 1) napi_get_value_double(env, args[0], &value);
     g_GlobalWindStrength = glm::clamp(static_cast<float>(value), 0.0f, 0.45f);
     g_WindEnabled = g_GlobalWindStrength > 0.001f;
+    return nullptr;
+}
+
+static napi_value SetWindDirectionApi(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value args[2];
+    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
+    double x = 1.0;
+    double y = 0.2;
+    if (argc >= 1) napi_get_value_double(env, args[0], &x);
+    if (argc >= 2) napi_get_value_double(env, args[1], &y);
+    glm::vec3 direction(static_cast<float>(x), static_cast<float>(y), 0.0f);
+    if (glm::length(direction) > 1e-5f) {
+        g_GlobalWindDirection = glm::normalize(direction);
+    }
     return nullptr;
 }
 
@@ -2103,7 +2118,7 @@ static napi_value ResetSimulation(napi_env env, napi_callback_info info) {
     g_RefractionStrength = 0.35f;
     g_EdgeDistortionBoost = 2.2f;
     g_EnvironmentReflectionStrength = 0.65f;
-    g_CameraDistance = 5.40f;
+    g_CameraDistance = 4.0f;
     g_CameraOrbitTarget = glm::vec3(0.0f, 0.18f, 1.10f);
     ResetOpeningScene();
     return nullptr;
@@ -2140,6 +2155,7 @@ static napi_value Init(napi_env env, napi_value exports) {
         { "resetOpeningScene", nullptr, ResetOpeningSceneApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "cycleInteractionDemo", nullptr, CycleInteractionDemoApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setWindStrength", nullptr, SetWindStrengthApi, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "setWindDirection", nullptr, SetWindDirectionApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "addBubbleAtScreen", nullptr, AddBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "setAddPreview", nullptr, SetAddPreviewApi, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "burstBubbleAtScreen", nullptr, BurstBubbleAtScreenApi, nullptr, nullptr, nullptr, napi_default, nullptr },
