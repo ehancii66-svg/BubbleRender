@@ -1053,8 +1053,7 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
                                         std::max(kNeckFormationTime - kSharedFilmTime, 0.001f));
     float bondBlend = Smooth01(pair.contactTime / 0.30f);
     bool canCoalesce =
-        pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce ||
-        (g_InteractionDemoActive && pair.outcome == BubbleContactPair::CoalescenceOutcome::Undecided);
+        pair.outcome == BubbleContactPair::CoalescenceOutcome::WillCoalesce;
     if (canCoalesce && pair.contactTime >= kNeckFormationTime &&
         !pair.fusionActive && PairCanBeginExclusiveFusion(pair))
     {
@@ -1096,22 +1095,13 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
                                   0.240f * crowdingScale * pair.interactionCompression;
     float normalizedOverlap = Smooth01((actualOverlapRatio - commandedOverlapRatio) / 0.10f);
     float impactDrive = Smooth01(std::max(-relNormalSpeed, 0.0f) / 0.32f);
-    float demoExternalDrive = 0.0f;
-    if (g_InteractionDemoActive && pair.fusionActive)
-    {
-        float postMergeTime = pair.fusionElapsed;
-        float forceEnvelope = Smooth01(postMergeTime / 1.6f);
-        float forcePulse = 0.80f + 0.20f * std::sin(postMergeTime * 1.15f);
-        demoExternalDrive = forceEnvelope * forcePulse;
-    }
     float bondedCompressionDrive = pair.bonded
                                        ? 0.82f * crowdingScale *
                                              Smooth01(std::max(pair.contactTime - kSharedFilmTime, 0.0f) / 2.0f)
                                        : 0.0f;
     float compressionTarget = glm::clamp(std::max({0.72f * normalizedOverlap,
                                                    0.50f * impactDrive,
-                                                   bondedCompressionDrive,
-                                                   demoExternalDrive}),
+                                                   bondedCompressionDrive}),
                                          0.0f, 1.0f);
     float compressionAcceleration =
         (compressionTarget - pair.interactionCompression) * 13.0f -

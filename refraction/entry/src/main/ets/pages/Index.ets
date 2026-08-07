@@ -586,15 +586,21 @@ struct Index {
                 .position({ x: '11%', y: '10%' })
             }
 
-            Button(this.showControls || this.showSettings ? '×' : '≡')
-                .fontSize(19)
-                .fontColor(Color.White)
+            Button() {
+                Text(this.showControls || this.showSettings ? '×' : '≡')
+                    .fontSize(19)
+                    .fontColor(Color.White)
+                    .width('100%')
+                    .height('100%')
+                    .textAlign(TextAlign.Center)
+            }
                 .width(40)
                 .height(40)
+                .padding(0)
                 .backgroundColor('rgba(10,18,24,0.72)')
                 .border({ width: 1, color: 'rgba(255,255,255,0.16)' })
                 .borderRadius(8)
-                .position({ x: '86%', y: 10 })
+                .position({ x: '82%', y: 10 })
                 .onClick(() => { this.toggleControlMenu() })
                 .onAreaChange((_oldValue: Area, newValue: Area) => {
                     this.menuX = Number(newValue.position.x)

@@ -1513,8 +1513,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             DisplayBubble& bubble = *entry.second;
             bool worldScaleSurface = g_BubbleSurfaces.BubbleUsesWorldScale(bubble.id);
             float fusionVisibility = windows_parity::BubbleFusionSurfaceVisibility(bubble.id);
-            float shellAlpha = (g_InteractionDemoActive ? 0.62f : 0.72f) *
-                               bubble.alpha;
+            float shellAlpha = 0.72f * bubble.alpha;
             if (bubble.state != DisplayBubble::State::Burst) {
                 shellAlpha *= 1.0f - fusionVisibility;
             }
@@ -1636,8 +1635,8 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 glm::mat4 fusionMatrix = glm::translate(glm::mat4(1.0f), targetCenter);
                 SetRefractUniforms(fusionMatrix, refractionRadius, isBackFace, renderToFBO,
                                    false, 0.0f, g_IridescenceMode,
-                                   (g_InteractionDemoActive ? 0.62f : 0.72f) *
-                                   std::max(a.alpha, b.alpha) * fusionVisibility);
+                                   0.72f * std::max(a.alpha, b.alpha) *
+                                   fusionVisibility);
                 refractionShader->SetFloat(
                     "uOpticalNormalBlend",
                     1.0f - windows_parity::Smooth01(pair.relaxationProgress));
