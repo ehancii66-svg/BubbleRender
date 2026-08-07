@@ -234,13 +234,17 @@ static std::unordered_map<uint64_t, BurstSimRequest> g_BurstSimRequests;
 static std::unordered_map<uint64_t, BurstSimTimeline> g_BurstSimTimelines;
 static constexpr size_t kBurstTimelineFrameLimit = 24;
 static constexpr float kBurstSimulationLookAhead = 0.12f;
+static constexpr uint64_t kAmbientSimRequestInterval = 2;
+static constexpr float kAmbientSimAdvance = 0.015f;
+static uint64_t g_AmbientSimRequestFrame = 0;
+static size_t g_AmbientSimCursor = 0;
 // Windows advances twelve 0.002 s DBSTT substeps per rendered frame. At the
 // target 60 FPS this is about 1.5 seconds of simulation per visual second.
 static constexpr float kBurstSimulationTimeScale = 1.5f;
 
 static std::shared_ptr<VortexSheetSimulation> CreateBubbleSim() {
     auto sim = std::make_shared<VortexSheetSimulation>();
-    sim->initIcosphere(1.0f, 2, 0.04f);
+    sim->initIcosphere(1.0f, 1, 0.08f);
     sim->timeStep = 0.001f;
     sim->substepsPerFrame = 3;
     sim->surfaceTensionStrength = 15.0f;
@@ -417,8 +421,10 @@ static void RequestBubbleSimUpdates() {
     std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
     if (g_BurstSimStop) return;
+    bool burstActive = false;
     for (const DisplayBubble& bubble : g_DisplayBubbles) {
         if (bubble.state != DisplayBubble::State::Burst) continue;
+        burstActive = true;
         auto found = g_BubbleSims.find(bubble.id);
         if (found == g_BubbleSims.end()) continue;
         BurstSimRequest& request = g_BurstSimRequests[bubble.id];
@@ -429,6 +435,29 @@ static void RequestBubbleSimUpdates() {
             std::min(bubble.burstDuration * kBurstSimulationTimeScale,
                      bubble.burstElapsed * kBurstSimulationTimeScale +
                          kBurstSimulationLookAhead));
+    }
+
+    if (!burstActive && !g_DisplayBubbles.empty() &&
+        (g_AmbientSimRequestFrame++ % kAmbientSimRequestInterval) == 0) {
+        const size_t bubbleCount = g_DisplayBubbles.size();
+        for (size_t attempt = 0; attempt < bubbleCount; ++attempt) {
+            size_t index = (g_AmbientSimCursor + attempt) % bubbleCount;
+            const DisplayBubble& bubble = g_DisplayBubbles[index];
+            if (bubble.state == DisplayBubble::State::Dead ||
+                bubble.state == DisplayBubble::State::Burst) {
+                continue;
+            }
+            auto found = g_BubbleSims.find(bubble.id);
+            if (found == g_BubbleSims.end()) continue;
+            BurstSimRequest& request = g_BurstSimRequests[bubble.id];
+            request.id = bubble.id;
+            request.generation = found->second.generation;
+            request.targetTime = std::max(
+                request.targetTime,
+                found->second.simulationTime + kAmbientSimAdvance);
+            g_AmbientSimCursor = (index + 1) % bubbleCount;
+            break;
+        }
     }
     if (g_BurstSimRequests.empty()) return;
     g_BurstSimCondition.notify_one();
@@ -465,6 +494,118 @@ static void ApplyBurstSnapshot(uint64_t id, float sampleTime, Mesh* mesh) {
     float blend = interval > 1e-6f
         ? (sampleTime - previous.simulationTime) / interval : 1.0f;
     UpdateMeshFromSnapshot(mesh, previous, current, blend);
+}
+
+static bool CopyLatestBubbleSimFrame(uint64_t id,
+                                     std::vector<glm::vec3>& positions,
+                                     float& simulationTime) {
+    std::unique_lock<std::mutex> lock(g_BurstSimMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+    auto state = g_BubbleSims.find(id);
+    auto timeline = g_BurstSimTimelines.find(id);
+    if (state == g_BubbleSims.end() || timeline == g_BurstSimTimelines.end() ||
+        timeline->second.generation != state->second.generation ||
+        timeline->second.frames.empty()) {
+        return false;
+    }
+    const BurstSimFrame& frame = timeline->second.frames.back();
+    positions = frame.positions;
+    simulationTime = frame.simulationTime;
+    return positions.size() >= 4;
+}
+
+static void ApplyAmbientDbsttDeformation(const DisplayBubble& bubble,
+                                         bool worldScaleSurface,
+                                         const std::vector<unsigned int>& indices,
+                                         std::vector<Vertex>& vertices) {
+    if (bubble.state == DisplayBubble::State::Burst || vertices.empty()) return;
+
+    std::vector<glm::vec3> samples;
+    float simulationTime = 0.0f;
+    if (!CopyLatestBubbleSimFrame(bubble.id, samples, simulationTime)) return;
+
+    float meanRadius = 0.0f;
+    for (const glm::vec3& sample : samples) meanRadius += glm::length(sample);
+    meanRadius /= static_cast<float>(samples.size());
+    float activation = Smooth01(simulationTime / 0.06f);
+    float deformationScale = worldScaleSurface ? bubble.radius : 1.0f;
+    float rotation = bubble.phase * 0.37f;
+    float c = std::cos(rotation);
+    float s = std::sin(rotation);
+
+    float modeNumerators[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float modeDenominators[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (const glm::vec3& sample : samples) {
+        float sampleRadius = glm::length(sample);
+        if (sampleRadius <= 1e-6f) continue;
+        glm::vec3 direction = sample / sampleRadius;
+        float basis[5] = {
+            direction.x * direction.x - direction.y * direction.y,
+            direction.y * direction.y - direction.z * direction.z,
+            2.0f * direction.x * direction.y,
+            2.0f * direction.x * direction.z,
+            2.0f * direction.y * direction.z
+        };
+        float offset = sampleRadius - meanRadius;
+        for (size_t mode = 0; mode < 5; ++mode) {
+            modeNumerators[mode] += offset * basis[mode];
+            modeDenominators[mode] += basis[mode] * basis[mode];
+        }
+    }
+    float modeCoefficients[5];
+    for (size_t mode = 0; mode < 5; ++mode) {
+        modeCoefficients[mode] = modeDenominators[mode] > 1e-6f
+            ? modeNumerators[mode] / modeDenominators[mode]
+            : 0.0f;
+    }
+
+    for (Vertex& vertex : vertices) {
+        glm::vec3 positionDirection = glm::length(vertex.Position) > 1e-6f
+            ? glm::normalize(vertex.Position)
+            : glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::vec3 filmDirection = glm::dot(vertex.FilmDirection, vertex.FilmDirection) > 1e-8f
+            ? glm::normalize(vertex.FilmDirection)
+            : positionDirection;
+        glm::vec3 sampleDirection(
+            c * filmDirection.x - s * filmDirection.z,
+            filmDirection.y,
+            s * filmDirection.x + c * filmDirection.z);
+        float basis[5] = {
+            sampleDirection.x * sampleDirection.x -
+                sampleDirection.y * sampleDirection.y,
+            sampleDirection.y * sampleDirection.y -
+                sampleDirection.z * sampleDirection.z,
+            2.0f * sampleDirection.x * sampleDirection.y,
+            2.0f * sampleDirection.x * sampleDirection.z,
+            2.0f * sampleDirection.y * sampleDirection.z
+        };
+        float radialOffset = 0.0f;
+        for (size_t mode = 0; mode < 5; ++mode) {
+            radialOffset += modeCoefficients[mode] * basis[mode];
+        }
+        radialOffset = glm::clamp(radialOffset, -0.045f, 0.045f);
+        vertex.Position += positionDirection *
+                           (radialOffset * deformationScale * activation * 0.82f);
+    }
+
+    std::vector<glm::vec3> normalSums(vertices.size(), glm::vec3(0.0f));
+    for (size_t i = 0; i + 2 < indices.size(); i += 3) {
+        unsigned int ia = indices[i];
+        unsigned int ib = indices[i + 1];
+        unsigned int ic = indices[i + 2];
+        if (ia >= vertices.size() || ib >= vertices.size() || ic >= vertices.size()) continue;
+        glm::vec3 faceNormal = glm::cross(vertices[ib].Position - vertices[ia].Position,
+                                          vertices[ic].Position - vertices[ia].Position);
+        if (glm::length(faceNormal) <= 1e-8f) continue;
+        normalSums[ia] += faceNormal;
+        normalSums[ib] += faceNormal;
+        normalSums[ic] += faceNormal;
+    }
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        if (glm::length(normalSums[i]) > 1e-6f) {
+            vertices[i].Normal = glm::normalize(normalSums[i]);
+        }
+    }
 }
 
 static void RetireBubbleSim(uint64_t id) {
@@ -688,13 +829,14 @@ static bool TriggerBubbleBurst(uint64_t id) {
         auto found = g_BubbleSims.find(id);
         if (found == g_BubbleSims.end()) {
             BurstSimState state;
-            state.sim = CreateBubbleSim();
             state.generation = g_NextBurstSimGeneration++;
             found = g_BubbleSims.emplace(id, std::move(state)).first;
         }
+        auto burstSim = std::make_shared<VortexSheetSimulation>();
+        found->second.sim = burstSim;
         found->second.generation = g_NextBurstSimGeneration++;
         found->second.simulationTime = 0.0f;
-        VortexSheetSimulation* sim = found->second.sim.get();
+        VortexSheetSimulation* sim = burstSim.get();
         sim->initIcosphere(bubble.radius, 2, 0.04f);
         glm::vec3 holeDirection = glm::normalize(g_camera.getPosition() - bubble.position);
         sim->punchHole(holeDirection, 0.45f);
@@ -1542,10 +1684,13 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 if (mesh) {
                     const std::vector<Vertex>* restVertices =
                         g_BubbleSurfaces.FindBubbleRestVertices(bubble.id);
-                    mesh->updateVertices(windows_parity::BuildPersistentBubbleVertices(
+                    std::vector<Vertex> vertices = windows_parity::BuildPersistentBubbleVertices(
                         FindBubbleIndexById(g_DisplayBubbles, bubble.id),
                         static_cast<float>(g_Time), restVertices,
-                        worldScaleSurface, &mesh->vertices));
+                        worldScaleSurface, &mesh->vertices);
+                    ApplyAmbientDbsttDeformation(
+                        bubble, worldScaleSurface, mesh->indices, vertices);
+                    mesh->updateVertices(vertices);
                 }
             }
             if (!modelToDraw) modelToDraw = g_DecorativeBubbleModel;
