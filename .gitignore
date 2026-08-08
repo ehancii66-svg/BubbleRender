@@ -33,6 +33,12 @@ bubble-current.jpeg
 /refraction/*.json
 /windows-current.png
 
+# Windows fusion validation captures and generated reports
+/windows/validation_*
+/windows/fusion_validation*
+/windows/fusion_handoff*
+/windows/fusion_sharpfix*
+
 # Local presentation source
 /presentation/beamer.tex
 /presentation/*.aux

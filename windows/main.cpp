@@ -35,8 +35,12 @@
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
+#include <deque>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <sstream>
 #include <utility>
 #include <vector>
 #include <string>
@@ -240,11 +244,28 @@ static constexpr float kFusionTime = 3.45f;
 static constexpr float kContactVisualTransitionTime = 0.35f;
 static constexpr float kFusionFilmThickness = 0.18f;
 static constexpr float kFilmRuptureDuration = 0.24f;
-static constexpr float kNeckExpansionDelay = 0.10f;
-static constexpr float kNeckExpansionDuration = 1.20f;
-static constexpr float kRelaxationDelay = 0.95f;
-static constexpr float kRelaxationDuration = 1.45f;
-static constexpr float kFusionCompletionHold = 0.12f;
+static const FusionProfileConfig kFusionProfileConfig = [] {
+    FusionProfileConfig config;
+    config.surfaceTension = 0.180f;
+    config.velocityDamping = 1.00f;
+    config.velocityLaplacianDamping = 2.5f;
+    config.meshRegularization = 0.10f;
+    config.tangentialRedistributionRate = 3.0f;
+    config.resamplingEdgeRatio = 2.35f;
+    config.resamplingCurvatureWeight = 1.20f;
+    config.globalModeFrequency = 2.10f;
+    config.globalModeDampingRatio = 0.40f;
+    config.volumeConstraintStrength = 0.92f;
+    config.volumeProjectionIterations = 4;
+    config.initialNeckExpansionSpeed = 0.42f;
+    config.maximumTimeStep = 1.0f / 480.0f;
+    config.maximumSubsteps = 16;
+    config.maximumNodeSpeed = 1.65f;
+    return config;
+}();
+static constexpr float kFusionCompletionHold = 0.30f;
+static constexpr float kFusionStableRmsSpeed = 0.010f;
+static constexpr float kFusionStableCurvatureVariation = 0.50f;
 static constexpr float kShellCutDelay = 0.42f;
 static constexpr size_t kDefaultDisplayBubbleCount = 3;
 static constexpr size_t kHardMaxDisplayBubbleCount = 16;
@@ -264,6 +285,13 @@ static constexpr float kMinGlobalWindStrength = 0.0f;
 static constexpr float kMaxGlobalWindStrength = 0.45f;
 static constexpr float kGlobalWindStrengthStep = 0.025f;
 static bool g_LogContactDebug = false;
+static bool g_DebugFusionProfile = false;
+static bool g_DebugFusionCurvature = false;
+static bool g_DebugFusionForces = false;
+static int g_FusionRenderDiagnosticMode = 0;
+static uint64_t g_FusionHandoffSerial = 0;
+static double g_LastFusionHandoffTime = -1.0;
+static std::string g_LastFusionHandoffSnapshot;
 static bool g_DeleteMode = false;
 
 static GLuint g_BackgroundTexture = 0;
@@ -311,6 +339,57 @@ static bool IsFiniteDirection(const glm::vec3 &direction)
     return std::isfinite(direction.x) &&
            std::isfinite(direction.y) &&
            std::isfinite(direction.z);
+}
+
+static void SaveValidationFrame(const std::filesystem::path &path,
+                                const std::vector<unsigned char> &rgb,
+                                int width,
+                                int height)
+{
+    if (width <= 0 || height <= 0 ||
+        rgb.size() != (size_t)width * (size_t)height * 3u)
+    {
+        return;
+    }
+    std::ofstream output(path, std::ios::binary);
+    output << "P6\n" << width << " " << height << "\n255\n";
+    const size_t rowBytes = (size_t)width * 3u;
+    for (int y = height - 1; y >= 0; --y)
+    {
+        output.write(reinterpret_cast<const char *>(rgb.data() +
+                                                     (size_t)y * rowBytes),
+                     (std::streamsize)rowBytes);
+    }
+}
+
+static std::pair<float, float> MeasureAxisymmetricSurface(
+    const std::vector<Vertex> &vertices,
+    int segments,
+    int rings)
+{
+    if (segments <= 0 || rings <= 0 ||
+        vertices.size() < (size_t)(segments + 1) * (size_t)(rings + 1))
+    {
+        return {0.0f, 0.0f};
+    }
+    float integral = 0.0f;
+    float firstMoment = 0.0f;
+    for (int ring = 1; ring <= rings; ++ring)
+    {
+        const glm::vec3 &p0 = vertices[(size_t)(ring - 1) *
+                                       (size_t)(segments + 1)].Position;
+        const glm::vec3 &p1 = vertices[(size_t)ring *
+                                       (size_t)(segments + 1)].Position;
+        float r0Sq = p0.y * p0.y + p0.z * p0.z;
+        float r1Sq = p1.y * p1.y + p1.z * p1.z;
+        float dx = std::abs(p1.x - p0.x);
+        float slab = 0.5f * (r0Sq + r1Sq) * dx;
+        integral += slab;
+        firstMoment += slab * (0.5f * (p0.x + p1.x));
+    }
+    float volume = 3.14159265358979323846f * integral;
+    float centroidX = integral > 1e-8f ? firstMoment / integral : 0.0f;
+    return {volume, centroidX};
 }
 
 static glm::vec3 SafeNormalizeDirection(const glm::vec3 &direction,
@@ -407,13 +486,11 @@ static const char *CoalescenceOutcomeName(BubbleContactPair::CoalescenceOutcome 
 
 static float FusionSurfaceVisibility(const BubbleContactPair &pair)
 {
-    if (!pair.fusionActive)
-    {
-        return 0.0f;
-    }
-
-    return Smooth01(pair.fusionElapsed /
-                    std::max(kContactVisualTransitionTime, 0.001f));
+    // A topology change cannot be alpha-cross-faded for a transparent,
+    // refractive shell: overlapping the old and new complete surfaces changes
+    // the optical path everywhere.  The replacement surface is identical away
+    // from the tiny zippered neck, so switch connectivity atomically instead.
+    return pair.fusionActive ? 1.0f : 0.0f;
 }
 
 static float BubbleFusionSurfaceVisibility(uint64_t bubbleId)
@@ -899,6 +976,15 @@ static uint64_t AddBubble(const glm::vec3 &position,
     bubble.volumeTransferred = false;
     bubble.state = DisplayBubble::State::Free;
     bubble.surfaceControls = MakeSurfaceControls(phase);
+    bubble.visualState.initialized = true;
+    bubble.visualState.interferencePhase = phase;
+    bubble.visualState.noiseSeed =
+        static_cast<uint32_t>((bubble.id * 2654435761ull) & 0xffffffffu);
+    bubble.visualState.animationTimeOrigin = static_cast<float>(g_Time);
+    bubble.visualState.textureOriginWorld = position;
+    bubble.visualState.textureBasis = glm::mat3(1.0f);
+    bubble.visualState.referenceRadius = std::max(radius, 0.001f);
+    bubble.visualState.opacity = bubble.alpha;
 
     uint64_t id = bubble.id;
     g_DisplayBubbles.push_back(bubble);
@@ -950,19 +1036,61 @@ static bool RemoveBubble(uint64_t id)
 
 static void FinalizeCompletedFusions()
 {
-    std::vector<std::pair<uint64_t, uint64_t>> completedPairs;
+    struct CompletedFusion
+    {
+        uint64_t a = 0;
+        uint64_t b = 0;
+        glm::vec3 center = glm::vec3(0.0f);
+        glm::vec3 velocity = glm::vec3(0.0f);
+        float conservedVolume = 0.0f;
+        float theoreticalVolume = 0.0f;
+        int zeroCrossings = 0;
+        float maximumRelativeVolumeError = 0.0f;
+        float maximumCentroidError = 0.0f;
+        float finalShapeMode = 0.0f;
+        float finalRmsSpeed = 0.0f;
+        float finalCurvatureVariation = 0.0f;
+        float initialArea = 0.0f;
+        float finalArea = 0.0f;
+        float fusionElapsed = 0.0f;
+        BubbleVisualState visualState;
+    };
+    std::vector<CompletedFusion> completedPairs;
     for (const BubbleContactPair &pair : g_ContactPairs)
     {
         if (pair.fusionComplete)
         {
-            completedPairs.emplace_back(pair.a, pair.b);
+            CompletedFusion completed;
+            completed.a = pair.a;
+            completed.b = pair.b;
+            completed.center = pair.fusionProfileInitialized
+                ? pair.fusionCenter +
+                      pair.fusionCenterVelocity * pair.fusionElapsed
+                : glm::vec3(0.0f);
+            completed.velocity = pair.fusionCenterVelocity;
+            completed.conservedVolume = pair.conservedFusionVolume;
+            completed.theoreticalVolume =
+                pair.theoreticalUncompressedVolume;
+            completed.zeroCrossings = pair.fusionShapeZeroCrossings;
+            completed.maximumRelativeVolumeError =
+                pair.maximumRelativeVolumeError;
+            completed.maximumCentroidError = pair.maximumCentroidError;
+            completed.finalShapeMode = pair.fusionShapeMode;
+            completed.finalRmsSpeed = pair.fusionRmsSpeed;
+            completed.finalCurvatureVariation =
+                pair.fusionCurvatureVariation;
+            completed.initialArea = pair.initialFusionArea;
+            completed.finalArea = pair.currentFusionArea;
+            completed.fusionElapsed = pair.fusionElapsed;
+            completed.visualState = pair.visualState;
+            completedPairs.push_back(completed);
         }
     }
 
-    for (const auto &ids : completedPairs)
+    for (const CompletedFusion &completed : completedPairs)
     {
-        int survivorIndex = FindBubbleIndexById(g_DisplayBubbles, ids.first);
-        int absorbedIndex = FindBubbleIndexById(g_DisplayBubbles, ids.second);
+        int survivorIndex = FindBubbleIndexById(g_DisplayBubbles, completed.a);
+        int absorbedIndex = FindBubbleIndexById(g_DisplayBubbles, completed.b);
         if (survivorIndex < 0 || absorbedIndex < 0)
         {
             continue;
@@ -976,15 +1104,32 @@ static void FinalizeCompletedFusions()
         float volumeB = absorbed.targetVolume > 0.0f
                             ? absorbed.targetVolume
                             : BubbleVolume(absorbed.radius);
-        float mergedVolume = std::max(volumeA + volumeB, 0.001f);
-        glm::vec3 mergedCenter = (survivor.position * volumeA + absorbed.position * volumeB) /
-                                 mergedVolume;
-        glm::vec3 mergedVelocity =
-            (survivor.velocity * volumeA + absorbed.velocity * volumeB) /
-            mergedVolume;
+        float mergedVolume =
+            std::max(completed.conservedVolume, 0.001f);
+        glm::vec3 mergedCenter = completed.center;
+        glm::vec3 mergedVelocity = completed.velocity;
+        if (!std::isfinite(mergedCenter.x) || !std::isfinite(mergedCenter.y) ||
+            !std::isfinite(mergedCenter.z))
+        {
+            mergedCenter =
+                (survivor.position * volumeA + absorbed.position * volumeB) /
+                mergedVolume;
+        }
         float mergedRadius = RadiusFromVolume(mergedVolume);
 
-        if (!g_BubbleSurfaces.PromoteFusion(ids.first, ids.second,
+        Model *beforeModel = g_BubbleSurfaces.FindFusion(
+            completed.a, completed.b);
+        Mesh *beforeMesh = beforeModel ? beforeModel->getMesh(0) : nullptr;
+        unsigned int beforeVao = beforeMesh ? beforeMesh->VAO : 0u;
+        const void *beforeModelAddress = beforeModel;
+        float beforeOpticalBlend =
+            completed.visualState.opticalNormalBlendAtOrigin *
+            std::exp(-completed.visualState.opticalNormalRelaxationRate *
+                     std::max(static_cast<float>(g_Time) -
+                                  completed.visualState.animationTimeOrigin,
+                              0.0f));
+
+        if (!g_BubbleSurfaces.PromoteFusion(completed.a, completed.b,
                                             survivor.id, absorbed.id))
         {
             continue;
@@ -1005,11 +1150,193 @@ static void FinalizeCompletedFusions()
         survivor.surfaceDynamicsBlend = 0.0f;
         survivor.volumeTransferred = true;
         survivor.state = DisplayBubble::State::Merged;
+        survivor.visualState = completed.visualState;
 
-        std::cout << "[BubbleFusion] pair=(" << ids.first << ", " << ids.second
+        Model *afterModel = g_BubbleSurfaces.FindBubble(survivor.id);
+        Mesh *afterMesh = afterModel ? afterModel->getMesh(0) : nullptr;
+        unsigned int afterVao = afterMesh ? afterMesh->VAO : 0u;
+        float afterOpticalBlend =
+            survivor.visualState.opticalNormalBlendAtOrigin *
+            std::exp(-survivor.visualState.opticalNormalRelaxationRate *
+                     std::max(static_cast<float>(g_Time) -
+                                  survivor.visualState.animationTimeOrigin,
+                              0.0f));
+
+        auto describeMesh = [](const Mesh *mesh) {
+            std::ostringstream stream;
+            if (!mesh || mesh->vertices.empty()) {
+                stream << "mesh_vertices=0\n";
+                return stream.str();
+            }
+            glm::vec2 uvMin(std::numeric_limits<float>::max());
+            glm::vec2 uvMax(-std::numeric_limits<float>::max());
+            float normalMin = std::numeric_limits<float>::max();
+            float normalMax = 0.0f;
+            float normalMean = 0.0f;
+            for (const Vertex &vertex : mesh->vertices) {
+                uvMin = glm::min(uvMin, vertex.TexCoords);
+                uvMax = glm::max(uvMax, vertex.TexCoords);
+                float length = glm::length(vertex.Normal);
+                normalMin = std::min(normalMin, length);
+                normalMax = std::max(normalMax, length);
+                normalMean += length;
+            }
+            normalMean /= static_cast<float>(mesh->vertices.size());
+            int inwardFaces = 0;
+            int validFaces = 0;
+            for (std::size_t i = 0; i + 2 < mesh->indices.size(); i += 3) {
+                const glm::vec3 &a = mesh->vertices[mesh->indices[i]].Position;
+                const glm::vec3 &b = mesh->vertices[mesh->indices[i + 1]].Position;
+                const glm::vec3 &c = mesh->vertices[mesh->indices[i + 2]].Position;
+                glm::vec3 face = glm::cross(b - a, c - a);
+                if (glm::length(face) <= 1e-10f)
+                    continue;
+                ++validFaces;
+                if (glm::dot(face, (a + b + c) / 3.0f) < 0.0f)
+                    ++inwardFaces;
+            }
+            stream << "mesh_vertices=" << mesh->vertices.size() << "\n"
+                   << "mesh_indices=" << mesh->indices.size() << "\n"
+                   << "uv_min=" << uvMin.x << "," << uvMin.y << "\n"
+                   << "uv_max=" << uvMax.x << "," << uvMax.y << "\n"
+                   << "normal_length_min=" << normalMin << "\n"
+                   << "normal_length_max=" << normalMax << "\n"
+                   << "normal_length_mean=" << normalMean << "\n"
+                   << "valid_faces=" << validFaces << "\n"
+                   << "inward_faces=" << inwardFaces << "\n";
+            return stream.str();
+        };
+        std::ostringstream handoffSnapshot;
+        auto writeVisualState = [&](const char *prefix,
+                                    const BubbleVisualState &state,
+                                    float opticalBlend) {
+            handoffSnapshot
+                << prefix << "film_base_scale="
+                << state.filmBaseThicknessScale << "\n"
+                << prefix << "film_amplitude_scale="
+                << state.filmThicknessAmplitudeScale << "\n"
+                << prefix << "interference_phase="
+                << state.interferencePhase << "\n"
+                << prefix << "noise_seed=" << state.noiseSeed << "\n"
+                << prefix << "animation_time_origin="
+                << state.animationTimeOrigin << "\n"
+                << prefix << "texture_origin="
+                << state.textureOriginWorld.x << ","
+                << state.textureOriginWorld.y << ","
+                << state.textureOriginWorld.z << "\n"
+                << prefix << "texture_basis_x="
+                << state.textureBasis[0].x << ","
+                << state.textureBasis[0].y << ","
+                << state.textureBasis[0].z << "\n"
+                << prefix << "texture_basis_y="
+                << state.textureBasis[1].x << ","
+                << state.textureBasis[1].y << ","
+                << state.textureBasis[1].z << "\n"
+                << prefix << "texture_basis_z="
+                << state.textureBasis[2].x << ","
+                << state.textureBasis[2].y << ","
+                << state.textureBasis[2].z << "\n"
+                << prefix << "reference_radius="
+                << state.referenceRadius << "\n"
+                << prefix << "ior=" << state.ior << "\n"
+                << prefix << "fresnel_strength="
+                << state.fresnelStrength << "\n"
+                << prefix << "opacity=" << state.opacity << "\n"
+                << prefix << "optical_normal_blend="
+                << opticalBlend << "\n";
+        };
+        handoffSnapshot
+            << "completion_global_time=" << g_Time << "\n"
+            << "completion_fusion_elapsed=" << completed.fusionElapsed << "\n"
+            << "shader_program="
+            << (g_RefractionShader ? g_RefractionShader->m_id : 0u) << "\n"
+            << "material_id=0 (shared uniform-driven material)\n"
+            << "base_color=none (spectral thin-film shader)\n"
+            << "fresnel_power=" << g_FresnelPower << "\n"
+            << "shader_thickness_nm=" << CurrentThickness() << "\n"
+            << "shader_thickness_variation_nm=" << g_ThicknessVar << "\n"
+            << "environment_cubemap=" << g_CubemapTexture << "\n"
+            << "before_type=StatefulFusion\n"
+            << "before_model_ptr=" << beforeModelAddress << "\n"
+            << "before_mesh_vao=" << beforeVao << "\n"
+            << "before_center=" << completed.center.x << ","
+            << completed.center.y << "," << completed.center.z << "\n"
+            << "before_radius=" << mergedRadius << "\n"
+            << "before_model_matrix=translation(center)\n"
+            << "before_alpha=" << std::max(survivor.alpha, absorbed.alpha)
+            << "\n"
+            << "before_render_order=after ordinary DisplayBubble objects\n"
+            << "after_type=PromotedDisplayBubble\n"
+            << "after_model_ptr=" << static_cast<const void *>(afterModel) << "\n"
+            << "after_mesh_vao=" << afterVao << "\n"
+            << "after_center=" << survivor.position.x << ","
+            << survivor.position.y << "," << survivor.position.z << "\n"
+            << "after_radius=" << survivor.radius << "\n"
+            << "after_model_matrix=translation(center)\n"
+            << "after_alpha=" << survivor.alpha << "\n"
+            << "after_render_order=promoted-last after ordinary DisplayBubble objects\n"
+            << "same_model=" << (beforeModelAddress == afterModel) << "\n"
+            << "same_mesh_vao=" << (beforeVao == afterVao) << "\n";
+        writeVisualState("before_", completed.visualState,
+                         beforeOpticalBlend);
+        writeVisualState("after_", survivor.visualState,
+                         afterOpticalBlend);
+        handoffSnapshot << describeMesh(afterMesh);
+        g_LastFusionHandoffSnapshot = handoffSnapshot.str();
+        ++g_FusionHandoffSerial;
+        g_LastFusionHandoffTime = g_Time;
+
+        std::cout << "[FusionHandoff] serial=" << g_FusionHandoffSerial
+                  << " globalTime=" << g_Time
+                  << " fusionElapsed=" << completed.fusionElapsed
+                  << " before={type:StatefulFusion,model:" << beforeModelAddress
+                  << ",vao:" << beforeVao
+                  << ",material:0,shader:"
+                  << (g_RefractionShader ? g_RefractionShader->m_id : 0u)
+                  << ",center:(" << completed.center.x << ","
+                  << completed.center.y << "," << completed.center.z << ")"
+                  << ",radius:" << mergedRadius
+                  << ",opticalBlend:" << beforeOpticalBlend << "}"
+                  << " after={type:PromotedDisplayBubble,model:"
+                  << static_cast<const void *>(afterModel)
+                  << ",vao:" << afterVao
+                  << ",material:0,shader:"
+                  << (g_RefractionShader ? g_RefractionShader->m_id : 0u)
+                  << ",center:(" << survivor.position.x << ","
+                  << survivor.position.y << "," << survivor.position.z << ")"
+                  << ",radius:" << survivor.radius
+                  << ",opticalBlend:" << afterOpticalBlend << "}"
+                  << " sameModel=" << (beforeModelAddress == afterModel)
+                  << " sameVAO=" << (beforeVao == afterVao)
+                  << " visualSeed=" << survivor.visualState.noiseSeed
+                  << " visualTimeOrigin="
+                  << survivor.visualState.animationTimeOrigin
+                  << std::endl;
+
+        std::cout << "[BubbleFusion] pair=(" << completed.a << ", " << completed.b
                   << ") survivor=" << survivor.id
-                  << " radius=" << mergedRadius << std::endl;
-        RemoveBubble(ids.second);
+                  << " radius=" << mergedRadius
+                  << " volumeBefore=" << mergedVolume
+                  << " volumeAfter=" << BubbleVolume(mergedRadius)
+                  << " maxVolumeError="
+                  << completed.maximumRelativeVolumeError * 100.0f << "%"
+                  << " maxCentroidError=" << completed.maximumCentroidError
+                  << " zeroCrossings=" << completed.zeroCrossings
+                  << " theoreticalVolume=" << completed.theoreticalVolume
+                  << " contactCompression="
+                  << (1.0f - mergedVolume /
+                                  std::max(completed.theoreticalVolume,
+                                           1e-7f)) *
+                         100.0f
+                  << "%"
+                  << " areaDrop="
+                  << completed.initialArea - completed.finalArea
+                  << " finalShapeMode=" << completed.finalShapeMode
+                  << " finalRmsSpeed=" << completed.finalRmsSpeed
+                  << " finalCurvatureVariation="
+                  << completed.finalCurvatureVariation
+                  << std::endl;
+        RemoveBubble(completed.b);
     }
 }
 
@@ -1593,6 +1920,67 @@ static void StartBubbleInteractionDemo()
               << " (press G for next)" << std::endl;
 }
 
+static void ConfigureFusionValidationCase(const std::string &caseName)
+{
+    if (g_DisplayBubbles.size() < 2 || g_ContactPairs.empty())
+        return;
+    DisplayBubble &a = g_DisplayBubbles[0];
+    DisplayBubble &b = g_DisplayBubbles[1];
+    BubbleContactPair &pair = g_ContactPairs[0];
+    float radiusA = 0.64f;
+    float radiusB = 0.32f;
+    glm::vec3 axis = glm::normalize(glm::vec3(1.0f, 0.04f, 0.0f));
+    if (caseName == "equal")
+    {
+        radiusA = radiusB = 0.50f;
+    }
+    else if (caseName == "tiny")
+    {
+        radiusB = 0.13f;
+    }
+    else if (caseName == "diagonal")
+    {
+        radiusA = 0.56f;
+        radiusB = 0.38f;
+        axis = glm::normalize(glm::vec3(1.0f, 0.62f, 0.28f));
+    }
+
+    glm::vec3 center(0.0f, 0.0f, 1.10f);
+    float volumeA = BubbleVolume(radiusA);
+    float volumeB = BubbleVolume(radiusB);
+    float totalVolume = volumeA + volumeB;
+    float filmRadius = std::min(radiusA, radiusB) * 0.30f;
+    float restDistance =
+        std::sqrt(radiusA * radiusA - filmRadius * filmRadius) +
+        std::sqrt(radiusB * radiusB - filmRadius * filmRadius);
+    float centerDistance =
+        radiusA + radiusB + std::min(radiusA, radiusB) * 0.065f;
+
+    a.radius = a.initialRadius = radiusA;
+    b.radius = b.initialRadius = radiusB;
+    a.targetVolume = volumeA;
+    b.targetVolume = volumeB;
+    a.position = center - axis * (centerDistance * volumeB / totalVolume);
+    b.position = center + axis * (centerDistance * volumeA / totalVolume);
+    a.basePosition = center - axis * (restDistance * volumeB / totalVolume);
+    b.basePosition = center + axis * (restDistance * volumeA / totalVolume);
+    a.velocity = axis * 0.05f;
+    b.velocity = -axis * 0.05f;
+    a.contactAxis = axis;
+    b.contactAxis = -axis;
+    pair.restDistance = restDistance;
+    pair.targetVolume = totalVolume;
+    pair.outcome =
+        BubbleContactPair::CoalescenceOutcome::WillCoalesce;
+    pair.coalescenceScore = 1.0f;
+    pair.active = true;
+    pair.persistentRenderPair = true;
+    std::cout << "[FusionValidation] case=" << caseName
+              << " radii=(" << radiusA << ", " << radiusB
+              << ") axis=(" << axis.x << ", " << axis.y
+              << ", " << axis.z << ")" << std::endl;
+}
+
 static glm::vec3 BubbleVisualCenter(const DisplayBubble &bubble, float time)
 {
     glm::vec3 windDir = glm::normalize(glm::vec3(0.75f, 0.22f, 0.0f));
@@ -1912,6 +2300,324 @@ static std::vector<Vertex> BuildPersistentBubbleVertices(
     return vertices;
 }
 
+static float MeasureFusionShapeMode(
+    const std::vector<FusionProfileNode> &profile)
+{
+    if (profile.size() < 3)
+        return 0.0f;
+    float axialHalfExtent =
+        0.5f * std::max(profile.back().z - profile.front().z, 1e-5f);
+    float radialExtent = 1e-5f;
+    for (const FusionProfileNode &node : profile)
+        radialExtent = std::max(radialExtent, node.r);
+    return std::log(axialHalfExtent / radialExtent);
+}
+
+static float SphereProfileRadius(float z, float center, float radius)
+{
+    float offset = z - center;
+    return std::sqrt(std::max(radius * radius - offset * offset, 0.0f));
+}
+
+static void InitializeFusionProfile(BubbleContactPair &pair,
+                                    const DisplayBubble &a,
+                                    const DisplayBubble &b,
+                                    const glm::vec3 &axis)
+{
+    const float volumeA = a.targetVolume > 0.0f
+                              ? a.targetVolume
+                              : BubbleVolume(a.radius);
+    const float volumeB = b.targetVolume > 0.0f
+                              ? b.targetVolume
+                              : BubbleVolume(b.radius);
+    const float theoreticalVolume = std::max(volumeA + volumeB, 1e-6f);
+    const glm::vec3 weightedCenter =
+        (a.position * volumeA + b.position * volumeB) / theoreticalVolume;
+    pair.fusionCenterVelocity =
+        (a.velocity * volumeA + b.velocity * volumeB) / theoreticalVolume;
+
+    // A merged film receives one visual identity at rupture. This state is
+    // subsequently shared by the stateful mesh and the promoted bubble.
+    pair.visualState = BubbleVisualState{};
+    pair.visualState.initialized = true;
+    pair.visualState.filmBaseThicknessScale =
+        (a.visualState.filmBaseThicknessScale * volumeA +
+         b.visualState.filmBaseThicknessScale * volumeB) /
+        theoreticalVolume;
+    pair.visualState.filmThicknessAmplitudeScale =
+        (a.visualState.filmThicknessAmplitudeScale * volumeA +
+         b.visualState.filmThicknessAmplitudeScale * volumeB) /
+        theoreticalVolume;
+    pair.visualState.interferencePhase =
+        (a.visualState.interferencePhase * volumeA +
+         b.visualState.interferencePhase * volumeB) /
+        theoreticalVolume;
+    pair.visualState.noiseSeed = static_cast<uint32_t>(
+        ((pair.a * 2246822519ull) ^ (pair.b * 3266489917ull)) &
+        0xffffffffu);
+    pair.visualState.animationTimeOrigin = static_cast<float>(g_Time);
+    pair.visualState.textureOriginWorld = weightedCenter;
+    pair.visualState.textureBasis[0] = axis;
+    pair.visualState.textureBasis[1] = pair.fusionSide;
+    pair.visualState.textureBasis[2] = pair.fusionBinormal;
+    pair.visualState.referenceRadius = RadiusFromVolume(theoreticalVolume);
+    pair.visualState.ior =
+        (a.visualState.ior * volumeA + b.visualState.ior * volumeB) /
+        theoreticalVolume;
+    pair.visualState.fresnelStrength =
+        (a.visualState.fresnelStrength * volumeA +
+         b.visualState.fresnelStrength * volumeB) /
+        theoreticalVolume;
+    pair.visualState.opacity = std::max(a.alpha, b.alpha);
+    pair.visualState.opticalNormalBlendAtOrigin = 1.0f;
+    pair.visualState.opticalNormalRelaxationRate = 0.70f;
+
+    const float centerA = glm::dot(a.position - weightedCenter, axis);
+    const float centerB = glm::dot(b.position - weightedCenter, axis);
+    const float minRadius = std::max(std::min(a.radius, b.radius), 1e-4f);
+    const float centerDistance = std::max(centerB - centerA, 1e-5f);
+    const float intersectionZ =
+        (a.radius * a.radius - b.radius * b.radius -
+         centerA * centerA + centerB * centerB) /
+        (2.0f * centerDistance);
+    const float bridgeHalfWidth = 0.36f * minRadius;
+    const float leftJoin = glm::clamp(
+        intersectionZ - bridgeHalfWidth,
+        centerA - 0.96f * a.radius,
+        centerA + 0.96f * a.radius);
+    const float rightJoin = glm::clamp(
+        intersectionZ + bridgeHalfWidth,
+        centerB - 0.96f * b.radius,
+        centerB + 0.96f * b.radius);
+    const float neckZ = glm::clamp(intersectionZ,
+                                   leftJoin + 1e-4f,
+                                   rightJoin - 1e-4f);
+    const float leftRadius = SphereProfileRadius(
+        leftJoin, centerA, a.radius);
+    const float rightRadius = SphereProfileRadius(
+        rightJoin, centerB, b.radius);
+    const float initialNeckRadius = std::min(
+        0.14f * minRadius,
+        0.72f * std::min(leftRadius, rightRadius));
+    auto sphereSlope = [](float z, float center, float radius) {
+        float r = SphereProfileRadius(z, center, radius);
+        return -(z - center) / std::max(r, 1e-5f);
+    };
+    const float rawLeftSlope = sphereSlope(leftJoin, centerA, a.radius);
+    const float rawRightSlope = sphereSlope(rightJoin, centerB, b.radius);
+    const float leftSecant = (initialNeckRadius - leftRadius) /
+                             std::max(neckZ - leftJoin, 1e-5f);
+    const float rightSecant = (rightRadius - initialNeckRadius) /
+                              std::max(rightJoin - neckZ, 1e-5f);
+    // Monotone Hermite bounds prevent the analytic bridge from developing a
+    // hidden overshoot between sampled rings.
+    const float leftSlope = glm::clamp(rawLeftSlope,
+                                       3.0f * leftSecant, 0.0f);
+    const float rightSlope = glm::clamp(rawRightSlope,
+                                        0.0f, 3.0f * rightSecant);
+    glm::vec2 leftTangent = glm::normalize(glm::vec2(1.0f, leftSlope));
+    glm::vec2 rightTangent = glm::normalize(glm::vec2(1.0f, rightSlope));
+    glm::vec2 leftPoint(leftJoin, leftRadius);
+    glm::vec2 neckPoint(neckZ, initialNeckRadius);
+    glm::vec2 rightPoint(rightJoin, rightRadius);
+    float leftHandle = 0.34f * glm::length(neckPoint - leftPoint);
+    float rightHandle = 0.34f * glm::length(rightPoint - neckPoint);
+    auto cubicBezier = [](const glm::vec2 &p0, const glm::vec2 &p1,
+                          const glm::vec2 &p2, const glm::vec2 &p3,
+                          float t) {
+        float u = 1.0f - t;
+        return u * u * u * p0 + 3.0f * u * u * t * p1 +
+               3.0f * u * t * t * p2 + t * t * t * p3;
+    };
+
+    // Construct the initial meridian parametrically. Cubic bridge handles
+    // match the two sphere tangents and a horizontal neck tangent, so steep
+    // caps do not turn into a high-order r(z) overshoot.
+    std::vector<glm::vec2> denseProfile;
+    denseProfile.reserve(2049);
+    auto appendPoint = [&](const glm::vec2 &point) {
+        if (denseProfile.empty() ||
+            glm::length(point - denseProfile.back()) > 1e-7f)
+            denseProfile.push_back(point);
+    };
+    constexpr int denseSectionSamples = 512;
+    float leftTheta = std::acos(glm::clamp(
+        (leftJoin - centerA) / a.radius, -1.0f, 1.0f));
+    for (int i = 0; i <= denseSectionSamples; ++i)
+    {
+        float t = static_cast<float>(i) / denseSectionSamples;
+        float theta = glm::mix(3.14159265358979323846f, leftTheta, t);
+        appendPoint(glm::vec2(centerA + a.radius * std::cos(theta),
+                              a.radius * std::sin(theta)));
+    }
+    for (int i = 1; i <= denseSectionSamples; ++i)
+    {
+        float t = static_cast<float>(i) / denseSectionSamples;
+        appendPoint(cubicBezier(
+            leftPoint, leftPoint + leftHandle * leftTangent,
+            neckPoint - glm::vec2(leftHandle, 0.0f), neckPoint, t));
+    }
+    std::size_t denseNeckIndex = denseProfile.size() - 1;
+    for (int i = 1; i <= denseSectionSamples; ++i)
+    {
+        float t = static_cast<float>(i) / denseSectionSamples;
+        appendPoint(cubicBezier(
+            neckPoint, neckPoint + glm::vec2(rightHandle, 0.0f),
+            rightPoint - rightHandle * rightTangent, rightPoint, t));
+    }
+    float rightTheta = std::acos(glm::clamp(
+        (rightJoin - centerB) / b.radius, -1.0f, 1.0f));
+    for (int i = 1; i <= denseSectionSamples; ++i)
+    {
+        float t = static_cast<float>(i) / denseSectionSamples;
+        float theta = glm::mix(rightTheta, 0.0f, t);
+        appendPoint(glm::vec2(centerB + b.radius * std::cos(theta),
+                              b.radius * std::sin(theta)));
+    }
+
+    std::vector<float> denseMetric(denseProfile.size(), 0.0f);
+    for (std::size_t i = 1; i < denseProfile.size(); ++i)
+    {
+        float ds = glm::length(denseProfile[i] - denseProfile[i - 1]);
+        float midZ = 0.5f * (denseProfile[i].x + denseProfile[i - 1].x);
+        float neckWeight = 1.0f + 2.0f * std::exp(
+            -0.5f * (midZ - neckZ) * (midZ - neckZ) /
+            std::max(0.22f * minRadius * 0.22f * minRadius, 1e-8f));
+        denseMetric[i] = denseMetric[i - 1] + ds * neckWeight;
+    }
+    float neckMetric = denseMetric[denseNeckIndex];
+    int neckSampleIndex = glm::clamp(
+        static_cast<int>(std::round(
+            static_cast<float>(kFusionSurfaceRings) * neckMetric /
+            std::max(denseMetric.back(), 1e-7f))),
+        2, kFusionSurfaceRings - 2);
+
+    pair.fusionProfile.assign(
+        static_cast<std::size_t>(kFusionSurfaceRings + 1),
+        FusionProfileNode{});
+    pair.fusionNeckNode = 0;
+    float closestNeckDistance = std::numeric_limits<float>::max();
+    std::size_t denseSegment = 0;
+    for (int i = 0; i <= kFusionSurfaceRings; ++i)
+    {
+        float desiredMetric = i <= neckSampleIndex
+            ? neckMetric * static_cast<float>(i) /
+                  static_cast<float>(neckSampleIndex)
+            : neckMetric + (denseMetric.back() - neckMetric) *
+                  static_cast<float>(i - neckSampleIndex) /
+                  static_cast<float>(kFusionSurfaceRings - neckSampleIndex);
+        while (denseSegment + 1 < denseMetric.size() - 1 &&
+               denseMetric[denseSegment + 1] < desiredMetric)
+            ++denseSegment;
+        float metricSpan = std::max(
+            denseMetric[denseSegment + 1] - denseMetric[denseSegment], 1e-8f);
+        float sampleT = glm::clamp(
+            (desiredMetric - denseMetric[denseSegment]) / metricSpan,
+            0.0f, 1.0f);
+        glm::vec2 sample = glm::mix(denseProfile[denseSegment],
+                                    denseProfile[denseSegment + 1], sampleT);
+        float z = sample.x;
+        float dzA = z - centerA;
+        float dzB = z - centerB;
+        float rhoA = SphereProfileRadius(z, centerA, a.radius);
+        float rhoB = SphereProfileRadius(z, centerB, b.radius);
+        float distanceFromContact = z - neckZ;
+
+        FusionProfileNode &node =
+            pair.fusionProfile[static_cast<std::size_t>(i)];
+        node.z = z;
+        node.r = sample.y;
+        if (i == 0 || i == kFusionSurfaceRings)
+            node.r = 0.0f;
+
+        float sourceBlend = Smooth01(
+            0.5f + 0.5f * distanceFromContact /
+                       std::max(0.22f * minRadius, 1e-4f));
+        glm::vec2 filmA(dzA / std::max(a.radius, 1e-4f),
+                        rhoA / std::max(a.radius, 1e-4f));
+        glm::vec2 filmB(dzB / std::max(b.radius, 1e-4f),
+                        rhoB / std::max(b.radius, 1e-4f));
+        glm::vec2 film = glm::mix(filmA, filmB, sourceBlend);
+        float filmLength = glm::length(film);
+        if (filmLength > 1e-6f)
+            film /= filmLength;
+        else
+            film = glm::vec2(0.0f, 1.0f);
+        node.filmAxial = film.x;
+        node.filmRadial = film.y;
+        node.opticalRadiusScale =
+            glm::mix(a.radius, b.radius, sourceBlend);
+
+        float neckImpulse =
+            kFusionProfileConfig.initialNeckExpansionSpeed *
+            std::exp(-0.5f * distanceFromContact * distanceFromContact /
+                     std::max(0.16f * minRadius * 0.16f * minRadius, 1e-8f));
+        node.vr = neckImpulse;
+        node.vz = 0.0f;
+        node.initialZ = node.z;
+        node.initialR = node.r;
+
+        float neckDistance = std::abs(distanceFromContact);
+        if (neckDistance < closestNeckDistance)
+        {
+            closestNeckDistance = neckDistance;
+            pair.fusionNeckNode = static_cast<std::size_t>(i);
+        }
+    }
+
+    FairInitialFusionProfile(pair.fusionProfile, neckZ,
+                             0.46f * minRadius, 3);
+    for (FusionProfileNode &node : pair.fusionProfile)
+    {
+        node.initialZ = node.z;
+        node.initialR = node.r;
+    }
+
+    // Keep the persistent local profile at its own gas-volume centroid.
+    // Shifting the world centre by the opposite amount preserves every
+    // vertex's world-space position at the topology event.
+    float localCentroid = FusionProfileCentroidZ(pair.fusionProfile);
+    for (FusionProfileNode &node : pair.fusionProfile)
+    {
+        node.z -= localCentroid;
+        node.initialZ -= localCentroid;
+    }
+    pair.fusionCenter = weightedCenter + axis * localCentroid;
+    pair.theoreticalUncompressedVolume = theoreticalVolume;
+    pair.conservedFusionVolume =
+        std::max(FusionProfileVolume(pair.fusionProfile), 1e-6f);
+    pair.targetVolume = pair.conservedFusionVolume;
+    pair.initialFusionArea = FusionProfileArea(pair.fusionProfile);
+    pair.currentFusionArea = pair.initialFusionArea;
+    pair.fusionRmsSpeed = 0.0f;
+    pair.fusionCurvatureVariation = 0.0f;
+    pair.fusionStableTime = 0.0f;
+    pair.maximumRelativeVolumeError = 0.0f;
+    pair.maximumCentroidError = 0.0f;
+    pair.fusionShapeMode = MeasureFusionShapeMode(pair.fusionProfile);
+    pair.previousFusionShapeMode = pair.fusionShapeMode;
+    pair.fusionShapeZeroCrossings = 0;
+    pair.fusionProfileInitialized = true;
+
+    pair.fusionDiagnosticNodeIndices.clear();
+    pair.fusionDiagnosticTrails.clear();
+    const std::size_t last = pair.fusionProfile.size() - 1;
+    pair.fusionDiagnosticNodeIndices = {
+        last / 4, pair.fusionNeckNode, (3 * last) / 4};
+    pair.fusionDiagnosticTrails.resize(
+        pair.fusionDiagnosticNodeIndices.size());
+
+    std::cout << "[FusionProfile] topology init: theoretical_volume="
+              << pair.theoreticalUncompressedVolume
+              << ", conserved_closed_surface="
+              << pair.conservedFusionVolume
+              << ", pre_contact_compression="
+              << (1.0f - pair.conservedFusionVolume /
+                              pair.theoreticalUncompressedVolume) *
+                     100.0f
+              << "%, nodes=" << pair.fusionProfile.size() << std::endl;
+}
+
 static void UpdateBubblePair(BubbleContactPair &pair, float dt)
 {
     int aIndex = -1;
@@ -2035,22 +2741,113 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
         pair.neckProgress = 0.0f;
         pair.relaxationProgress = 0.0f;
         pair.fusionCompletionHold = 0.0f;
+        UpdateTransportedFusionFrame(pair, n);
+        InitializeFusionProfile(pair, a, b, pair.fusionAxis);
     }
-    if (pair.fusionActive && !pair.fusionComplete)
+    if (pair.fusionActive && !pair.fusionComplete &&
+        pair.fusionProfileInitialized)
     {
         pair.fusionElapsed += dt;
-        pair.ruptureProgress = Smooth01(pair.fusionElapsed / kFilmRuptureDuration);
-        pair.neckProgress = Smooth01(
-            (pair.fusionElapsed - kNeckExpansionDelay) / kNeckExpansionDuration);
-        pair.relaxationProgress = Smooth01(
-            (pair.fusionElapsed - kRelaxationDelay) / kRelaxationDuration);
-        pair.filmThickness = std::min(pair.filmThickness,
-                                      glm::mix(kFusionFilmThickness, 0.08f,
-                                               pair.ruptureProgress));
-        pair.fusionCompletionHold = pair.relaxationProgress >= 0.999f
+        pair.ruptureProgress =
+            Smooth01(pair.fusionElapsed / kFilmRuptureDuration);
+
+        FusionProfileDiagnostics diagnostics = AdvanceFusionProfile(
+            pair.fusionProfile,
+            pair.conservedFusionVolume,
+            dt,
+            kFusionProfileConfig);
+        pair.fusionDiagnostics = diagnostics;
+        pair.currentFusionArea = diagnostics.area;
+        pair.fusionRmsSpeed = diagnostics.rmsSpeed;
+        pair.fusionCurvatureVariation = diagnostics.curvatureVariation;
+        float relativeVolumeError =
+            std::abs(diagnostics.volume - pair.conservedFusionVolume) /
+            std::max(pair.conservedFusionVolume, 1e-7f);
+        pair.maximumRelativeVolumeError =
+            std::max(pair.maximumRelativeVolumeError, relativeVolumeError);
+        pair.maximumCentroidError =
+            std::max(pair.maximumCentroidError,
+                     std::abs(diagnostics.centroidZ));
+
+        pair.previousFusionShapeMode = pair.fusionShapeMode;
+        pair.fusionShapeMode =
+            MeasureFusionShapeMode(pair.fusionProfile);
+        if (pair.previousFusionShapeMode *
+                pair.fusionShapeMode < 0.0f)
+        {
+            ++pair.fusionShapeZeroCrossings;
+        }
+
+        float finalRadius =
+            RadiusFromVolume(pair.conservedFusionVolume);
+        float opticalRelaxation =
+            1.0f - std::exp(-0.70f * dt);
+        for (FusionProfileNode &node : pair.fusionProfile)
+        {
+            node.opticalRadiusScale +=
+                (finalRadius - node.opticalRadiusScale) *
+                opticalRelaxation;
+        }
+        const FusionProfileNode &neckNode =
+            pair.fusionProfile[std::min(pair.fusionNeckNode,
+                                        pair.fusionProfile.size() - 1)];
+        pair.neckRadius = neckNode.r;
+        pair.neckProgress = glm::clamp(
+            (pair.neckRadius - 0.14f * minRadius) /
+                std::max(0.62f * finalRadius -
+                             0.14f * minRadius,
+                         1e-5f),
+            0.0f, 1.0f);
+
+        // This is an energy diagnostic only. It is not consumed by vertex
+        // generation or by the dynamics.
+        float sphereArea =
+            4.0f * 3.14159265358979323846f *
+            finalRadius * finalRadius;
+        pair.relaxationProgress = glm::clamp(
+            1.0f -
+                (pair.currentFusionArea - sphereArea) /
+                    std::max(pair.initialFusionArea - sphereArea, 1e-6f),
+            0.0f, 1.0f);
+        pair.filmThickness = std::min(
+            pair.filmThickness,
+            glm::mix(kFusionFilmThickness, 0.08f,
+                     pair.ruptureProgress));
+
+        glm::vec3 worldCenter =
+            pair.fusionCenter +
+            pair.fusionCenterVelocity * pair.fusionElapsed;
+        for (std::size_t trailIndex = 0;
+             trailIndex < pair.fusionDiagnosticNodeIndices.size();
+             ++trailIndex)
+        {
+            std::size_t nodeIndex = std::min(
+                pair.fusionDiagnosticNodeIndices[trailIndex],
+                pair.fusionProfile.size() - 1);
+            const FusionProfileNode &node =
+                pair.fusionProfile[nodeIndex];
+            glm::vec3 worldPosition =
+                worldCenter + pair.fusionAxis * node.z +
+                pair.fusionSide * node.r;
+            std::vector<glm::vec3> &trail =
+                pair.fusionDiagnosticTrails[trailIndex];
+            trail.push_back(worldPosition);
+            if (trail.size() > 180)
+                trail.erase(trail.begin());
+        }
+
+        bool dynamicallySettled =
+            pair.fusionElapsed > 1.0f &&
+            pair.fusionShapeZeroCrossings >= 1 &&
+            pair.fusionRmsSpeed <= kFusionStableRmsSpeed &&
+            pair.fusionCurvatureVariation <=
+                kFusionStableCurvatureVariation &&
+            relativeVolumeError <= 0.001f;
+        pair.fusionCompletionHold = dynamicallySettled
                                         ? pair.fusionCompletionHold + dt
                                         : 0.0f;
-        pair.fusionComplete = pair.fusionCompletionHold >= kFusionCompletionHold;
+        pair.fusionComplete =
+            pair.fusionCompletionHold >= kFusionCompletionHold;
     }
 
     // Film creation is history-dependent, while compression remains a
@@ -2154,10 +2951,8 @@ static void UpdateBubblePair(BubbleContactPair &pair, float dt)
         pair.geometryBlend = 1.0f;
         pair.filmThickness = std::min(pair.filmThickness, kFusionFilmThickness);
     }
-    pair.neckRadius = pair.fusionActive
-                          ? minRadius * glm::mix(0.025f, 0.78f,
-                                                 std::pow(Smooth01(pair.neckProgress), 0.65f))
-                          : PlateauContactRadius(pair, a, b);
+    if (!pair.fusionActive)
+        pair.neckRadius = PlateauContactRadius(pair, a, b);
 
     if (pair.state == BubbleContactPair::State::Touch)
     {
@@ -3109,8 +3904,19 @@ static void RenderFrame()
         g_RefractionShader->SetFloat("uThickness", CurrentThickness() * thicknessScale);
         g_RefractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         g_RefractionShader->SetFloat("uTime", (float)g_Time);
+        g_RefractionShader->SetVec3("uTextureOriginWorld", center);
+        g_RefractionShader->SetMat3("uTextureBasis", glm::mat3(1.0f));
+        g_RefractionShader->SetFloat("uTextureReferenceRadius",
+                                     std::max(localRadius, 0.001f));
+        g_RefractionShader->SetFloat("uVisualTime", (float)g_Time);
+        g_RefractionShader->SetVec3("uFilmNoiseOffset", glm::vec3(0.0f));
+        g_RefractionShader->SetFloat("uFilmBaseThicknessScale", 1.0f);
+        g_RefractionShader->SetFloat("uFilmThicknessAmplitudeScale", 1.0f);
+        g_RefractionShader->SetFloat("uFilmIor", 1.33f);
         g_RefractionShader->SetFloat("uOutputAlpha", outputAlpha);
         g_RefractionShader->SetFloat("uOpticalNormalBlend", 0.0f);
+        g_RefractionShader->SetInt("uFusionDiagnosticMode",
+                                   g_FusionRenderDiagnosticMode);
         glm::vec2 touchPoint = glm::vec2(-10.0f, -10.0f);
         float touchStrength = 0.0f;
         float touchVelocity = 0.0f;
@@ -3123,6 +3929,43 @@ static void RenderFrame()
         g_RefractionShader->SetVec2("uTouchPoint", touchPoint);
         g_RefractionShader->SetFloat("uTouchStrength", touchStrength);
         g_RefractionShader->SetFloat("uTouchVelocity", touchVelocity);
+    };
+
+    auto ApplyPersistentVisualState = [&](const BubbleVisualState &state)
+    {
+        if (!state.initialized)
+            return;
+        auto seedComponent = [](uint32_t seed, uint32_t shift) {
+            uint32_t value = (seed >> shift) & 0x3ffu;
+            return static_cast<float>(value) / 1023.0f * 17.0f;
+        };
+        glm::vec3 noiseOffset(
+            seedComponent(state.noiseSeed, 0u),
+            seedComponent(state.noiseSeed ^ 0x9e3779b9u, 10u),
+            seedComponent(state.noiseSeed ^ 0x85ebca6bu, 20u));
+        float visualTime = static_cast<float>(g_Time) -
+                           state.animationTimeOrigin +
+                           state.interferencePhase;
+        float opticalBlend = state.opticalNormalBlendAtOrigin * std::exp(
+            -state.opticalNormalRelaxationRate *
+            std::max(static_cast<float>(g_Time) -
+                         state.animationTimeOrigin,
+                     0.0f));
+        g_RefractionShader->SetVec3("uTextureOriginWorld",
+                                    state.textureOriginWorld);
+        g_RefractionShader->SetMat3("uTextureBasis", state.textureBasis);
+        g_RefractionShader->SetFloat("uTextureReferenceRadius",
+                                     std::max(state.referenceRadius, 0.001f));
+        g_RefractionShader->SetFloat("uVisualTime", visualTime);
+        g_RefractionShader->SetVec3("uFilmNoiseOffset", noiseOffset);
+        g_RefractionShader->SetFloat("uFilmBaseThicknessScale",
+                                     state.filmBaseThicknessScale);
+        g_RefractionShader->SetFloat("uFilmThicknessAmplitudeScale",
+                                     state.filmThicknessAmplitudeScale);
+        g_RefractionShader->SetFloat("uFilmIor", state.ior);
+        g_RefractionShader->SetFloat("uFresnelPower",
+                                     g_FresnelPower * state.fresnelStrength);
+        g_RefractionShader->SetFloat("uOpticalNormalBlend", opticalBlend);
     };
 
     auto SetBubbleContactUniforms = [&](int bubbleIndex)
@@ -3277,7 +4120,15 @@ static void RenderFrame()
         }
         std::sort(sortedBubbles.begin(), sortedBubbles.end(),
                   [](const auto &a, const auto &b)
-                  { return a.first > b.first; });
+                  {
+                      bool aPromoted =
+                          g_DisplayBubbles[a.second].volumeTransferred;
+                      bool bPromoted =
+                          g_DisplayBubbles[b.second].volumeTransferred;
+                      if (aPromoted != bPromoted)
+                          return !aPromoted;
+                      return a.first > b.first;
+                  });
 
         GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
         if (straightComposite)
@@ -3306,6 +4157,7 @@ static void RenderFrame()
             }
             SetRefractUniforms(bubbleModel, bubble.radius, isBackFace, renderToFBO,
                                false, 0.0f, 0.0f, 2, alpha, 1.0f);
+            ApplyPersistentVisualState(bubble.visualState);
             SetBubbleContactUniforms((int)item.second);
             Model *shellModel = FindDisplayBubbleModel(bubble.id);
             if (shellModel)
@@ -3371,9 +4223,9 @@ static void RenderFrame()
             glDepthMask(GL_FALSE);
         }
 
-        std::vector<std::pair<float, const BubbleContactPair *>> sortedPairs;
+        std::vector<std::pair<float, BubbleContactPair *>> sortedPairs;
         sortedPairs.reserve(g_ContactPairs.size());
-        for (const BubbleContactPair &pair : g_ContactPairs)
+        for (BubbleContactPair &pair : g_ContactPairs)
         {
             float visibility = FusionSurfaceVisibility(pair);
             // Skip pairs where either bubble is bursting or dead.
@@ -3398,8 +4250,11 @@ static void RenderFrame()
             }
             float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
             float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
-            glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
-                                     std::max(volumeA + volumeB, 0.001f);
+            glm::vec3 targetCenter = pair.fusionProfileInitialized
+                ? pair.fusionCenter +
+                      pair.fusionCenterVelocity * pair.fusionElapsed
+                : (a.position * volumeA + b.position * volumeB) /
+                      std::max(volumeA + volumeB, 0.001f);
             glm::vec3 cameraForward = glm::normalize(g_Camera.getTarget() -
                                                      g_Camera.getPosition());
             float cameraDepth = glm::dot(targetCenter - g_Camera.getPosition(),
@@ -3412,7 +4267,7 @@ static void RenderFrame()
 
         for (const auto &sortedPair : sortedPairs)
         {
-            const BubbleContactPair &pair = *sortedPair.second;
+            BubbleContactPair &pair = *sortedPair.second;
             float visibility = FusionSurfaceVisibility(pair);
             int aIndex = -1;
             int bIndex = -1;
@@ -3425,10 +4280,15 @@ static void RenderFrame()
             const DisplayBubble &b = g_DisplayBubbles[(size_t)bIndex];
             float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
             float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
-            float targetVolume = std::max(volumeA + volumeB, 0.001f);
+            float targetVolume = pair.fusionProfileInitialized
+                                     ? pair.conservedFusionVolume
+                                     : std::max(volumeA + volumeB, 0.001f);
             float targetRadius = RadiusFromVolume(targetVolume);
-            glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) /
-                                     targetVolume;
+            glm::vec3 targetCenter = pair.fusionProfileInitialized
+                ? pair.fusionCenter +
+                      pair.fusionCenterVelocity * pair.fusionElapsed
+                : (a.position * volumeA + b.position * volumeB) /
+                      targetVolume;
 
             glm::vec3 axis = pair.fusionFrameInitialized
                                  ? pair.fusionAxis
@@ -3462,10 +4322,6 @@ static void RenderFrame()
             float centerA = glm::dot(a.position - targetCenter, axis);
             float centerB = glm::dot(b.position - targetCenter, axis);
 
-            float oscillationEnvelope = (1.0f - pair.relaxationProgress) *
-                                        pair.relaxationProgress;
-            float oscillation = std::sin(pair.relaxationProgress * 3.0f * 3.14159265f) *
-                                oscillationEnvelope * 0.12f;
             glm::mat3 fusionBasis(1.0f);
             fusionBasis[0] = axis;
             fusionBasis[1] = side;
@@ -3476,11 +4332,12 @@ static void RenderFrame()
             parameters.radiusA = a.radius;
             parameters.centerB = centerB;
             parameters.radiusB = b.radius;
-            parameters.targetRadius = targetRadius;
-            parameters.neckProgress = pair.neckProgress;
-            parameters.relaxationProgress = pair.relaxationProgress;
-            parameters.oscillation = oscillation;
-            std::vector<Vertex> fusionVertices = BuildFusionSurfaceVertices(parameters);
+            parameters.opticalReferenceRadius = targetRadius;
+            std::vector<Vertex> fusionVertices =
+                BuildFusionSurfaceVertices(parameters,
+                                           pair.fusionProfile);
+            if (fusionVertices.empty())
+                continue;
             for (Vertex &vertex : fusionVertices)
             {
                 vertex.Position = fusionBasis * vertex.Position;
@@ -3501,7 +4358,6 @@ static void RenderFrame()
                 Mesh *mesh = fusionSurface->getMesh(0);
                 if (mesh)
                 {
-                    PreserveFilmCoordinates(fusionVertices, mesh->vertices);
                     mesh->updateVertices(fusionVertices);
                 }
             }
@@ -3517,25 +4373,12 @@ static void RenderFrame()
                                ? (g_InteractionDemoActive ? 0.62f : 0.72f)
                                : 1.0f) *
                           pairAlpha * visibility;
-            // Interpolate the refraction scale from the volume-weighted
-            // average of the two bubble radii to the merged target radius.
-            // uSpherePixelRadius (and thus the background offset and its
-            // clamp) scales linearly with this value, so interpolating it
-            // makes the refraction continuous across the fusion start
-            // (where shells used rA/rB) and the fusion end (where the
-            // survivor uses mergedRadius = targetRadius).
-            float avgRadius = (volumeA * a.radius + volumeB * b.radius) /
-                              std::max(volumeA + volumeB, 0.001f);
-            float totalFusionDuration = kRelaxationDelay + kRelaxationDuration;
-            float fusionProgress = Smooth01(pair.fusionElapsed /
-                                             std::max(totalFusionDuration, 0.001f));
-            float refractionRadius = glm::mix(avgRadius, targetRadius, fusionProgress);
-            SetRefractUniforms(fusionModel, refractionRadius,
+            // Each persistent material ring carries its parent-film direction
+            // and optical scale. No target sphere is sampled in this pass.
+            SetRefractUniforms(fusionModel, targetRadius,
                                isBackFace, renderToFBO, false,
                                0.0f, 0.0f, 2, alpha, 1.0f);
-            g_RefractionShader->SetFloat(
-                "uOpticalNormalBlend",
-                1.0f - Smooth01(pair.relaxationProgress));
+            ApplyPersistentVisualState(pair.visualState);
             g_RefractionShader->SetInt("uVisualContactCount", 0);
             fusionSurface->Draw(*g_RefractionShader);
         }
@@ -3574,7 +4417,11 @@ static void RenderFrame()
         {
             int aIndex = -1;
             int bIndex = -1;
-            if ((!pair.candidate && !pair.bonded) || pair.contactRadius <= 0.002f ||
+            // The shared internal film ruptures at the topology event.  Do not
+            // alpha-fade this obsolete disc over the new neck: that produces
+            // a detached translucent remnant during coalescence.
+            if (pair.fusionActive ||
+                (!pair.candidate && !pair.bonded) || pair.contactRadius <= 0.002f ||
                 !ResolveContactPairIndices(g_DisplayBubbles, pair, aIndex, bIndex))
             {
                 continue;
@@ -3588,9 +4435,7 @@ static void RenderFrame()
                 b.state == DisplayBubble::State::Dead)
                 continue;
             float visibility = pair.contactActivation * pair.contactActivation;
-            float ruptureFade = pair.fusionActive ? 1.0f - pair.ruptureProgress : 1.0f;
             float alpha = (straightComposite ? 0.16f : 0.24f) * visibility;
-            alpha *= ruptureFade;
             if (alpha <= 0.002f)
             {
                 continue;
@@ -3600,11 +4445,8 @@ static void RenderFrame()
                                      0.008f;
             float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
             float normalizedCurvature = ContactFilmWorldCurvature(a, b, pair) * filmRadius;
-            float holeRadius = pair.fusionActive
-                                   ? Smooth01(pair.ruptureProgress) * 0.98f
-                                   : 0.0f;
             std::vector<Vertex> contactVertices =
-                BuildCurvedContactFilmVertices(normalizedCurvature, holeRadius);
+                BuildCurvedContactFilmVertices(normalizedCurvature, 0.0f);
             for (Vertex &vertex : contactVertices)
             {
                 glm::vec3 materialDirection(vertex.Position.x,
@@ -3723,6 +4565,8 @@ static void RenderFrame()
     {
 
         g_BackgroundShader->Use();
+        g_BackgroundShader->SetVec4("uColor",
+                                    glm::vec4(1.0f));
         for (size_t i = 0; i < g_BackgroundModels.size(); ++i)
         {
             glm::mat4 bgModel = glm::translate(glm::mat4(1.0f), g_SpherePositions[i]);
@@ -3838,6 +4682,205 @@ static void RenderFrame()
     DrawFusionSurfaces(false, false, g_MainSceneTexture, true);
     DrawContactBridges(false, false, g_MainSceneTexture, true);
     DrawSpawnPreview(g_MainSceneTexture);
+
+    if ((g_DebugFusionProfile || g_DebugFusionCurvature ||
+         g_DebugFusionForces) && g_DecorativeBubbleModel)
+    {
+        GLboolean depthWasEnabled = glIsEnabled(GL_DEPTH_TEST);
+        GLboolean blendWasEnabled = glIsEnabled(GL_BLEND);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        g_BackgroundShader->Use();
+
+        auto drawDiagnosticSphere =
+            [&](const glm::vec3 &position, float radius,
+                const glm::vec4 &color)
+        {
+            glm::mat4 model =
+                glm::translate(glm::mat4(1.0f), position);
+            model = glm::scale(model, glm::vec3(radius));
+            g_BackgroundShader->SetMat4(
+                "uMVP", g_Camera.getMVP(model));
+            g_BackgroundShader->SetVec4("uColor", color);
+            g_DecorativeBubbleModel->Draw(*g_BackgroundShader);
+        };
+        auto drawDiagnosticSegment =
+            [&](const glm::vec3 &start, const glm::vec3 &end,
+                float thickness, const glm::vec4 &color)
+        {
+            glm::vec3 vector = end - start;
+            float length = glm::length(vector);
+            if (length <= 1e-6f)
+                return;
+            glm::vec3 direction = vector / length;
+            float alignment = glm::clamp(direction.x, -1.0f, 1.0f);
+            glm::quat rotation;
+            if (alignment < -0.9999f)
+                rotation = glm::angleAxis(
+                    3.14159265358979323846f,
+                    glm::vec3(0.0f, 1.0f, 0.0f));
+            else
+            {
+                glm::vec3 crossAxis = glm::cross(
+                    glm::vec3(1.0f, 0.0f, 0.0f), direction);
+                rotation = glm::normalize(glm::quat(
+                    1.0f + alignment,
+                    crossAxis.x, crossAxis.y, crossAxis.z));
+            }
+            glm::mat4 model = glm::translate(
+                glm::mat4(1.0f), 0.5f * (start + end)) *
+                glm::mat4_cast(rotation);
+            model = glm::scale(model,
+                glm::vec3(0.5f * length, thickness, thickness));
+            g_BackgroundShader->SetMat4("uMVP", g_Camera.getMVP(model));
+            g_BackgroundShader->SetVec4("uColor", color);
+            g_DecorativeBubbleModel->Draw(*g_BackgroundShader);
+        };
+
+        for (const BubbleContactPair &pair : g_ContactPairs)
+        {
+            if (!pair.fusionActive ||
+                !pair.fusionProfileInitialized)
+                continue;
+            glm::vec3 center =
+                pair.fusionCenter +
+                pair.fusionCenterVelocity * pair.fusionElapsed;
+            auto nodePosition = [&](std::size_t index) {
+                const FusionProfileNode &node = pair.fusionProfile[index];
+                return center + pair.fusionAxis * node.z +
+                       pair.fusionSide * node.r;
+            };
+            if (g_DebugFusionProfile)
+            {
+                for (std::size_t i = 0;
+                     i + 1 < pair.fusionProfile.size(); ++i)
+                    drawDiagnosticSegment(
+                        nodePosition(i), nodePosition(i + 1), 0.0025f,
+                        glm::vec4(0.05f, 0.95f, 1.0f, 0.92f));
+                for (std::size_t i = 0; i < pair.fusionProfile.size(); ++i)
+                    drawDiagnosticSphere(
+                        nodePosition(i), 0.0065f,
+                        glm::vec4(0.05f, 1.0f, 0.35f, 0.98f));
+            }
+            if (g_DebugFusionCurvature)
+            {
+                float scale = std::max(
+                    pair.fusionDiagnostics.maxAbsCurvature, 1e-5f);
+                for (std::size_t i = 0; i < pair.fusionProfile.size(); ++i)
+                {
+                    float heat = glm::clamp(
+                        std::abs(pair.fusionProfile[i].curvature) / scale,
+                        0.0f, 1.0f);
+                    glm::vec4 color(
+                        heat, 0.25f + 0.75f * (1.0f - heat),
+                        1.0f - heat, 0.98f);
+                    drawDiagnosticSphere(nodePosition(i), 0.009f, color);
+                }
+            }
+            if (g_DebugFusionForces)
+            {
+                float forceScale = std::max(
+                    pair.fusionDiagnostics.maxNormalForce, 1e-7f);
+                for (std::size_t i = 0; i < pair.fusionProfile.size(); i += 2)
+                {
+                    const FusionProfileNode &node = pair.fusionProfile[i];
+                    glm::vec3 force = pair.fusionAxis * node.normalForceZ +
+                                      pair.fusionSide * node.normalForceR;
+                    glm::vec3 arrow = force * (0.10f / forceScale);
+                    drawDiagnosticSphere(
+                        nodePosition(i), 0.0055f,
+                        glm::vec4(1.0f, 0.75f, 0.05f, 0.95f));
+                    drawDiagnosticSegment(
+                        nodePosition(i), nodePosition(i) + arrow,
+                        0.0035f,
+                        glm::vec4(1.0f, 0.12f, 0.03f, 0.95f));
+                }
+            }
+            if (g_DebugFusionProfile)
+            {
+            for (std::size_t trailIndex = 0;
+                 trailIndex < pair.fusionDiagnosticTrails.size();
+                 ++trailIndex)
+            {
+                const std::vector<glm::vec3> &trail =
+                    pair.fusionDiagnosticTrails[trailIndex];
+                for (std::size_t sample = 0;
+                     sample < trail.size(); sample += 6)
+                {
+                    float age = trail.empty()
+                                    ? 0.0f
+                                    : static_cast<float>(sample + 1) /
+                                          static_cast<float>(trail.size());
+                    drawDiagnosticSphere(
+                        trail[sample], 0.006f,
+                        glm::vec4(0.15f, 1.0f, 0.30f,
+                                  0.20f + 0.65f * age));
+                }
+
+                std::size_t nodeIndex = std::min(
+                    pair.fusionDiagnosticNodeIndices[trailIndex],
+                    pair.fusionProfile.size() - 1);
+                const FusionProfileNode &node =
+                    pair.fusionProfile[nodeIndex];
+                glm::vec3 position =
+                    center + pair.fusionAxis * node.z +
+                    pair.fusionSide * node.r;
+                drawDiagnosticSphere(
+                    position, 0.014f,
+                    glm::vec4(0.05f, 1.0f, 0.20f, 1.0f));
+
+                glm::vec3 velocity =
+                    pair.fusionAxis * node.vz +
+                    pair.fusionSide * node.vr;
+                float speed = glm::length(velocity);
+                if (speed > 1e-5f)
+                {
+                    glm::vec3 arrow = velocity *
+                                      (0.12f / std::max(speed, 0.12f));
+                    float arrowLength = glm::length(arrow);
+                    glm::vec3 arrowDirection =
+                        arrow / arrowLength;
+                    float alignment = glm::clamp(
+                        arrowDirection.x, -1.0f, 1.0f);
+                    glm::quat rotation;
+                    if (alignment < -0.9999f)
+                        rotation = glm::angleAxis(
+                            3.14159265358979323846f,
+                            glm::vec3(0.0f, 1.0f, 0.0f));
+                    else
+                    {
+                        glm::vec3 crossAxis =
+                            glm::cross(glm::vec3(1.0f, 0.0f, 0.0f),
+                                       arrowDirection);
+                        rotation = glm::normalize(glm::quat(
+                            1.0f + alignment,
+                            crossAxis.x, crossAxis.y, crossAxis.z));
+                    }
+                    glm::mat4 model =
+                        glm::translate(glm::mat4(1.0f),
+                                       position + 0.5f * arrow) *
+                        glm::mat4_cast(rotation);
+                    model = glm::scale(
+                        model,
+                        glm::vec3(0.5f * arrowLength,
+                                  0.0045f, 0.0045f));
+                    g_BackgroundShader->SetMat4(
+                        "uMVP", g_Camera.getMVP(model));
+                    g_BackgroundShader->SetVec4(
+                        "uColor",
+                        glm::vec4(1.0f, 0.18f, 0.05f, 0.95f));
+                    g_DecorativeBubbleModel->Draw(
+                        *g_BackgroundShader);
+                }
+            }
+            }
+        }
+        if (depthWasEnabled)
+            glEnable(GL_DEPTH_TEST);
+        if (!blendWasEnabled)
+            glDisable(GL_BLEND);
+    }
 }
 
 // ============================================================
@@ -4178,8 +5221,55 @@ static void Cleanup()
 // ============================================================
 // Main
 // ============================================================
-int main()
+int main(int argc, char **argv)
 {
+    bool validateFusion = false;
+    std::string validationCase = "two-to-one";
+    float validationFixedDt = 0.0f;
+    std::filesystem::path validationOutput = "validation_frames";
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string argument(argv[i]);
+        if (argument == "--validate-fusion")
+        {
+            validateFusion = true;
+        }
+        else if (std::string(argv[i]) ==
+                 "--debug-fusion-profile")
+        {
+            g_DebugFusionProfile = true;
+        }
+        else if (argument == "--debug-fusion-curvature")
+        {
+            g_DebugFusionCurvature = true;
+        }
+        else if (argument == "--debug-fusion-forces")
+        {
+            g_DebugFusionForces = true;
+        }
+        else if (argument.rfind("--fusion-render-debug=", 0) == 0)
+        {
+            std::string mode = argument.substr(22);
+            if (mode == "unlit") g_FusionRenderDiagnosticMode = 1;
+            else if (mode == "normal") g_FusionRenderDiagnosticMode = 2;
+            else if (mode == "thickness") g_FusionRenderDiagnosticMode = 3;
+            else if (mode == "phase") g_FusionRenderDiagnosticMode = 4;
+            else if (mode == "coordinate") g_FusionRenderDiagnosticMode = 5;
+        }
+        else if (argument.rfind("--fusion-case=", 0) == 0)
+        {
+            validationCase = argument.substr(14);
+        }
+        else if (argument.rfind("--fixed-dt=", 0) == 0)
+        {
+            validationFixedDt =
+                std::max(std::stof(argument.substr(11)), 0.0f);
+        }
+        else if (argument.rfind("--validation-output=", 0) == 0)
+        {
+            validationOutput = argument.substr(20);
+        }
+    }
 #ifdef _WIN32
     SetConsoleTitleA(g_AppTitle);
 #endif
@@ -4297,6 +5387,14 @@ int main()
 
     g_DecorativeBubbleModel = Model::CreateSphere(1.0f, 32, 16, true);
     ResetDisplayBubbles();
+    if (validateFusion)
+    {
+        // The interaction demo cycles stable / unequal fusion / separation.
+        // Advance to the unequal coalescence case for deterministic capture.
+        StartBubbleInteractionDemo();
+        StartBubbleInteractionDemo();
+        ConfigureFusionValidationCase(validationCase);
+    }
 
     // Background spheres (5×5 grid)
     float sphere_z = -5.0f;
@@ -4385,17 +5483,212 @@ int main()
     std::cout << "Scene: three-bubble center with ambient showcase bubbles" << std::endl;
     std::cout << "==================================================" << std::endl;
 
+    std::vector<unsigned char> validationPreviousFrame;
+    bool validationWasFusing = false;
+    int validationSavedFrame = 0;
+    double validationRuptureTime = -1.0;
+    double validationNextCaptureTime = -1.0;
+    std::ofstream validationProfileCsv;
+    std::deque<std::vector<unsigned char>> validationHandoffPreFrames;
+    uint64_t validationObservedHandoffSerial = g_FusionHandoffSerial;
+    int validationHandoffPostRemaining = -1;
+    int validationHandoffFrameIndex = 0;
+    if (validateFusion)
+    {
+        std::filesystem::create_directories(validationOutput);
+        validationProfileCsv.open(
+            validationOutput / "fusion_profile_trajectory.csv");
+        validationProfileCsv
+            << "time,node,z,r,vz,vr,mass,curvature,normal_force_z,"
+               "normal_force_r,volume_correction,volume,area,centroid_z,"
+               "rms_speed,curvature_variation,shape_mode,min_edge,max_edge,"
+               "edge_ratio,min_angle_deg,min_angle_node,max_curvature,"
+               "max_curvature_node,max_normal_force,max_normal_force_node,"
+               "max_volume_correction,max_volume_correction_node,"
+               "max_edge_node\n";
+    }
+
     while (!glfwWindowShouldClose(window))
     {
         double currentTime = glfwGetTime();
         if (g_LastFrameTime == 0.0)
             g_LastFrameTime = currentTime;
-        g_DeltaTime = currentTime - g_LastFrameTime;
+        g_DeltaTime = validationFixedDt > 0.0f
+                          ? validationFixedDt
+                          : currentTime - g_LastFrameTime;
         g_Time += g_DeltaTime;
         g_LastFrameTime = currentTime;
         UpdateFPS(window, currentTime);
 
         RenderFrame();
+        if (validateFusion)
+        {
+            if (validationProfileCsv)
+            {
+                for (const BubbleContactPair &pair : g_ContactPairs)
+                {
+                    if (!pair.fusionActive ||
+                        !pair.fusionProfileInitialized)
+                        continue;
+                    float volume =
+                        FusionProfileVolume(pair.fusionProfile);
+                    for (std::size_t nodeIndex = 0;
+                         nodeIndex < pair.fusionProfile.size();
+                         ++nodeIndex)
+                    {
+                        const FusionProfileNode &node =
+                            pair.fusionProfile[nodeIndex];
+                        validationProfileCsv
+                            << pair.fusionElapsed << ","
+                            << nodeIndex << "," << node.z << ","
+                            << node.r << "," << node.vz << ","
+                            << node.vr << "," << node.mass << ","
+                            << node.curvature << ","
+                            << node.normalForceZ << ","
+                            << node.normalForceR << ","
+                            << node.volumeCorrection << ","
+                            << volume << ","
+                            << pair.currentFusionArea << ","
+                            << FusionProfileCentroidZ(
+                                   pair.fusionProfile)
+                            << "," << pair.fusionRmsSpeed << ","
+                            << pair.fusionCurvatureVariation << ","
+                            << pair.fusionShapeMode << ","
+                            << pair.fusionDiagnostics.minEdgeLength << ","
+                            << pair.fusionDiagnostics.maxEdgeLength << ","
+                            << pair.fusionDiagnostics.edgeLengthRatio << ","
+                            << pair.fusionDiagnostics.minInternalAngleDegrees << ","
+                            << pair.fusionDiagnostics.minAngleNode << ","
+                            << pair.fusionDiagnostics.maxAbsCurvature << ","
+                            << pair.fusionDiagnostics.maxCurvatureNode << ","
+                            << pair.fusionDiagnostics.maxNormalForce << ","
+                            << pair.fusionDiagnostics.maxNormalForceNode << ","
+                            << pair.fusionDiagnostics.maxVolumeCorrection << ","
+                            << pair.fusionDiagnostics.maxVolumeCorrectionNode << ","
+                            << pair.fusionDiagnostics.maxEdgeNode << "\n";
+                    }
+                }
+            }
+            int captureWidth = 0;
+            int captureHeight = 0;
+            glfwGetFramebufferSize(window, &captureWidth, &captureHeight);
+            std::vector<unsigned char> currentFrame(
+                (size_t)captureWidth * (size_t)captureHeight * 3u);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadBuffer(GL_BACK);
+            glReadPixels(0, 0, captureWidth, captureHeight,
+                         GL_RGB, GL_UNSIGNED_BYTE, currentFrame.data());
+
+            if (g_FusionHandoffSerial != validationObservedHandoffSerial)
+            {
+                validationObservedHandoffSerial = g_FusionHandoffSerial;
+                int preIndex = 0;
+                for (const std::vector<unsigned char> &frame :
+                     validationHandoffPreFrames)
+                {
+                    char fileName[64];
+                    std::snprintf(fileName, sizeof(fileName),
+                                  "handoff_%03d.ppm", preIndex++);
+                    SaveValidationFrame(validationOutput / fileName,
+                                        frame, captureWidth, captureHeight);
+                }
+                validationHandoffFrameIndex = preIndex;
+                char fileName[64];
+                std::snprintf(fileName, sizeof(fileName),
+                              "handoff_%03d.ppm",
+                              validationHandoffFrameIndex++);
+                SaveValidationFrame(validationOutput / fileName,
+                                    currentFrame, captureWidth, captureHeight);
+                validationHandoffPostRemaining = 10;
+                std::ofstream handoffMetadata(
+                    validationOutput / "handoff_metadata.txt");
+                handoffMetadata
+                    << "completion_frame=" << preIndex << "\n"
+                    << "global_time=" << g_LastFusionHandoffTime << "\n"
+                    << "diagnostic_mode=" << g_FusionRenderDiagnosticMode
+                    << "\n"
+                    << g_LastFusionHandoffSnapshot;
+            }
+            else if (validationHandoffPostRemaining > 0)
+            {
+                char fileName[64];
+                std::snprintf(fileName, sizeof(fileName),
+                              "handoff_%03d.ppm",
+                              validationHandoffFrameIndex++);
+                SaveValidationFrame(validationOutput / fileName,
+                                    currentFrame, captureWidth, captureHeight);
+                --validationHandoffPostRemaining;
+            }
+            else if (validationHandoffPostRemaining < 0)
+            {
+                validationHandoffPreFrames.push_back(currentFrame);
+                while (validationHandoffPreFrames.size() > 10)
+                    validationHandoffPreFrames.pop_front();
+            }
+
+            bool isFusing = false;
+            for (const BubbleContactPair &pair : g_ContactPairs)
+            {
+                isFusing = isFusing || pair.fusionActive;
+            }
+            if (isFusing && !validationWasFusing)
+            {
+                if (!validationPreviousFrame.empty())
+                {
+                    SaveValidationFrame(
+                        validationOutput / "000_pre_rupture.ppm",
+                        validationPreviousFrame, captureWidth, captureHeight);
+                }
+                SaveValidationFrame(
+                    validationOutput / "001_rupture.ppm",
+                    currentFrame, captureWidth, captureHeight);
+                validationSavedFrame = 2;
+                validationRuptureTime = g_Time;
+                validationNextCaptureTime = g_Time + 0.10;
+            }
+            else if (validationRuptureTime >= 0.0)
+            {
+                if (g_Time >= validationNextCaptureTime)
+                {
+                    char fileName[48];
+                    std::snprintf(fileName, sizeof(fileName),
+                                  "%03d_relax.ppm",
+                                  validationSavedFrame++);
+                    SaveValidationFrame(validationOutput / fileName,
+                                        currentFrame,
+                                        captureWidth, captureHeight);
+                    validationNextCaptureTime += 0.10;
+                }
+                if (g_Time - validationRuptureTime >= 6.0)
+                {
+                    for (const BubbleContactPair &pair : g_ContactPairs)
+                    {
+                        if (!pair.fusionProfileInitialized)
+                            continue;
+                        std::cout
+                            << "[FusionValidation] conserved_volume="
+                            << pair.conservedFusionVolume
+                            << " final_volume="
+                            << FusionProfileVolume(pair.fusionProfile)
+                            << " max_volume_error="
+                            << pair.maximumRelativeVolumeError * 100.0f
+                            << "% max_centroid_error="
+                            << pair.maximumCentroidError
+                            << " zero_crossings="
+                            << pair.fusionShapeZeroCrossings
+                            << " final_shape_mode="
+                            << pair.fusionShapeMode
+                            << " rms_speed=" << pair.fusionRmsSpeed
+                            << " curvature_variation="
+                            << pair.fusionCurvatureVariation
+                            << std::endl;
+                    }
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                }
+            }
+            validationPreviousFrame = std::move(currentFrame);
+            validationWasFusing = isFusing;
+        }
         glfwSwapBuffers(window);
         glfwPollEvents();
     }

@@ -115,166 +115,132 @@ std::vector<Vertex> BuildCurvedContactFilmVertices(float normalizedCurvature,
 
 std::vector<unsigned int> BuildFusionSurfaceIndices(int segments, int rings)
 {
-    return BuildContactBubblePatchIndices(segments, rings);
+    segments = std::max(segments, 8);
+    rings = std::max(rings, 2);
+    std::vector<unsigned int> indices;
+    indices.reserve(static_cast<size_t>(rings - 1) *
+                    static_cast<size_t>(segments) * 6u);
+    const unsigned int firstRing = 1u;
+    for (int j = 0; j < segments; ++j)
+    {
+        indices.push_back(0u);
+        indices.push_back(firstRing + static_cast<unsigned int>(j));
+        indices.push_back(firstRing + static_cast<unsigned int>(j + 1));
+    }
+    for (int ring = 1; ring < rings - 1; ++ring)
+    {
+        unsigned int row0 = 1u + static_cast<unsigned int>(ring - 1) *
+                                  static_cast<unsigned int>(segments + 1);
+        unsigned int row1 = row0 + static_cast<unsigned int>(segments + 1);
+        for (int j = 0; j < segments; ++j)
+        {
+            unsigned int a = row0 + static_cast<unsigned int>(j);
+            unsigned int b = row1 + static_cast<unsigned int>(j);
+            unsigned int c = a + 1u;
+            unsigned int d = b + 1u;
+            indices.insert(indices.end(), {a, b, c, c, b, d});
+        }
+    }
+    unsigned int rightPole = 1u + static_cast<unsigned int>(rings - 1) *
+                                   static_cast<unsigned int>(segments + 1);
+    unsigned int lastRing = rightPole -
+                            static_cast<unsigned int>(segments + 1);
+    for (int j = 0; j < segments; ++j)
+    {
+        indices.push_back(lastRing + static_cast<unsigned int>(j));
+        indices.push_back(rightPole);
+        indices.push_back(lastRing + static_cast<unsigned int>(j + 1));
+    }
+    return indices;
 }
 
-std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& parameters,
-                                               int segments,
-                                               int rings)
+std::vector<Vertex> BuildFusionSurfaceVertices(
+    const FusionSurfaceParameters& parameters,
+    const std::vector<FusionProfileNode>& profile,
+    int segments,
+    int rings)
 {
-    float centerA = parameters.centerA;
-    float radiusA = parameters.radiusA;
-    float centerB = parameters.centerB;
-    float radiusB = parameters.radiusB;
-    float targetRadius = parameters.targetRadius;
-    float neckProgress = parameters.neckProgress;
-    float relaxationProgress = parameters.relaxationProgress;
-    float oscillation = parameters.oscillation;
-    radiusA = std::max(radiusA, 0.001f);
-    radiusB = std::max(radiusB, 0.001f);
-    targetRadius = std::max(targetRadius, 0.001f);
-    neckProgress = Smooth01Local(neckProgress);
-    relaxationProgress = Smooth01Local(relaxationProgress);
-
-    if (centerA > centerB) {
-        std::swap(centerA, centerB);
-        std::swap(radiusA, radiusB);
-    }
-
-    float sourceLeft = std::min(centerA - radiusA, centerB - radiusB);
-    float sourceRight = std::max(centerA + radiusA, centerB + radiusB);
-    float minRadius = std::min(radiusA, radiusB);
-    float contactCenter = 0.5f * ((centerA + radiusA) + (centerB - radiusB));
-    float bridgeHalfWidth = minRadius * glm::mix(0.12f, 0.92f, neckProgress);
-    float neckRadius = minRadius * glm::mix(0.025f, 0.78f,
-                                            std::pow(neckProgress, 0.65f));
-
-    std::vector<float> axial((size_t)rings + 1u);
-    std::vector<float> radial((size_t)rings + 1u);
-    std::vector<float> sourceAxial((size_t)rings + 1u);
-    for (int ring = 0; ring <= rings; ++ring) {
-        float v = (float)ring / (float)rings;
-        float sourceX = glm::mix(sourceLeft, sourceRight, v);
-        float targetTheta = kPi * (1.0f - Smooth01Local(v));
-        float targetX = std::cos(targetTheta) * targetRadius;
-        float x = glm::mix(sourceX, targetX, relaxationProgress);
-        float rhoASq = radiusA * radiusA - (x - centerA) * (x - centerA);
-        float rhoBSq = radiusB * radiusB - (x - centerB) * (x - centerB);
-        float sourceRho = std::max(std::sqrt(std::max(rhoASq, 0.0f)),
-                                   std::sqrt(std::max(rhoBSq, 0.0f)));
-
-        float bridgeDistance = std::abs(x - contactCenter) /
-                               std::max(bridgeHalfWidth, 0.001f);
-        float bridgeShape = bridgeDistance < 1.0f
-            ? 1.0f - Smooth01Local(bridgeDistance)
-            : 0.0f;
-        sourceRho = std::max(sourceRho, neckRadius * bridgeShape);
-
-        float targetRhoSq = targetRadius * targetRadius - targetX * targetX;
-        float targetRho = std::sqrt(std::max(targetRhoSq, 0.0f));
-        float rho = glm::mix(sourceRho, targetRho, relaxationProgress);
-
-        float normalizedX = x / std::max(targetRadius, 0.001f);
-        float quadrupole = 0.5f * (3.0f * normalizedX * normalizedX - 1.0f);
-        rho *= std::max(0.0f, 1.0f - oscillation * quadrupole);
-        x *= 1.0f + oscillation;
-
-        axial[(size_t)ring] = x;
-        radial[(size_t)ring] = ring == 0 || ring == rings ? 0.0f : rho;
-        sourceAxial[(size_t)ring] = sourceX;
-    }
-
-    float volumeIntegral = 0.0f;
-    for (int ring = 1; ring <= rings; ++ring) {
-        float dx = std::max(axial[(size_t)ring] - axial[(size_t)ring - 1u], 0.0f);
-        float rho0 = radial[(size_t)ring - 1u];
-        float rho1 = radial[(size_t)ring];
-        volumeIntegral += 0.5f * (rho0 * rho0 + rho1 * rho1) * dx;
-    }
-    if (volumeIntegral > 1e-6f) {
-        float targetIntegral = (4.0f / 3.0f) * targetRadius * targetRadius * targetRadius;
-        float radialVolumeScale = glm::mix(
-            std::sqrt(targetIntegral / volumeIntegral),
-            1.0f,
-            relaxationProgress);
-        for (int ring = 1; ring < rings; ++ring) {
-            radial[(size_t)ring] *= radialVolumeScale;
-        }
-    }
-
     std::vector<Vertex> vertices;
-    vertices.reserve((size_t)(rings + 1) * (size_t)(segments + 1));
-    for (int ring = 0; ring <= rings; ++ring) {
-        float dx = 1.0f;
-        float dr = 0.0f;
-        if (ring == 0) {
-            dx = axial[1] - axial[0];
-            dr = radial[1] - radial[0];
-        } else if (ring == rings) {
-            dx = axial[(size_t)rings] - axial[(size_t)rings - 1u];
-            dr = radial[(size_t)rings] - radial[(size_t)rings - 1u];
-        } else {
-            dx = axial[(size_t)ring + 1u] - axial[(size_t)ring - 1u];
-            dr = radial[(size_t)ring + 1u] - radial[(size_t)ring - 1u];
-        }
-        float slope = dr / std::max(std::abs(dx), 1e-5f);
+    if (profile.size() < 3)
+        return vertices;
 
-        for (int segment = 0; segment <= segments; ++segment) {
-            float u = (float)segment / (float)segments;
-            float angle = 2.0f * kPi * u;
-            float cosine = std::cos(angle);
-            float sine = std::sin(angle);
+    segments = std::max(segments, 8);
+    rings = static_cast<int>(profile.size()) - 1;
+    float opticalReferenceRadius =
+        std::max(parameters.opticalReferenceRadius, 0.001f);
+    // One shared vertex per pole avoids duplicate positions and degenerate
+    // triangles. Only non-polar rings retain a duplicated UV seam.
+    vertices.reserve(2 + (rings - 1) * (segments + 1));
+
+    for (int i = 0; i <= rings; ++i)
+    {
+        const FusionProfileNode& node = profile[static_cast<std::size_t>(i)];
+        glm::vec2 tangent;
+        if (i == 0)
+            tangent = glm::vec2(profile[1].z - node.z,
+                                profile[1].r - node.r);
+        else if (i == rings)
+            tangent = glm::vec2(node.z - profile[profile.size() - 2].z,
+                                node.r - profile[profile.size() - 2].r);
+        else
+        {
+            glm::vec2 previous(
+                node.z - profile[static_cast<std::size_t>(i - 1)].z,
+                node.r - profile[static_cast<std::size_t>(i - 1)].r);
+            glm::vec2 next(
+                profile[static_cast<std::size_t>(i + 1)].z - node.z,
+                profile[static_cast<std::size_t>(i + 1)].r - node.r);
+            // Arc-length-consistent tangent: unequal ring spacing must not
+            // bias the rendered normal toward the longer adjacent edge.
+            tangent = previous / std::max(glm::length(previous), 1e-7f) +
+                      next / std::max(glm::length(next), 1e-7f);
+        }
+
+        float tangentLength = glm::length(tangent);
+        if (tangentLength > 1e-7f)
+            tangent /= tangentLength;
+        else
+            tangent = glm::vec2(1.0f, 0.0f);
+
+        int angularVertexCount = (i == 0 || i == rings)
+                                     ? 1
+                                     : segments + 1;
+        for (int j = 0; j < angularVertexCount; ++j)
+        {
+            float u = static_cast<float>(j) / static_cast<float>(segments);
+            float phi = 2.0f * kPi * u;
+            float c = std::cos(phi);
+            float s = std::sin(phi);
 
             Vertex vertex{};
-            vertex.Position = glm::vec3(axial[(size_t)ring],
-                                        radial[(size_t)ring] * cosine,
-                                        radial[(size_t)ring] * sine);
-            glm::vec3 geometricNormal;
-            if (ring == 0) {
-                geometricNormal = glm::vec3(-1.0f, 0.0f, 0.0f);
-            } else if (ring == rings) {
-                geometricNormal = glm::vec3(1.0f, 0.0f, 0.0f);
-            } else {
-                geometricNormal = glm::normalize(glm::vec3(-slope, cosine, sine));
-            }
-            glm::vec3 targetNormal = SafeNormalize(vertex.Position, geometricNormal);
-            vertex.Normal = SafeNormalize(
-                glm::mix(geometricNormal, targetNormal, relaxationProgress),
-                targetNormal);
-            vertex.TexCoords = glm::vec2(u, (float)ring / (float)rings);
-            float materialX = sourceAxial[(size_t)ring];
-            float sourceRhoA = std::sqrt(std::max(
-                radiusA * radiusA - (materialX - centerA) * (materialX - centerA),
-                0.0f));
-            float sourceRhoB = std::sqrt(std::max(
-                radiusB * radiusB - (materialX - centerB) * (materialX - centerB),
-                0.0f));
-            glm::vec3 radialFallback(0.0f, cosine, sine);
-            glm::vec3 sourceDirectionA = SafeNormalize(
-                glm::vec3(materialX - centerA, sourceRhoA * cosine, sourceRhoA * sine),
-                radialFallback);
-            glm::vec3 sourceDirectionB = SafeNormalize(
-                glm::vec3(materialX - centerB, sourceRhoB * cosine, sourceRhoB * sine),
-                radialFallback);
-            float materialBlendHalfWidth = std::max(minRadius * 0.32f, 0.001f);
-            float sourceBlend = Smooth01Local(
-                (materialX - contactCenter + materialBlendHalfWidth) /
-                (2.0f * materialBlendHalfWidth));
-            glm::vec3 sourceFilmDirection = sourceBlend <= 0.5f
-                ? SafeNormalize(
-                    glm::mix(sourceDirectionA, radialFallback,
-                             Smooth01Local(sourceBlend * 2.0f)),
-                    radialFallback)
-                : SafeNormalize(
-                    glm::mix(radialFallback, sourceDirectionB,
-                             Smooth01Local((sourceBlend - 0.5f) * 2.0f)),
-                    radialFallback);
-            vertex.FilmDirection = sourceFilmDirection;
+            vertex.Position = glm::vec3(node.z, node.r * c, node.r * s);
+
+            if (i == 0)
+                vertex.Normal = glm::vec3(-1.0f, 0.0f, 0.0f);
+            else if (i == rings)
+                vertex.Normal = glm::vec3(1.0f, 0.0f, 0.0f);
+            else
+                vertex.Normal = SafeNormalize(
+                    glm::vec3(-tangent.y, tangent.x * c, tangent.x * s),
+                    glm::vec3(0.0f, c, s));
+
+            vertex.TexCoords = glm::vec2(u,
+                static_cast<float>(i) / static_cast<float>(rings));
             vertex.Tangent = glm::vec3(0.0f);
-            vertex.Bitangent = glm::vec3(0.0f);
+
+            glm::vec3 transportedFilmDirection(
+                node.filmAxial,
+                node.filmRadial * c,
+                node.filmRadial * s);
+            vertex.FilmDirection = SafeNormalize(
+                transportedFilmDirection, vertex.Normal);
+            vertex.OpticalRadiusScale =
+                std::max(node.opticalRadiusScale / opticalReferenceRadius,
+                         0.001f);
             vertices.push_back(vertex);
         }
     }
+
     return vertices;
 }
 

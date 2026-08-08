@@ -26,6 +26,7 @@ add_library(entry SHARED
     render/contact_geometry.cpp
     render/bubble_surface_system.cpp
     simulation/display_bubble_simulation.cpp
+    simulation/fusion_profile.cpp
     simulation/vortex_sheet.cpp
 )
 

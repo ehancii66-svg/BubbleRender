@@ -11,12 +11,16 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aTexCoord;
 layout(location = 5) in vec3 aFilmDirection;
+layout(location = 6) in float aOpticalRadiusScale;
 
 uniform mat4 uModel;
 uniform mat4 uView;
 uniform mat4 uProj;
 uniform vec3 uCameraPos;
 uniform float uTime;
+uniform vec3 uTextureOriginWorld;
+uniform mat3 uTextureBasis;
+uniform float uTextureReferenceRadius;
 uniform float uGeometryWobbleStrength;
 uniform float uContactDeformStrength;
 uniform int uVisualContactCount;
@@ -29,7 +33,9 @@ uniform int uForceSharedFilm;
 out vec3 vEyeVector;
 out vec3 vWorldNormal;
 out vec3 vFilmDirection;
+out float vOpticalRadiusScale;
 out vec3 vWorldPos;
+out vec3 vFilmCoordinate;
 out vec2 vUV;
 out mat4 vView;
 out mat4 vProj;
@@ -74,7 +80,11 @@ void main() {
         ? normalize(aFilmDirection)
         : localNormal;
     vFilmDirection = normalize(normalMatrix * localFilmDirection);
+    vOpticalRadiusScale = max(aOpticalRadiusScale, 0.01);
     vWorldPos = worldPos.xyz;
+    vFilmCoordinate = transpose(uTextureBasis) *
+        (worldPos.xyz - uTextureOriginWorld) /
+        max(uTextureReferenceRadius, 0.001);
     vUV = aTexCoord;
     vView = uView;
     vProj = uProj;
@@ -121,6 +131,12 @@ uniform sampler2D uThinFilmLUT;
 uniform float uEnvironmentReflectionStrength;
 uniform float uOutputAlpha;
 uniform float uOpticalNormalBlend;
+uniform int uFusionDiagnosticMode;
+uniform float uVisualTime;
+uniform vec3 uFilmNoiseOffset;
+uniform float uFilmBaseThicknessScale;
+uniform float uFilmThicknessAmplitudeScale;
+uniform float uFilmIor;
 
 uniform float uThickness;       // film thickness d (nm)
 uniform float uThicknessVar;    // thickness variation amplitude (nm)
@@ -132,7 +148,9 @@ uniform float uTouchVelocity;   // normalized drag speed
 in vec3 vEyeVector;
 in vec3 vWorldNormal;
 in vec3 vFilmDirection;
+in float vOpticalRadiusScale;
 in vec3 vWorldPos;
+in vec3 vFilmCoordinate;
 in vec2 vUV;
 in mat4 vView;
 in mat4 vProj;
@@ -403,7 +421,7 @@ R"(
 // Main
 // ============================================================
 void main() {
-    float iorRatio = 1.0 / 1.33;
+    float iorRatio = 1.0 / max(uFilmIor, 1.001);
 
     vec3 geometricNormal = normalize(vWorldNormal);
     float filmDirectionLengthSquared = dot(vFilmDirection, vFilmDirection);
@@ -416,6 +434,17 @@ void main() {
         : geometricNormal;
     if (uIsBackFace == 1) {
         normal = -normal;
+    }
+
+    if (uFusionDiagnosticMode == 1) {
+        FragColor = vec4(0.18, 0.68, 0.92,
+                         uOutputAlpha * vShellCoverage);
+        return;
+    }
+    if (uFusionDiagnosticMode == 2) {
+        FragColor = vec4(normal * 0.5 + 0.5,
+                         uOutputAlpha * vShellCoverage);
+        return;
     }
 
     vec3 eye = vEyeVector;
@@ -431,24 +460,43 @@ void main() {
     // ---- 1. Iridescence (Kim2012 thin-film interference) ----
     // Dynamic thickness using Simplex noise for sloshing effect
     float flowSpeed = 1.45;
-    vec3 slowFlow = vec3(uTime * 0.10, -uTime * 0.20, uTime * 0.08) * flowSpeed;
+    vec3 filmCoordinate = vFilmCoordinate + uFilmNoiseOffset;
+    vec3 slowFlow = vec3(uVisualTime * 0.10,
+                         -uVisualTime * 0.20,
+                         uVisualTime * 0.08) * flowSpeed;
     vec3 warp = vec3(
-        snoise(filmDir * 1.15 + slowFlow),
-        snoise(filmDir * 1.25 + slowFlow.yzx + vec3(4.1, 1.3, 2.7)),
-        snoise(filmDir * 1.05 + slowFlow.zxy + vec3(8.2, 5.4, 0.9))
+        snoise(filmCoordinate * 1.15 + slowFlow),
+        snoise(filmCoordinate * 1.25 + slowFlow.yzx + vec3(4.1, 1.3, 2.7)),
+        snoise(filmCoordinate * 1.05 + slowFlow.zxy + vec3(8.2, 5.4, 0.9))
     ) * 0.12;
-    float broadNoise = filmNoise(filmDir * 2.0 + warp + slowFlow);
-    float flowNoise = filmNoise(filmDir * 3.4 + warp * 0.7 + slowFlow.yzx * 0.8);
-    float fineNoise = filmNoise(filmDir * 6.2 + slowFlow.zxy * 0.38);
-    float drainage = smoothstep(-0.85, 0.85, -filmDir.y);
+    float broadNoise = filmNoise(filmCoordinate * 2.0 + warp + slowFlow);
+    float flowNoise = filmNoise(filmCoordinate * 3.4 + warp * 0.7 + slowFlow.yzx * 0.8);
+    float fineNoise = filmNoise(filmCoordinate * 6.2 + slowFlow.zxy * 0.38);
+    float drainage = smoothstep(-0.85, 0.85,
+                                -normalize(filmCoordinate).y);
     float thicknessPattern = (broadNoise - 0.5) * 0.52
         + (flowNoise - 0.5) * 0.30
         + (fineNoise - 0.5) * 0.04
         + (drainage - 0.5) * 0.46;
-    float dynamicThickness = uThickness
-        + thicknessPattern * uThicknessVar
+    float dynamicThickness = uThickness * uFilmBaseThicknessScale
+        + thicknessPattern * uThicknessVar * uFilmThicknessAmplitudeScale
         + touchMask * 190.0
         + touchRipple * 95.0;
+    if (uFusionDiagnosticMode == 3) {
+        float value = clamp(dynamicThickness / 1200.0, 0.0, 1.0);
+        FragColor = vec4(vec3(value), uOutputAlpha * vShellCoverage);
+        return;
+    }
+    if (uFusionDiagnosticMode == 4) {
+        float value = clamp(0.5 + thicknessPattern, 0.0, 1.0);
+        FragColor = vec4(vec3(value), uOutputAlpha * vShellCoverage);
+        return;
+    }
+    if (uFusionDiagnosticMode == 5) {
+        FragColor = vec4(fract(filmCoordinate * 0.35 + 0.5),
+                         uOutputAlpha * vShellCoverage);
+        return;
+    }
     vec3 kimReflectance = kim2012Iridescence(NdotV, dynamicThickness);
     vec3 lutReflectance = spectralLUTIridescence(NdotV, dynamicThickness);
     lutReflectance *= 0.85;
@@ -471,19 +519,21 @@ void main() {
     float surfaceRefractionScale = (uIsBackFace == 1) ? 0.16 : 1.0;
     float thicknessRefraction = mix(0.08, 0.45, clamp(dynamicThickness / 1000.0, 0.0, 1.0));
     float thinFilmRefraction = mix(0.08, 1.28, pow(edgeProfile, 1.15)) * thicknessRefraction;
+    float localSpherePixelRadius = uSpherePixelRadius *
+        max(vOpticalRadiusScale, 0.01);
     vec2 offsetPixels = refractVec.xy
         * uRefractionStrength
         * surfaceRefractionScale
         * thinFilmRefraction
-        * uSpherePixelRadius
+        * localSpherePixelRadius
         * edgeBoost
         * touchBoost;
     offsetPixels += normalize(touchDelta + vec2(1e-4, 0.0))
         * touchRipple
-        * uSpherePixelRadius
+        * localSpherePixelRadius
         * 0.055
         * surfaceRefractionScale;
-    float maxOffset = uSpherePixelRadius * uMaxOffsetRatio;
+    float maxOffset = localSpherePixelRadius * uMaxOffsetRatio;
     offsetPixels = clamp(offsetPixels, vec2(-maxOffset), vec2(maxOffset));
     vec2 screenPixel = gl_FragCoord.xy;
     vec2 fboPixel = (uRenderToFBO == 1)

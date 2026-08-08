@@ -35,6 +35,7 @@ struct Vertex {
     glm::vec3 Tangent;
     glm::vec3 Bitangent;
     glm::vec3 FilmDirection = glm::vec3(0.0f);
+    float OpticalRadiusScale = 1.0f;
 };
 
 struct Texture {
@@ -150,6 +151,8 @@ private:
         glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, Bitangent));
         glEnableVertexAttribArray(5);
         glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, FilmDirection));
+        glEnableVertexAttribArray(6);
+        glVertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, OpticalRadiusScale));
         glBindVertexArray(0);
     }
 };

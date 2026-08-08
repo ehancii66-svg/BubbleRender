@@ -7,6 +7,27 @@
 
 #include <glm/glm.hpp>
 
+#include "fusion_profile.h"
+
+// Rendering identity that survives geometry and lifecycle transitions.
+// Stable promotion must not look like a newly-created bubble to the shader.
+struct BubbleVisualState {
+    bool initialized = false;
+    float filmBaseThicknessScale = 1.0f;
+    float filmThicknessAmplitudeScale = 1.0f;
+    float interferencePhase = 0.0f;
+    uint32_t noiseSeed = 0u;
+    float animationTimeOrigin = 0.0f;
+    glm::vec3 textureOriginWorld = glm::vec3(0.0f);
+    glm::mat3 textureBasis = glm::mat3(1.0f);
+    float referenceRadius = 1.0f;
+    float ior = 1.33f;
+    float fresnelStrength = 1.0f;
+    float opacity = 1.0f;
+    float opticalNormalBlendAtOrigin = 1.0f;
+    float opticalNormalRelaxationRate = 0.0f;
+};
+
 struct DisplayBubble {
     struct SurfaceControl {
         glm::vec3 localDir;
@@ -50,6 +71,7 @@ struct DisplayBubble {
     } state = State::Free;
 
     std::vector<SurfaceControl> surfaceControls;
+    BubbleVisualState visualState;
 };
 
 struct BubbleContactPair {
@@ -102,6 +124,29 @@ struct BubbleContactPair {
     float ruptureProgress = 0.0f;
     float neckProgress = 0.0f;
     float relaxationProgress = 0.0f;
+    // Persistent Lagrangian meridian. These nodes are created once at rupture
+    // and subsequently advanced from their previous positions and velocities.
+    std::vector<FusionProfileNode> fusionProfile;
+    bool fusionProfileInitialized = false;
+    float conservedFusionVolume = 0.0f;
+    float theoreticalUncompressedVolume = 0.0f;
+    float initialFusionArea = 0.0f;
+    float currentFusionArea = 0.0f;
+    float fusionRmsSpeed = 0.0f;
+    float fusionCurvatureVariation = 0.0f;
+    FusionProfileDiagnostics fusionDiagnostics;
+    BubbleVisualState visualState;
+    float fusionStableTime = 0.0f;
+    std::size_t fusionNeckNode = 0;
+    float fusionShapeMode = 0.0f;
+    float previousFusionShapeMode = 0.0f;
+    int fusionShapeZeroCrossings = 0;
+    std::vector<std::size_t> fusionDiagnosticNodeIndices;
+    std::vector<std::vector<glm::vec3>> fusionDiagnosticTrails;
+    glm::vec3 fusionCenter = glm::vec3(0.0f);
+    glm::vec3 fusionCenterVelocity = glm::vec3(0.0f);
+    float maximumRelativeVolumeError = 0.0f;
+    float maximumCentroidError = 0.0f;
     float fusionCompletionHold = 0.0f;
     float separationElapsed = 0.0f;
     float restDistance = 0.0f;
@@ -119,4 +164,3 @@ struct BubbleContactPair {
 };
 
 #endif
-

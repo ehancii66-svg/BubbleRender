@@ -34,12 +34,14 @@ set(RENDER_HEADERS
 
 set(SIM_SOURCES
     simulation/display_bubble_simulation.cpp
+    simulation/fusion_profile.cpp
     simulation/vortex_sheet.cpp
 )
 
 set(SIM_HEADERS
     simulation/display_bubble.h
     simulation/display_bubble_simulation.h
+    simulation/fusion_profile.h
     simulation/vortex_sheet.h
 )
 

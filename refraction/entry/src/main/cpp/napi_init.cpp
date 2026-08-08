@@ -41,6 +41,7 @@
 #include <fstream>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <sys/stat.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -133,11 +134,30 @@ static constexpr float kFusionTime = 3.45f;
 static constexpr float kContactVisualTransitionTime = 0.35f;
 static constexpr float kFusionFilmThickness = 0.18f;
 static constexpr float kFilmRuptureDuration = 0.24f;
-static constexpr float kNeckExpansionDelay = 0.10f;
-static constexpr float kNeckExpansionDuration = 1.20f;
-static constexpr float kRelaxationDelay = 0.95f;
-static constexpr float kRelaxationDuration = 1.45f;
-static constexpr float kFusionCompletionHold = 0.12f;
+static const FusionProfileConfig kFusionProfileConfig = [] {
+    FusionProfileConfig config;
+    // Surface-tension-driven, stateful meridian dynamics. None of these
+    // parameters is used as a target-sphere interpolation weight.
+    config.surfaceTension = 0.180f;
+    config.velocityDamping = 1.00f;
+    config.velocityLaplacianDamping = 2.5f;
+    config.meshRegularization = 0.10f;
+    config.tangentialRedistributionRate = 3.0f;
+    config.resamplingEdgeRatio = 2.35f;
+    config.resamplingCurvatureWeight = 1.20f;
+    config.globalModeFrequency = 2.10f;
+    config.globalModeDampingRatio = 0.40f;
+    config.volumeConstraintStrength = 0.92f;
+    config.volumeProjectionIterations = 4;
+    config.initialNeckExpansionSpeed = 0.42f;
+    config.maximumTimeStep = 1.0f / 480.0f;
+    config.maximumSubsteps = 16;
+    config.maximumNodeSpeed = 1.65f;
+    return config;
+}();
+static constexpr float kFusionCompletionHold = 0.30f;
+static constexpr float kFusionStableRmsSpeed = 0.010f;
+static constexpr float kFusionStableCurvatureVariation = 0.50f;
 static constexpr float kShellCutDelay = 0.42f;
 
 // ---- Rendering parameters ----
@@ -630,6 +650,15 @@ static DisplayBubble& AddInteractiveBubble(const glm::vec3& position, float radi
     bubble.floatAmplitude = 0.06f;
     bubble.speed = 0.55f + 0.08f * static_cast<float>(bubble.id % 5);
     bubble.surfaceControls = MakeSurfaceControls(bubble.phase);
+    bubble.visualState.initialized = true;
+    bubble.visualState.interferencePhase = bubble.phase;
+    bubble.visualState.noiseSeed = static_cast<uint32_t>(
+        (bubble.id * 2654435761ull) & 0xffffffffu);
+    bubble.visualState.animationTimeOrigin = static_cast<float>(g_Time);
+    bubble.visualState.textureOriginWorld = position;
+    bubble.visualState.textureBasis = glm::mat3(1.0f);
+    bubble.visualState.referenceRadius = std::max(radius, 0.001f);
+    bubble.visualState.opacity = bubble.alpha;
     g_DisplayBubbles.push_back(bubble);
     InitBubbleSim(bubble.id);
     if (g_DecorativeBubbleModel) {
@@ -1544,11 +1573,56 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
         refractionShader->SetFloat("uThickness", CurrentThickness());
         refractionShader->SetFloat("uThicknessVar", g_ThicknessVar);
         refractionShader->SetFloat("uTime", (float)g_Time);
+        refractionShader->SetVec3("uTextureOriginWorld", center);
+        refractionShader->SetMat3("uTextureBasis", glm::mat3(1.0f));
+        refractionShader->SetFloat("uTextureReferenceRadius",
+                                   std::max(localRadius, 0.001f));
+        refractionShader->SetFloat("uVisualTime", (float)g_Time);
+        refractionShader->SetVec3("uFilmNoiseOffset", glm::vec3(0.0f));
+        refractionShader->SetFloat("uFilmBaseThicknessScale", 1.0f);
+        refractionShader->SetFloat("uFilmThicknessAmplitudeScale", 1.0f);
+        refractionShader->SetFloat("uFilmIor", 1.33f);
+        refractionShader->SetInt("uFusionDiagnosticMode", 0);
         refractionShader->SetFloat("uOutputAlpha", outputAlpha);
         refractionShader->SetFloat("uOpticalNormalBlend", 0.0f);
         refractionShader->SetVec2("uTouchPoint", interactive ? g_TouchPoint : glm::vec2(-10.0f, -10.0f));
         refractionShader->SetFloat("uTouchStrength", interactive ? g_TouchStrength : 0.0f);
         refractionShader->SetFloat("uTouchVelocity", interactive ? g_TouchVelocity : 0.0f);
+    };
+
+    auto ApplyPersistentVisualState = [&](const BubbleVisualState& state) {
+        if (!state.initialized) return;
+        auto seedComponent = [](uint32_t seed, uint32_t shift) {
+            uint32_t value = (seed >> shift) & 0x3ffu;
+            return static_cast<float>(value) / 1023.0f * 17.0f;
+        };
+        glm::vec3 noiseOffset(
+            seedComponent(state.noiseSeed, 0u),
+            seedComponent(state.noiseSeed ^ 0x9e3779b9u, 10u),
+            seedComponent(state.noiseSeed ^ 0x85ebca6bu, 20u));
+        float elapsed = std::max(
+            static_cast<float>(g_Time) - state.animationTimeOrigin, 0.0f);
+        refractionShader->SetVec3("uTextureOriginWorld",
+                                  state.textureOriginWorld);
+        refractionShader->SetMat3("uTextureBasis", state.textureBasis);
+        refractionShader->SetFloat(
+            "uTextureReferenceRadius",
+            std::max(state.referenceRadius, 0.001f));
+        refractionShader->SetFloat(
+            "uVisualTime", elapsed + state.interferencePhase);
+        refractionShader->SetVec3("uFilmNoiseOffset", noiseOffset);
+        refractionShader->SetFloat("uFilmBaseThicknessScale",
+                                   state.filmBaseThicknessScale);
+        refractionShader->SetFloat("uFilmThicknessAmplitudeScale",
+                                   state.filmThicknessAmplitudeScale);
+        refractionShader->SetFloat("uFilmIor", state.ior);
+        refractionShader->SetFloat("uFresnelPower",
+                                   g_FresnelPower *
+                                       state.fresnelStrength);
+        refractionShader->SetFloat(
+            "uOpticalNormalBlend",
+            state.opticalNormalBlendAtOrigin *
+                std::exp(-state.opticalNormalRelaxationRate * elapsed));
     };
 
     auto BindRefractionInputs = [&](GLuint backgroundTex) {
@@ -1649,7 +1723,13 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             sortedBubbles.emplace_back(distanceSq, &bubble);
         }
         std::sort(sortedBubbles.begin(), sortedBubbles.end(),
-                  [](const auto& lhs, const auto& rhs) { return lhs.first > rhs.first; });
+                  [](const auto& lhs, const auto& rhs) {
+                      bool lhsPromoted = lhs.second->volumeTransferred;
+                      bool rhsPromoted = rhs.second->volumeTransferred;
+                      if (lhsPromoted != rhsPromoted)
+                          return !lhsPromoted;
+                      return lhs.first > rhs.first;
+                  });
 
         for (const auto& entry : sortedBubbles) {
             DisplayBubble& bubble = *entry.second;
@@ -1665,6 +1745,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             SetRefractUniforms(model, bubble.radius, isBackFace, renderToFBO,
                                false, 0.0f,
                                g_IridescenceMode, shellAlpha);
+            ApplyPersistentVisualState(bubble.visualState);
             SetBubbleContactPlanes(bubble);
 
             Model* modelToDraw = g_BubbleSurfaces.FindBubble(bubble.id);
@@ -1715,12 +1796,14 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
             if (a.state == DisplayBubble::State::Dead || b.state == DisplayBubble::State::Dead) continue;
 
             float fusionVisibility = windows_parity::FusionSurfaceVisibility(pair);
-            if (fusionVisibility > 0.001f) {
+            if (fusionVisibility > 0.001f && pair.fusionProfileInitialized) {
                 float volumeA = a.targetVolume > 0.0f ? a.targetVolume : BubbleVolume(a.radius);
                 float volumeB = b.targetVolume > 0.0f ? b.targetVolume : BubbleVolume(b.radius);
-                float targetVolume = std::max(volumeA + volumeB, 0.001f);
+                float targetVolume = pair.conservedFusionVolume;
                 float targetRadius = RadiusFromVolume(targetVolume);
-                glm::vec3 targetCenter = (a.position * volumeA + b.position * volumeB) / targetVolume;
+                glm::vec3 targetCenter =
+                    pair.fusionCenter +
+                    pair.fusionCenterVelocity * pair.fusionElapsed;
                 glm::vec3 axis = pair.fusionFrameInitialized
                     ? pair.fusionAxis : b.position - a.position;
                 if (!windows_parity::IsFiniteDirection(axis) || glm::length(axis) <= 1e-5f) {
@@ -1747,13 +1830,10 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 parameters.centerB = glm::dot(b.position - targetCenter, axis);
                 parameters.radiusA = a.radius;
                 parameters.radiusB = b.radius;
-                parameters.targetRadius = targetRadius;
-                parameters.neckProgress = pair.neckProgress;
-                parameters.relaxationProgress = pair.relaxationProgress;
-                float oscillationEnvelope = (1.0f - pair.relaxationProgress) * pair.relaxationProgress;
-                parameters.oscillation = std::sin(pair.relaxationProgress * 3.0f * kPi) *
-                                         oscillationEnvelope * 0.12f;
-                std::vector<Vertex> fusionVertices = BuildFusionSurfaceVertices(parameters);
+                parameters.opticalReferenceRadius = targetRadius;
+                std::vector<Vertex> fusionVertices =
+                    BuildFusionSurfaceVertices(
+                        parameters, pair.fusionProfile);
                 for (Vertex& vertex : fusionVertices) {
                     vertex.Position = fusionBasis * vertex.Position;
                     vertex.Normal = windows_parity::SafeNormalizeDirection(
@@ -1768,23 +1848,15 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 } else if (!fusionMeshesUpdated) {
                     Mesh* mesh = fusionModel->getMesh(0);
                     if (mesh) {
-                        windows_parity::PreserveFilmCoordinates(fusionVertices, mesh->vertices);
                         mesh->updateVertices(fusionVertices);
                     }
                 }
-                float avgRadius = (volumeA * a.radius + volumeB * b.radius) / targetVolume;
-                float totalFusionDuration = kRelaxationDelay + kRelaxationDuration;
-                float fusionProgress = windows_parity::Smooth01(
-                    pair.fusionElapsed / std::max(totalFusionDuration, 0.001f));
-                float refractionRadius = glm::mix(avgRadius, targetRadius, fusionProgress);
                 glm::mat4 fusionMatrix = glm::translate(glm::mat4(1.0f), targetCenter);
-                SetRefractUniforms(fusionMatrix, refractionRadius, isBackFace, renderToFBO,
+                SetRefractUniforms(fusionMatrix, targetRadius, isBackFace, renderToFBO,
                                    false, 0.0f, g_IridescenceMode,
                                    0.72f * std::max(a.alpha, b.alpha) *
                                    fusionVisibility);
-                refractionShader->SetFloat(
-                    "uOpticalNormalBlend",
-                    1.0f - windows_parity::Smooth01(pair.relaxationProgress));
+                ApplyPersistentVisualState(pair.visualState);
                 refractionShader->SetInt("uVisualContactCount", 0);
                 refractionShader->SetInt("uForceSharedFilm", 0);
                 if (fusionModel) fusionModel->Draw(*refractionShader);

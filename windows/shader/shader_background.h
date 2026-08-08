@@ -23,8 +23,9 @@ const char* backgroundFragmentShader = R"(#version 330 core
 in vec2 vUV;
 in vec3 vNormal;
 out vec4 FragColor;
+uniform vec4 uColor;
 void main() {
-    FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+    FragColor = uColor;
 }
 )";
 

@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 
 #include "mesh.h"
+#include "../simulation/fusion_profile.h"
 
 struct DiscMeshData {
     std::vector<glm::vec3> positions;
@@ -16,18 +17,15 @@ struct DiscMeshData {
 
 inline constexpr int kContactBubbleSegments = 72;
 inline constexpr int kContactBubbleRings = 28;
-inline constexpr int kFusionSurfaceSegments = 72;
-inline constexpr int kFusionSurfaceRings = 28;
+inline constexpr int kFusionSurfaceSegments = 96;
+inline constexpr int kFusionSurfaceRings = 96;
 
 struct FusionSurfaceParameters {
     float centerA = -0.5f;
     float radiusA = 0.5f;
     float centerB = 0.5f;
     float radiusB = 0.5f;
-    float targetRadius = 0.63f;
-    float neckProgress = 0.0f;
-    float relaxationProgress = 0.0f;
-    float oscillation = 0.0f;
+    float opticalReferenceRadius = 0.63f;
 };
 
 DiscMeshData BuildContactFilmDisc(int segments = 80, int rings = 10);
@@ -41,6 +39,7 @@ std::vector<unsigned int> BuildFusionSurfaceIndices(int segments = kFusionSurfac
                                                     int rings = kFusionSurfaceRings);
 
 std::vector<Vertex> BuildFusionSurfaceVertices(const FusionSurfaceParameters& parameters,
+                                               const std::vector<FusionProfileNode>& profile,
                                                int segments = kFusionSurfaceSegments,
                                                int rings = kFusionSurfaceRings);
 
