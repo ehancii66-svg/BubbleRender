@@ -40,7 +40,6 @@ bubble-current.jpeg
 /windows/fusion_sharpfix*
 
 # Local presentation source
-/presentation/beamer.tex
 /presentation/*.aux
 /presentation/*.log
 /presentation/*.nav
