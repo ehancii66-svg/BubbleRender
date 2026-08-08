@@ -429,7 +429,17 @@ void main() {
     vec3 filmDir = filmDirectionLengthSquared > 1e-10
         ? vFilmDirection * inversesqrt(filmDirectionLengthSquared)
         : geometricNormal;
-    vec3 blendedNormal = mix(geometricNormal, filmDir, clamp(uOpticalNormalBlend, 0.0, 1.0));
+    // FilmDirection is a transported material coordinate, not an unrestricted
+    // replacement surface normal. Once it disagrees strongly with the current
+    // geometry (typically near the former neck), using it for refraction makes
+    // a false dimple/pinwheel although the silhouette is already spherical.
+    // Reliability attenuation is spatially and temporally continuous and does
+    // not reset the persistent thickness/phase field.
+    float opticalAgreement = clamp(dot(geometricNormal, filmDir), 0.0, 1.0);
+    float opticalReliability = smoothstep(0.28, 0.82, opticalAgreement);
+    float reliableOpticalBlend =
+        clamp(uOpticalNormalBlend, 0.0, 1.0) * opticalReliability;
+    vec3 blendedNormal = mix(geometricNormal, filmDir, reliableOpticalBlend);
     vec3 normal = dot(blendedNormal, blendedNormal) > 1e-10
         ? normalize(blendedNormal)
         : geometricNormal;

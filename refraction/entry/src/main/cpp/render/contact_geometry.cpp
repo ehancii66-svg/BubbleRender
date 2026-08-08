@@ -232,8 +232,14 @@ std::vector<Vertex> BuildFusionSurfaceVertices(
                 node.filmAxial,
                 node.filmRadial * c,
                 node.filmRadial * s);
-            vertex.FilmDirection = SafeNormalize(
-                transportedFilmDirection, vertex.Normal);
+            // A shared pole vertex has no well-defined azimuth. Giving it a
+            // transported radial component chooses an arbitrary meridian and
+            // creates a pinwheel-shaped interpolated optical normal on the
+            // pole fan (especially visible on mobile GLES). At a smooth pole
+            // the only valid limiting direction is the geometric pole normal.
+            vertex.FilmDirection = (i == 0 || i == rings)
+                ? vertex.Normal
+                : SafeNormalize(transportedFilmDirection, vertex.Normal);
             vertex.OpticalRadiusScale =
                 std::max(node.opticalRadiusScale / opticalReferenceRadius,
                          0.001f);
@@ -314,4 +320,3 @@ std::vector<Vertex> BuildContactBubblePatchVertices(float radius,
     float contactRadius = std::sqrt(std::max(radius * radius - capPlaneOffset * capPlaneOffset, 0.0f));
     return BuildBubbleShellVertices(radius, contactRadius, true, segments, rings);
 }
-
