@@ -1,0 +1,579 @@
+\documentclass[UTF8,a4paper,11pt]{ctexart}
+
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.6cm,bottom=2.6cm}
+\setlist{nosep,leftmargin=2em}
+\linespread{1.15}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  frame=single,
+  numbers=none,
+  xleftmargin=1em,
+  xrightmargin=1em
+}
+
+\newcommand{\projectname}{Soap Bubble Rendering - Thin Film + DBSTT}
+\newcommand{\codepath}[1]{\texttt{#1}}
+\newcommand{\reportfigure}[4]{%
+  \begin{figure}[H]
+    \centering
+    \IfFileExists{figures/#1}{%
+      \includegraphics[width=#2\linewidth]{figures/#1}%
+    }{%
+      \fbox{%
+        \begin{minipage}[c][#3][c]{0.88\linewidth}
+          \centering
+          \texttt{\detokenize{#1}}\\[0.8em]
+          截图占位：#4
+        \end{minipage}
+      }%
+    }
+    \caption{#4}
+  \end{figure}
+}
+
+\title{\textbf{肥皂泡实时渲染实验报告}\\
+\large 屏幕空间折射、薄膜虹彩与 DBSTT 表面动态}
+\author{计算机图形学期末项目}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本项目实现了一个 Windows 桌面端 OpenGL 3.3 肥皂泡实时渲染程序。系统以屏幕空间折射为基础，通过背景 FBO、背面折射 FBO 与最终正面合成三个阶段近似肥皂泡的双界面折射；在材质上实现了三种薄膜虹彩模式：程序界面中命名为 Kim2012 的实时薄膜干涉计算模式、基于预计算纹理的 Spectral LUT 模式，以及 Belcour Airy 风格的多波长薄膜反射模式；在动态上实现了基于噪声和排液趋势的膜厚变化、右键拖动触发的局部触摸波纹、主泡泡的 DBSTT/vortex sheet 表面形变，以及 18 个展示泡泡的风吹漂移。本文按照渲染管线、光学模型、交互实现与动态模拟的顺序，说明各部分原理、代码对应位置、与原论文方法的关系以及当前版本的局限。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{实验目标与总体结构}
+
+肥皂泡的视觉特征主要来自三个方面：首先，它是几乎透明的薄膜结构，背景会在泡泡内部发生折射扭曲；其次，薄膜厚度接近可见光波长，不同波长的反射光会产生干涉，形成随视角和厚度变化的虹彩；最后，真实肥皂泡的表面不是静止刚体，膜厚、形状和局部扰动都会缓慢变化。因此，本项目并不只渲染一个透明球体，而是把折射、虹彩、动态膜厚、用户交互和表面形变组合成一个可实时演示的系统。
+
+当前程序标题为 \projectname，主要运行在 \codepath{windows/} 目录下。总体实现可以分为以下几层：
+
+\begin{itemize}
+  \item \textbf{渲染层}：由 \codepath{windows/main.cpp} 组织 OpenGL 初始化、FBO 管线、模型绘制、输入回调和参数控制。
+  \item \textbf{材质层}：由 \codepath{windows/shader/shader\_refraction.h} 实现折射、薄膜干涉、Fresnel 边缘、环境反射和触摸波纹。
+  \item \textbf{几何层}：由 \codepath{windows/render/model.cpp} 和 \codepath{windows/render/mesh.h} 管理球体、天空盒和动态网格。
+  \item \textbf{模拟层}：由 \codepath{windows/simulation/vortex\_sheet.cpp} 实现主泡泡的 DBSTT/vortex sheet 表面形变。
+  \item \textbf{资源层}：由 \codepath{windows/assets/skybox/} 提供环境贴图，由 \codepath{windows/assets/lut/thinfilm\_belcour\_bubble.png} 提供薄膜 LUT。
+\end{itemize}
+
+\reportfigure{overall_scene.png}{0.92}{0.28\textheight}{最终整体效果：主泡泡、背景折射、天空盒环境、虹彩边缘以及多个漂移展示泡泡。}
+
+\section{项目结构与代码对应}
+
+Windows 版本交付时，核心目录结构如下：
+
+\begin{lstlisting}
+windows/
+  CMakeLists.txt
+  CMakePresets.json
+  main.cpp
+  read.md
+  render/
+    camera.h/.cpp
+    mesh.h
+    model.h/.cpp
+    shader.h/.cpp
+    stb_image.h
+  shader/
+    shader_refraction.h
+    shader_background.h
+    shader_skybox.h
+    shader_quad.h
+  simulation/
+    vortex_sheet.h/.cpp
+  assets/
+    skybox/
+    lut/thinfilm_belcour_bubble.png
+\end{lstlisting}
+
+各文件承担的职责见表 \ref{tab:structure}。
+
+\begin{table}[H]
+  \centering
+  \caption{主要代码文件与功能}
+  \label{tab:structure}
+  \begin{tabular}{>{\ttfamily}p{0.38\linewidth}p{0.52\linewidth}}
+    \toprule
+    文件或目录 & 作用 \\
+    \midrule
+    windows/main.cpp & 程序入口、窗口和 OpenGL 状态、FBO 创建、三阶段渲染、鼠标键盘交互、多泡泡位置与风吹动画。\\
+    windows/shader/shader\_refraction.h & 泡泡核心 fragment shader，包含折射偏移、三种虹彩模型、动态膜厚、触摸波纹、环境反射和最终颜色合成。\\
+    windows/simulation/vortex\_sheet.h/.cpp & 单个闭合主泡泡的 vortex sheet/DBSTT 形变模拟。\\
+    windows/render/model.h/.cpp & 创建天空盒、普通球体、动态网格模型，并封装绘制接口。\\
+    windows/render/camera.h/.cpp & 相机位置、视图矩阵、投影矩阵和缩放控制。\\
+    windows/assets/skybox & 六面天空盒贴图，用于背景和环境反射。\\
+    windows/assets/lut & 预计算薄膜反射 LUT，用于 Spectral LUT 虹彩模式。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{渲染管线}
+
+\subsection{三阶段屏幕空间折射}
+
+实时折射如果完全按路径追踪计算，需要跟踪光线穿过薄膜前表面、后表面以及环境的多次传播，开销较大。项目采用 Wyman 的 image-space refraction 思路 \cite{wyman2005refraction}：先把可被折射的背景渲染成纹理，再在泡泡 shader 中根据法线和视线方向扰动采样坐标，从而得到近似折射效果。与单界面折射不同，本项目额外加入了背面 FBO，用两个屏幕空间阶段近似肥皂泡的双界面折射。
+
+\begin{figure}[H]
+  \centering
+  \fbox{
+    \begin{minipage}{0.88\linewidth}
+      \centering
+      \vspace{0.8em}
+      \begin{tabular}{c}
+        Pass 1：天空盒 + 背景小球 $\rightarrow$ \codepath{backgroundFBO} \\
+        $\Downarrow$ \\
+        Pass 2：绘制泡泡背面，采样 \codepath{backgroundTexture} $\rightarrow$ \codepath{backFaceFBO} \\
+        $\Downarrow$ \\
+        Pass 3：绘制屏幕背景，再绘制泡泡正面，采样 \codepath{backFaceTexture}
+      \end{tabular}
+      \vspace{0.8em}
+    \end{minipage}
+  }
+  \caption{当前版本的三阶段屏幕空间折射管线。}
+  \label{fig:pipeline}
+\end{figure}
+
+三阶段具体为：
+
+\begin{enumerate}
+  \item \textbf{背景阶段}：将天空盒和背景小球渲染到 \codepath{backgroundFBO}。背景小球不是最终效果必须的物体，而是用于观察折射扭曲的参照物。
+  \item \textbf{背面阶段}：开启正面剔除，只绘制泡泡背面。背面 shader 采样 \codepath{backgroundTexture}，得到第一次穿过泡泡后的背景结果，并输出到 \codepath{backFaceFBO}。
+  \item \textbf{正面阶段}：回到默认 framebuffer，先重新绘制天空盒和背景，再绘制泡泡正面。正面 shader 采样 \codepath{backFaceTexture}，合成第二次界面折射、薄膜虹彩、环境反射和高光。
+\end{enumerate}
+
+这种方法的优点是完全运行在 GPU rasterization 管线中，不需要逐像素射线求交；缺点是折射对象必须已经出现在屏幕空间纹理中，因此它是视觉上可信的近似，而不是严格物理光线追踪。
+
+\subsection{FBO overscan 与坐标修正}
+
+折射偏移会让采样坐标超出屏幕边界。为了减少边缘处采样黑色的问题，程序在 \codepath{InitFBO} 中使用了 $1.3$ 倍 overscan：
+
+\[
+W_{\mathrm{fbo}} = 1.3 W_{\mathrm{screen}}, \qquad
+H_{\mathrm{fbo}} = 1.3 H_{\mathrm{screen}}.
+\]
+
+由于 FBO 分辨率与窗口分辨率不同，正面渲染到屏幕时，\codepath{gl\_FragCoord} 是窗口像素坐标；背面渲染到 FBO 时，\codepath{gl\_FragCoord} 是 FBO 像素坐标。项目通过 \codepath{uRenderToFBO} 区分两种情况：
+
+\begin{lstlisting}[language=C++]
+vec2 fboPixel = (uRenderToFBO == 1)
+    ? screenPixel
+    : screenPixel * (uFBOSize / uWinResolution);
+\end{lstlisting}
+
+该修正对多泡泡展示尤其重要。此前副泡泡变黑的原因之一，就是副泡泡在不同 pass 中采样坐标没有正确映射到 FBO 空间，导致采样到纹理边界外或黑色区域。修正后，主泡泡和 18 个展示泡泡都沿用同一套 shader 逻辑，只通过模型矩阵、半径和是否交互来区分。
+
+\section{屏幕空间折射实现}
+
+\subsection{折射方向}
+
+在 fragment shader 中，入射方向取视线方向 \codepath{eye}，法线取世界法线 \codepath{normal}。肥皂液近似水的折射率，程序使用
+
+\[
+\eta = \frac{n_{\mathrm{air}}}{n_{\mathrm{film}}} = \frac{1.0}{1.33}.
+\]
+
+GLSL 中调用 \codepath{refract(eye, normal, eta)} 得到折射方向，并转换到视图空间：
+
+\begin{lstlisting}[language=C++]
+vec3 refractVec = mat3(vView) * refract(eye, normal, iorRatio);
+\end{lstlisting}
+
+随后取折射方向的 $xy$ 分量作为屏幕空间偏移方向。因为这是屏幕空间近似，shader 并不计算真实光线与后表面的三维交点，而是把折射方向转化为背景纹理采样偏移。
+
+\subsection{边缘增强与薄膜厚度影响}
+
+肥皂泡的中心通常接近透明，轮廓处视觉效果更明显。程序用
+
+\[
+e = 1 - |\mathbf{V}\cdot\mathbf{N}|
+\]
+
+表示边缘程度，其中 $\mathbf{V}$ 是视线方向，$\mathbf{N}$ 是表面法线。随后通过 \codepath{smoothstep} 得到更平滑的边缘曲线：
+
+\[
+e_{\mathrm{profile}} = \mathrm{smoothstep}(0.18, 0.92, e).
+\]
+
+折射偏移的核心形式可写为：
+
+\[
+\Delta \mathbf{p}
+= \mathbf{T}_{xy}\,
+s_{\mathrm{ref}}\,
+s_{\mathrm{face}}\,
+s_{\mathrm{film}}\,
+r_{\mathrm{px}}\,
+s_{\mathrm{edge}}\,
+s_{\mathrm{touch}},
+\]
+
+其中 $\mathbf{T}_{xy}$ 是视图空间折射方向的屏幕分量，$s_{\mathrm{ref}}$ 是用户可调的 \codepath{uRefractionStrength}，$s_{\mathrm{face}}$ 区分正面和背面，$s_{\mathrm{film}}$ 由薄膜厚度和边缘程度共同决定，$r_{\mathrm{px}}$ 是泡泡屏幕半径，$s_{\mathrm{edge}}$ 是边缘增强，$s_{\mathrm{touch}}$ 是右键触摸扰动增强。
+
+背面 pass 使用更小的折射强度：
+
+\[
+s_{\mathrm{face}} =
+\begin{cases}
+0.16, & \text{背面 pass},\\
+1.0, & \text{正面 pass}.
+\end{cases}
+\]
+
+这样做可以避免双界面叠加时背景被过度扭曲。最终偏移还会被 \codepath{uMaxOffsetRatio} 限制在泡泡屏幕半径的一定比例内，防止采样跳变。
+
+\reportfigure{refraction_background.png}{0.86}{0.26\textheight}{背景小球经过主泡泡后的折射扭曲效果，可用于展示屏幕空间折射管线。}
+
+\section{薄膜虹彩模型}
+
+\subsection{薄膜干涉基础}
+
+肥皂泡薄膜的厚度通常为数百纳米，和可见光波长处在同一数量级。光线在空气--薄膜界面与薄膜--空气界面发生反射，两个反射波之间产生光程差。对某一波长 $\lambda$，相位差可写为：
+
+\[
+\phi_\lambda =
+\frac{4\pi n d \cos\theta_t}{\lambda},
+\]
+
+其中 $n$ 是薄膜折射率，$d$ 是薄膜厚度，$\theta_t$ 是薄膜内部折射角。不同波长的反射强度随 $\phi_\lambda$ 改变，因此 RGB 颜色会随厚度、视角和法线方向变化。
+
+项目中所有虹彩模式都使用动态厚度 $d$ 与视角项 $|\mathbf{V}\cdot\mathbf{N}|$ 作为输入，但三种模式计算反射率的方式不同。
+
+\subsection{Kim2012 模式：实时 RGB 波长采样}
+
+程序界面中的 \textbf{Kim2012} 模式对应 \codepath{uIridescenceMode = 0}。它参考 Kim 与 Park 关于实时肥皂泡虹彩渲染的做法 \cite{kim2012soapbubble}，在 shader 中直接计算薄膜对 RGB 三个代表波长的反射率。实现文件为 \codepath{shader\_refraction.h} 中的：
+
+\begin{itemize}
+  \item \codepath{fresnelCoefficients}
+  \item \codepath{interferencePhase}
+  \item \codepath{thinFilmReflectance}
+  \item \codepath{kim2012Iridescence}
+\end{itemize}
+
+对每个波长，程序先计算 s 偏振和 p 偏振的 Fresnel 振幅系数，再用相位差得到反射率近似：
+
+\[
+R_\lambda =
+\frac{r_s^2(1-\cos\phi)}{1+r_s^4-2r_s^2\cos\phi}
++
+\frac{r_p^2(1-\cos\phi)}{1+r_p^4-2r_p^2\cos\phi}.
+\]
+
+当前版本采样的三个代表波长为：
+
+\[
+\lambda_R=615\mathrm{nm},\quad
+\lambda_G=535\mathrm{nm},\quad
+\lambda_B=465\mathrm{nm}.
+\]
+
+该模式的优点是公式直接、易解释，能清楚体现薄膜厚度和相位差对颜色的影响；不足是只用三个波长代表完整可见光谱，边缘颜色可能更鲜艳，也更容易出现强烈的 RGB 分离。
+
+\subsection{Spectral LUT 模式：预计算薄膜反射纹理}
+
+\textbf{Spectral LUT} 模式对应 \codepath{uIridescenceMode = 1}。它参考 Iwasaki 等人使用预计算薄膜反射纹理实现实时肥皂泡渲染的思想 \cite{iwasaki2004soapbubble}。程序不在运行时逐波长计算，而是读取 \codepath{uThinFilmLUT}：
+
+\begin{lstlisting}[language=C++]
+float thicknessNorm = clamp((thickness - 100.0) / 800.0, 0.0, 1.0);
+vec3 encodedReflectance =
+    texture(uThinFilmLUT, vec2(clamp(NdotV, 0.0, 0.99), thicknessNorm)).rgb;
+\end{lstlisting}
+
+LUT 的横轴为视角项 \codepath{NdotV}，纵轴为归一化厚度。该模式运行开销低，颜色更依赖预计算纹理，适合稳定快速的展示；不足是可调范围受 LUT 分辨率和生成方式限制，若想改变折射率、波长积分方式或颜色映射，需要重新生成纹理。
+
+\subsection{Belcour Airy 模式：多波长 Airy 反射近似}
+
+\textbf{Belcour Airy} 模式对应 \codepath{uIridescenceMode = 2}，也是当前默认模式。它参考 Belcour 与 Barla 对薄膜虹彩和 Airy reflectance 的建模思想 \cite{belcour2017iridescence}，但本项目没有完整实现论文中的微表面解析预积分，而是在肥皂泡 shader 中实现了一个面向实时演示的简化 Airy 反射模型。
+
+对某一偏振方向，薄膜多次内反射的复振幅可写为：
+
+\[
+A_\lambda =
+r_{12}
++
+\frac{t_{12}r_{23}t_{21}e^{i\phi_\lambda}}
+{1-r_{21}r_{23}e^{i\phi_\lambda}},
+\qquad
+R_\lambda = |A_\lambda|^2.
+\]
+
+程序分别计算 s、p 两个偏振方向，再取平均。随后在 \codepath{belcourAiryWeightedIridescence} 中采样多个波长：
+
+\[
+430, 470, 500, 535, 575, 615, 650 \mathrm{nm}.
+\]
+
+这些波长再乘以经验 RGB 权重得到最终颜色。相比 Kim2012 模式，Belcour Airy 模式的颜色更平滑，环境反射也会被薄膜反射率染色，因此更适合作为最终交付版本的默认外观。
+
+\subsection{三种模式对比}
+
+\begin{table}[H]
+  \centering
+  \caption{三种虹彩模式的区别}
+  \label{tab:modes}
+  \begin{tabular}{p{0.18\linewidth}p{0.25\linewidth}p{0.23\linewidth}p{0.23\linewidth}}
+    \toprule
+    模式 & 计算方式 & 优点 & 局限 \\
+    \midrule
+    Kim2012 & shader 中实时计算 RGB 三个代表波长的薄膜干涉反射率。 & 公式直观，便于说明相位差、Fresnel 系数和厚度的关系。 & 只采样三个波长，颜色可能偏强，光谱连续性有限。\\
+    Spectral LUT & 从预计算薄膜反射纹理中按视角和厚度采样 RGB 结果。 & 运行开销最低，适合实时稳定展示。 & 外观依赖 LUT，改变物理参数需要重新生成纹理。\\
+    Belcour Airy & 使用 Airy 风格的多次内反射公式，并采样多个波长加权合成。 & 颜色过渡更平滑，边缘和环境反射更自然，是当前默认模式。 & 是项目级简化实现，不是完整 Belcour 微表面预积分模型。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\reportfigure{three_modes_compare.png}{0.92}{0.30\textheight}{三种虹彩模式对比：Kim2012、Spectral LUT 与 Belcour Airy。可以用三张截图拼成一张图。}
+
+\section{动态膜厚与颜色合成}
+
+\subsection{动态膜厚}
+
+真实肥皂泡的膜厚会因为重力排液、表面流动和扰动而变化。完整的膜厚动力学可以基于表面上的流体方程建模 \cite{ishida2020thickness}。本项目为了实时演示，采用 shader 中的程序化近似：使用世界法线方向作为膜面参数，叠加多层 Simplex noise、缓慢流动项、细节噪声和上下方向的排液趋势。
+
+动态厚度可概括为：
+
+\[
+d =
+d_0
++ A_{\mathrm{var}} P(\mathbf{n}, t)
++ 190 M_{\mathrm{touch}}
++ 95 Q_{\mathrm{ripple}},
+\]
+
+其中 $d_0$ 是基础膜厚，$A_{\mathrm{var}}$ 是膜厚变化幅度，$P(\mathbf{n},t)$ 是由多层噪声和排液项组合的厚度图案，$M_{\mathrm{touch}}$ 是右键触摸中心的局部增强，$Q_{\mathrm{ripple}}$ 是触摸拖动产生的环形波纹。
+
+一个重要实现细节是：项目使用 \codepath{normalize(vWorldNormal)} 作为噪声输入方向，而不是使用 UV 坐标。这样可以避免球体 UV 接缝处出现明显断裂，让虹彩流动更连续。
+
+\subsection{颜色合成}
+
+泡泡最终颜色由三部分组成：
+
+\begin{enumerate}
+  \item \textbf{透射背景}：从背景 FBO 或背面 FBO 中折射采样得到 \codepath{bgColor}。
+  \item \textbf{薄膜虹彩}：由当前模式计算得到 \codepath{filmReflectance}，再根据 Fresnel 边缘项增强。
+  \item \textbf{环境反射和高光}：通过 cubemap 采样环境反射，并用薄膜反射率染色；另外加入少量 Blinn-Phong 高光。
+\end{enumerate}
+
+中心区域透明度更高，轮廓处透明度下降、反射和虹彩增强。shader 中用
+
+\[
+F = (1 - |\mathbf{V}\cdot\mathbf{N}|)^{p}
+\]
+
+作为 Fresnel 边缘项，其中 $p$ 对应可调参数 \codepath{uFresnelPower}。这使泡泡中心能保持清透，边缘能呈现更明显的彩色轮廓。
+
+\section{交互实现}
+
+\subsection{鼠标交互}
+
+当前版本的鼠标交互分为三类：
+
+\begin{table}[H]
+  \centering
+  \caption{鼠标交互}
+  \begin{tabular}{p{0.24\linewidth}p{0.64\linewidth}}
+    \toprule
+    操作 & 效果 \\
+    \midrule
+    左键拖动 & 改变相机 yaw/pitch，围绕泡泡观察。\\
+    滚轮 & 改变相机距离，实现缩放。\\
+    右键拖动 & 在主泡泡上产生局部膜厚增强和环形折射波纹。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+右键按下时，程序把鼠标位置转换为归一化屏幕坐标 \codepath{g\_TouchPoint}，并记录拖动速度 \codepath{g\_TouchVelocity}。shader 中计算当前 fragment 到触摸点的距离：
+
+\[
+r = \left\|\mathbf{u}_{\mathrm{frag}}-\mathbf{u}_{\mathrm{touch}}\right\|.
+\]
+
+局部触摸强度采用高斯型衰减：
+
+\[
+M_{\mathrm{touch}} =
+\exp\left(-\frac{r^2}{0.0065}\right) S_{\mathrm{touch}},
+\]
+
+环形波纹采用正弦函数叠加指数衰减：
+
+\[
+Q_{\mathrm{ripple}} =
+\sin(78r - 18t)\,\exp(-9r)\,S_{\mathrm{touch}}
+(0.35+0.65V_{\mathrm{touch}}).
+\]
+
+触摸只作用在主泡泡上。绘制展示泡泡时，程序向 shader 传入无效触摸点和零强度，避免副泡泡被鼠标扰动。
+
+\reportfigure{touch_ripple.png}{0.86}{0.26\textheight}{右键拖动主泡泡时产生的局部膜厚变化、彩色波纹和折射扰动。}
+
+\subsection{键盘参数}
+
+为了便于展示，终端中只保留了对视觉效果和模拟有直接意义的参数：
+
+\begin{table}[H]
+  \centering
+  \caption{当前保留的键盘控制}
+  \begin{tabular}{p{0.18\linewidth}p{0.28\linewidth}p{0.42\linewidth}}
+    \toprule
+    按键 & 参数 & 作用 \\
+    \midrule
+    R/T & Fresnel edge power & 调整边缘 Fresnel 增强范围。数值越小，彩色边缘扩展越宽；数值越大，边缘更集中。\\
+    Y/H & Refraction strength & 调整屏幕空间折射偏移强度。\\
+    U/J & Edge distortion & 调整轮廓区域额外折射扭曲。\\
+    O/P & Environment reflection & 调整 cubemap 环境反射权重。\\
+    L & Iridescence mode & 在 Kim2012、Spectral LUT、Belcour Airy 三种虹彩模式之间切换。\\
+    N/M & Film thickness & 调整基础膜厚，单位为 nm。\\
+    1/2 & Thickness variation & 调整动态膜厚变化幅度。\\
+    Z & Pause/resume & 暂停或继续主泡泡表面模拟。\\
+    X & Reset & 重置主泡泡模拟网格和模拟参数。\\
+    3/4 & Surface tension & 调整表面张力强度，影响主泡泡形变速度和幅度。\\
+    ESC & Quit & 退出程序。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+此前调试用的 diffuseness、shininess、最大折射偏移、circulation diffusion、substeps 和符号翻转等参数没有继续显示在终端菜单中。它们仍可在代码中作为内部参数存在，但对最终展示来说不是必要交互项，保留过多会降低可读性。
+
+\section{DBSTT/vortex sheet 表面动态}
+
+项目主泡泡不是静态球体，而是由 \codepath{VortexSheetSimulation} 维护的动态三角网格。初始化时，程序创建一个带轻微扰动的 icosphere；每帧模拟后，将新的顶点位置和法线上传给 OpenGL 网格。
+
+该部分参考 Da 等人的 \textit{Double Bubbles Sans Toil and Trouble} \cite{da2015doublebubbles}。原论文用非流形三角网格和环量变量模拟肥皂膜、泡沫和拓扑变化。本项目实现的是用于单个闭合泡泡演示的简化版本，主要保留如下思路：
+
+\begin{enumerate}
+  \item 在网格顶点上存储 circulation。
+  \item 计算顶点法线、Voronoi 面积和标量平均曲率。
+  \item 表面张力根据曲率更新 circulation。
+  \item 由 circulation 的离散梯度得到 vortex sheet strength。
+  \item 通过正则化 Biot-Savart 公式计算顶点速度。
+  \item 根据速度推进顶点位置，并进行少量 circulation diffusion 以提高稳定性。
+\end{enumerate}
+
+在代码中，这些步骤对应：
+
+\begin{lstlisting}
+computeVertexNormalsAndAreas()
+computeMeanCurvature()
+integrateSurfaceTension(dt)
+computeVortexSheetStrength(gamma)
+computeBiotSavartVelocities(gamma)
+advectPositions(dt)
+diffuseCirculation()
+\end{lstlisting}
+
+当前实现没有加入原论文中的完整非流形拓扑变化、泡沫多区域标记和线框约束，因此它更准确地说是一个 DBSTT 风格的单泡泡表面动态近似。它的作用是让主泡泡轮廓和表面法线随时间发生微小变化，从而让折射和虹彩不显得完全静止。
+
+\reportfigure{dbstt_deformation.png}{0.86}{0.26\textheight}{主泡泡在 DBSTT/vortex sheet 模拟下的轻微形变。可暂停前后对比轮廓变化。}
+
+\section{多泡泡展示与风吹漂移}
+
+为了增强展示效果，项目加入了 18 个展示泡泡。它们不是独立的物理模拟泡泡，而是使用静态球体模型、同一套折射/虹彩 shader，以及独立的模型矩阵动画。每个展示泡泡包含：
+
+\begin{itemize}
+  \item 基础位置 \codepath{basePosition}
+  \item 半径 \codepath{radius}
+  \item 相位 \codepath{phase}
+  \item 风向振幅 \codepath{windAmplitude}
+  \item 上下浮动振幅 \codepath{floatAmplitude}
+  \item 速度 \codepath{speed}
+\end{itemize}
+
+风吹动画由 \codepath{BubbleModelMatrix} 计算，简化表达为：
+
+\[
+\mathbf{x}_i(t) =
+\mathbf{x}_{i,0}
++ \mathbf{w}\sin(s_i t+\phi_i)A_i
++ \mathbf{y}\sin(0.73s_i t+1.7\phi_i)B_i
++ \mathbf{z}\cos(0.51s_i t+0.9\phi_i)C_i.
+\]
+
+其中 $\mathbf{w}$ 是归一化风向，$\mathbf{y}$ 是竖直方向，$\mathbf{z}$ 是深度方向。半径还会乘以轻微 wobble 系数，让泡泡不是完全刚性缩放。
+
+展示泡泡的排布包含前景和背景：部分泡泡的 $z$ 坐标在主泡泡前方，用来增加层次感；另一部分分布在左右和后方，用来形成更丰富的空间构图。它们与主泡泡使用相同 shader，因此当前版本的副泡泡不会再单独走一套容易产生黑色问题的材质逻辑。
+
+\reportfigure{multi_bubble_wind.png}{0.92}{0.28\textheight}{18 个展示泡泡在风吹动下轻微漂移，部分位于主泡泡前景，部分位于背景。}
+
+\section{结果分析与局限}
+
+当前版本实现了实时、可交互、便于展示的肥皂泡效果。主要效果包括：
+
+\begin{itemize}
+  \item 通过三阶段 FBO 近似双界面折射，背景小球和天空盒能在泡泡中产生明显扭曲。
+  \item 三种薄膜虹彩模式可以在运行时切换，便于比较实时公式、预计算 LUT 和 Airy 风格多波长反射的差异。
+  \item 动态膜厚让虹彩随时间缓慢流动，不依赖静态纹理。
+  \item 右键拖动能产生局部膜厚增强和波纹，提升演示交互性。
+  \item 主泡泡接入 DBSTT/vortex sheet 风格表面动态，副泡泡用于丰富画面构图。
+\end{itemize}
+
+同时，系统也有明确局限：
+
+\begin{itemize}
+  \item 屏幕空间折射不能表现屏幕外物体，也不能严格模拟多泡泡之间的相互折射。
+  \item Belcour Airy 模式是实时 shader 中的项目级简化，不包含完整微表面模型和解析光谱预积分。
+  \item 动态膜厚主要由噪声、排液趋势和触摸扰动驱动，没有求解完整的薄膜厚度流体方程。
+  \item DBSTT 模拟只用于单个闭合泡泡，不支持原论文中的泡沫拓扑变化和 Plateau 边界。
+  \item 展示泡泡只做视觉漂移，不参与主泡泡的物理碰撞或流体耦合。
+\end{itemize}
+
+这些取舍的核心目标是保持程序能够在普通 Windows 桌面环境中实时运行，并且在课堂展示中清楚呈现折射、虹彩、动态与交互。
+
+\section{总结}
+
+本项目从透明肥皂泡的主要视觉现象出发，构建了一个可实时运行的 OpenGL 渲染系统。渲染方面，项目通过 background FBO、back-face FBO 和 final screen pass 近似双界面折射，并用 FBO overscan 与坐标修正解决多泡泡采样黑色问题。光学方面，项目实现了 Kim2012、Spectral LUT、Belcour Airy 三种薄膜虹彩模式，能够展示实时公式计算、预计算纹理和多波长 Airy 近似之间的差异。动态方面，项目结合程序化膜厚变化、右键触摸波纹、DBSTT 风格主泡泡形变和多泡泡风吹漂移，使最终结果更适合演示。
+
+后续如果继续扩展，可以考虑加入更严格的光谱到 RGB 积分、更真实的膜厚流体模拟、多泡泡之间的相互折射和碰撞，以及基于体积或拓扑变化的泡沫模拟。
+
+\appendix
+\section{截图占位与建议截图位置}
+
+报告中的图片目前都使用占位符。截图时建议运行：
+
+\begin{lstlisting}
+cd windows/build/Release
+.\BubbleRender.exe
+\end{lstlisting}
+
+然后按照以下清单保存到 \codepath{report/figures/}：
+
+\begin{table}[H]
+  \centering
+  \caption{建议截图清单}
+  \begin{tabular}{>{\ttfamily}p{0.34\linewidth}p{0.56\linewidth}}
+    \toprule
+    文件名 & 截图内容 \\
+    \midrule
+    overall\_scene.png & 默认 Belcour Airy 模式，等待几秒让 18 个泡泡漂移到较好的位置，截整体画面。\\
+    refraction\_background.png & 让背景小球位于主泡泡后方，截主泡泡内部的背景扭曲。\\
+    three\_modes\_compare.png & 固定相机视角，按 L 分别截 Kim2012、Spectral LUT、Belcour Airy，再拼成一张横向对比图。\\
+    touch\_ripple.png & 右键拖动主泡泡中心或边缘，截局部彩色波纹和折射扰动。\\
+    dbstt\_deformation.png & 运行一段时间后截主泡泡形变，或按 Z 暂停后选择轮廓较明显的时刻。\\
+    multi\_bubble\_wind.png & 等待副泡泡漂移，确保画面中有前景和背景泡泡，截多泡泡展示效果。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

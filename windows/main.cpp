@@ -2369,8 +2369,16 @@ static void InitializeFusionProfile(BubbleContactPair &pair,
          b.visualState.fresnelStrength * volumeB) /
         theoreticalVolume;
     pair.visualState.opacity = std::max(a.alpha, b.alpha);
-    pair.visualState.opticalNormalBlendAtOrigin = 1.0f;
-    pair.visualState.opticalNormalRelaxationRate = 0.70f;
+    // Use the geometric normal exclusively for refraction.  The transported
+    // filmDirection's axial component flips sign at the neck (each parent
+    // bubble's outward normal points in the opposite direction), and using it
+    // as the refraction normal creates a visible seam there.  The geometric
+    // normal is continuous across the neck, so it eliminates the line.
+    // Iridescence noise is unaffected: it uses vFilmCoordinate (world-space),
+    // not filmDirection.  The NdotV used by thin-film interference changes
+    // only slightly (geometric vs film normal are similar away from the neck).
+    pair.visualState.opticalNormalBlendAtOrigin = 0.0f;
+    pair.visualState.opticalNormalRelaxationRate = 0.0f;
 
     const float centerA = glm::dot(a.position - weightedCenter, axis);
     const float centerB = glm::dot(b.position - weightedCenter, axis);

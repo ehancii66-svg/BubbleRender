@@ -1,0 +1,299 @@
+
+\chapter{物理模拟与动力学}
+\section{基于涡流片的单泡泡物理模拟}
+
+肥皂泡的本质是浸没在环境空气中的一个极薄液膜，其动力学行为主要由液膜的表面张力、周围空气的不可压缩性，以及空气的惯性主导。传统的基于体积的多相纳维-斯托克斯（Navier-Stokes）求解器虽然能够精确模拟这些现象，但需要大量的计算资源来解析泡泡内部的空气动力学以及薄至微米级的薄膜几何形状。
+
+本项目的方法参考Da 等人提出的 \textit{Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams} \cite{da2015doublebubbles}的思路，仅将建模工作集中在泡泡表面。该论文首次提出了一种基于非流形涡流片（vortex sheet）方程来模拟肥皂膜、泡泡和泡沫动力学的数值方法。本项目在其理论基础上实现了一个简化版本，专门用于单个闭合泡泡的动态表面演化。
+
+\subsection{涡流片模型的理论基础}
+
+涡流片是一个浸没在三维空间中的表面，它界定了速度场切向分量的不连续性——穿过薄片时，速度的切向分量发生跳跃，而法向分量保持连续。这一数学结构恰好契合肥皂膜的物理本质：薄膜两侧分别是内部空气和外部空气，两侧的速度场可以不同，但空气不能穿透薄膜。
+
+DBSTT 方法使用一个标量场——\textbf{环量（circulation）}$\Gamma$——作为描述涡流片状态的主要变量。对于表面上的每一个点 $f(X)$，其环量值定义为沿着一个从固定参考点 $x_0$ 到该点、且穿透薄片的任意闭合环路的环路积分：
+
+\begin{equation}
+\Gamma(X) = \oint_L \mathbf{u} \cdot d\mathbf{x}
+\label{eq:circulation_def}
+\end{equation}
+
+其中 $\mathbf{u}$ 为环境空气的速度场。这一积分的值与环路 $L$ 的具体形状无关（只要它仅在 $x_0$ 和 $f(X)$ 两处穿透薄片），这保证了 $\Gamma$ 是表面上的良定义的标量场。
+
+给定环量场之后，可以分两步恢复速度场。首先计算涡流片强度$\boldsymbol{\gamma}$：
+
+\begin{equation}
+\boldsymbol{\gamma} = \mathbf{n} \times \nabla_{\!f}\, \Gamma
+\label{eq:vortex_sheet_strength}
+\end{equation}
+
+其中 $\mathbf{n}$ 为表面单位法线，$\nabla_{\!f}$ 为表面梯度算子。
+
+接着，通过Biot-Savart积分恢复环境速度场：
+
+\begin{equation}
+\mathbf{u}(\mathbf{x}) = \frac{1}{4\pi} \int_S \boldsymbol{\gamma}(\mathbf{x}') \times \frac{\mathbf{x} - \mathbf{x}'}{|\mathbf{x} - \mathbf{x}'|^3} \, df'
+\label{eq:biot_savart}
+\end{equation}
+
+$\mathbf{u}$ 自动满足 $\nabla \cdot \mathbf{u} = 0$ 。这意味着基于涡流片运动学导出的速度场能够自然地捕捉不可压缩流体的动力学特征，而无需像传统网格方法那样在每步显式求解压力-泊松方程来强制不可压缩性。
+
+下面考虑表面张力驱动的环量演化。在不受外力作用时，根据开尔文环量定理，环量随物质平流守恒：$D\Gamma/Dt = 0$。而由于表面张力的存在，环量场会按照一个简洁的局部定律演化。
+
+考虑不可压缩欧拉方程在涡流片两侧的极限形式，结合表面张力产生的压力跳跃 $p_1 - p_2 = \sigma(H_1 - H_2)$（其中 $\sigma$ 为表面张力系数，$H_1, H_2$ 分别为薄膜两侧的有符号标量平均曲率），可以得到环量演化的核心方程：
+
+\begin{equation}
+\frac{D\Gamma}{Dt} = -\frac{\sigma}{\rho} (H_1 - H_2)
+\label{eq:circulation_evolution}
+\end{equation}
+
+其中 $\rho$ 为空气密度。对于闭合的单个泡泡，两侧的几何重合但朝向相反，因此 $H_1 = -H_2$，从而 $H_1 - H_2 = 2H$。这意味着\textbf{环量的时间变化率与表面的有符号标量平均曲率成正比}——表面曲率大的区域环量变化快，曲率小的区域变化慢。表面张力正是通过这一机制驱动泡泡表面趋向平衡态（对闭合泡泡而言是球面，其上各点曲率相等）。
+
+\subsection{离散化与数值实现}
+
+将上述连续理论转化为数值算法，需要在空间和时间维度上进行离散化。以下详细介绍本项目在 \codepath{VortexSheetSimulation} 类中的实现。
+
+使用三角网格来表示泡泡表面，在顶点上采样环量场。项目定义了 \codepath{SimMesh} 结构来承载模拟所需的所有数据：
+
+\begin{itemize}
+  \item \codepath{positions}：顶点三维位置 $\mathbf{p}_i \in \mathbb{R}^3$
+  \item \codepath{triangles}：三角形索引三元组 $(i_0, i_1, i_2)$
+  \item \codepath{circulation}：逐顶点存储的标量环量 $\Gamma_i \in \mathbb{R}$
+  \item \codepath{vertexNormals}：顶点法线 $\mathbf{n}_i$（通过角度加权平均求出）
+  \item \codepath{voronoiAreas}：顶点 Voronoi 对偶面积 $A_i$
+  \item \codepath{meanCurvature}：逐顶点有符号标量平均曲率 $H_i$
+  \item \codepath{velocity}：逐顶点的诱导速度 $\mathbf{u}_i$
+\end{itemize}
+
+初始几何由 \codepath{initIcosphere()} 构建：程序首先生成一个单位二十面体，再通过 midpoint 方式对 icosphere 做指定次数的细分，最后归一化到指定半径 $R = 1.5$。为了触发动力学演化，程序沿一个固定拉伸轴施加初始顶点扰动；在当前鸿蒙提交版本中，应用层设置的扰动幅度为 $16\%$。环量场初始化为全零，法线和面积在初始化完成后立即计算。
+
+\textbf{算法总览}
+
+每次仿真更新遵循 DBSTT 论文\cite{da2015doublebubbles} Algorithm 1 的时间积分循环，经过本项目简化适配后的子步更新流程为：
+
+\begin{enumerate}
+  \item \textbf{几何量计算}：\codepath{computeVertexNormalsAndAreas()} + \codepath{computeMeanCurvature()}
+  \item \textbf{表面张力积分}：\codepath{integrateSurfaceTension(dt)}
+  \item \textbf{环量扩散}：\codepath{diffuseCirculation()}
+  \item \textbf{涡流片强度计算}：\codepath{computeVortexSheetStrength(gamma)}
+  \item \textbf{毕奥-萨伐尔速度求解}：\codepath{computeBiotSavartVelocities(gamma)}
+  \item \textbf{位置推进}：\codepath{advectPositions(dt)}
+\end{enumerate}
+
+\codepath{VortexSheetSimulation} 类内部保留了 \codepath{substepsPerFrame = 5}、\codepath{timeStep = 0.0005f} 的默认配置，但当前鸿蒙提交版本在初始化与重置时都会显式改写为 \codepath{substepsPerFrame = 1}、\codepath{timeStep = 0.001f}。同时，Native 渲染层并不是每一帧都推进仿真，而是每隔 \codepath{kSimFrameInterval = 6} 帧调用一次 \codepath{g\_Sim.update(1.0f / 60.0f)}。因此，当前系统中一次实际仿真更新只执行 1 个子步，子步时间步长为 $\Delta t = 0.001$ 秒，子步结束后重新计算法线以供渲染使用。
+
+\textbf{顶点法线与Voronoi面积计算}
+
+顶点法线采用角度加权平均法计算。对每个入射到顶点 $v$ 的三角形面，计算该面的单位法线 $\mathbf{n}_f$，并将其按该三角形在顶点处的内角加权累加：
+
+\begin{equation}
+\mathbf{n}_v = \frac{\sum_{f \in \text{faces}(v)} \alpha_f \cdot \mathbf{n}_f}
+                 {\bigl\| \sum_{f \in \text{faces}(v)} \alpha_f \cdot \mathbf{n}_f \bigr\|}
+\label{eq:angle_weighted_normal}
+\end{equation}
+
+其中 $\alpha_f$ 为面 $f$ 中位于顶点 $v$ 处的内角，通过相邻边向量的点积与反余弦求得。对于退化情况（法线长度接近于零），则退化为从原点指向顶点的径向方向。
+
+Voronoi 面积通过将每个入射三角形的面积三等分并累加到其三个顶点上来近似计算。
+
+\textbf{离散平均曲率}
+
+对于标量平均曲率的离散化，本项目参考论文的建议，采用基于边的离散曲率公式：对每对相邻顶点 $(v_i, v_j)$（即每条共享两个三角形的边），计算该边上的积分平均曲率，再均匀分配到其两个端点。具体来说，对于连接 $v_i, v_j$ 的边，假设它由两个三角形 $t_0, t_1$ 共享：
+
+\begin{equation}
+\mathbf{K}_i = -\frac{1}{4A_i} \sum_{j \in \mathcal{N}(i)} (\cot\alpha_{ij} + \cot\beta_{ij})\,(\mathbf{p}_j - \mathbf{p}_i)
+\label{eq:cotan_curvature}
+\end{equation}
+
+其中 $A_i$ 为顶点 $v_i$ 的 Voronoi 面积，$\mathcal{N}(i)$ 为 $v_i$ 的一环邻域，$\alpha_{ij}, \beta_{ij}$ 分别为边 $e_{ij}$ 在两个入射三角形中对面的两个角。$\cot\alpha$ 通过边向量的点积除以叉积模长求得：
+
+\begin{equation}
+\cot\alpha = \frac{\mathbf{e}_{ik} \cdot \mathbf{e}_{jk}}{\|\mathbf{e}_{ik} \times \mathbf{e}_{jk}\|}
+\label{eq:cotan}
+\end{equation}
+
+在代码实现中，程序首先构建从边到其入射面列表的映射，然后仅处理恰好由两个三角形共享的边，计算两侧的余切权重并累加到曲率法线 $\mathbf{K}_i$ 上。最终的标量平均曲率通过对曲率法线取负点积获得：
+
+\begin{equation}
+H_i = -\mathbf{K}_i \cdot \mathbf{n}_i
+\label{eq:scalar_H}
+\end{equation}
+
+负号确保了向外法线约定下的符号正确性：在凸区域（如球面），$\mathbf{K}$ 指向内侧，与向外法线 $\mathbf{n}$ 的点积为负，取负后 $H > 0$。
+
+\textbf{表面张力积分}
+
+有了每个顶点的离散标量平均曲率 $H_i$，就可以根据方程 (\ref{eq:circulation_evolution}) 对环量进行前向欧拉更新。对于单个闭合泡泡，两侧界面几何重合但朝向相反：$H_1 = H, H_2 = -H$，故 $H_1 - H_2 = 2H$。离散更新公式为：
+
+\begin{equation}
+\Delta\Gamma_i = \text{sign} \cdot \frac{\sigma}{\rho} \cdot \Delta t \cdot 2 \cdot H_i
+\label{eq:discrete_dGamma}
+\end{equation}
+
+其中 $\sigma/\rho$ 对应代码中的 \codepath{surfaceTensionStrength}（默认值 $15.0$），$\text{sign}$ 通过 \codepath{flipSurfaceTensionSign}（默认 \codepath{true}，即取正号）控制。
+
+值得注意的是，论文中原本的公式包含顶点面积 $A_v$ 在分母中，但由于我们使用逐点的 $H_i$ 而非积分的曲率 $H_i^v$，$A_v$ 在分子分母中恰好抵消简化。
+
+\textbf{Vortex Sheet Strength 计算}
+
+环量更新完成后，需要在每个三角形上计算涡流片强度 $\boldsymbol{\gamma}$。根据方程 (\ref{eq:vortex_sheet_strength})，$\boldsymbol{\gamma} = \mathbf{n} \times \nabla_{\!f}\,\Gamma$。在三角形 $t = (v_0, v_1, v_2)$ 上，环量场是分段线性的，其表面梯度为常数。代码实现使用三角形三个顶点的环量值来计算梯度：
+
+\begin{equation}
+\boldsymbol{\gamma}_t = \mathbf{n}_t \times \frac{
+    \Gamma_0 (\mathbf{p}_2 - \mathbf{p}_1) +
+    \Gamma_1 (\mathbf{p}_0 - \mathbf{p}_2) +
+    \Gamma_2 (\mathbf{p}_1 - \mathbf{p}_0)
+}{2 \cdot \text{area}(t)}
+\label{eq:discrete_gamma}
+\end{equation}
+
+其中 $\mathbf{n}_t$ 为三角形面的单位法线，通过边向量的叉积归一化得到，且保证与从原点指向三角形质心的方向一致（向外朝向）。
+
+\textbf{正则化毕奥-萨伐尔速度求解}
+
+对于每个顶点 $v_i$，需要计算所有三角形 $t_j$ 对其诱导速度的贡献之和。为避免距离趋近于零时的奇异性，DBSTT 采用 正则化形式：
+
+\begin{equation}
+\mathbf{u}(\mathbf{x}) = \frac{1}{4\pi} \sum_{t} \boldsymbol{\gamma}_t \times
+    \frac{\mathbf{x} - \mathbf{c}_t}
+         {(|\mathbf{x} - \mathbf{c}_t|^2 + \alpha^2)^{3/2}} \cdot A_t
+\label{eq:regularized_biot_savart}
+\end{equation}
+
+其中 $\mathbf{c}_t$ 为三角形 $t$ 的质心，$A_t$ 为其面积，$\alpha$ 为正则化参数。代码中 $\alpha$ 自动设为网格平均边长（在初始化时计算）的 $1.0$ 倍，即 \codepath{regularizationAlpha = avgEdgeLength * 1.0f}。
+
+实现细节上，程序预计算每个三角形的质心、面积和 $\boldsymbol{\gamma}_t$ 值，然后对每个顶点遍历所有三角形，进行双重循环求和。每个贡献项为 $\boldsymbol{\gamma}_t \times \mathbf{r}$ 乘以面积和分母幂次的倒数，其中 $\mathbf{r} = \mathbf{x} - \mathbf{c}_t$ 为从三角形质心到当前顶点的向量。最终速度除以 $4\pi$ 以匹配连续积分中的系数。
+
+\textbf{位置推进与安全钳制}
+
+顶点位置使用前向欧拉法更新：$\mathbf{p}_i \leftarrow \mathbf{p}_i + \mathbf{u}_i \cdot \Delta t$。为确保稳定性，代码施加了一个位移上限，限制每个子步的顶点位移不超过平均边长的 $10\%$：
+
+\begin{equation}
+\|\Delta\mathbf{p}_i\|_{\max} = 0.1 \cdot \bar{e}
+\label{eq:max_displacement}
+\end{equation}
+
+其中 $\bar{e}$ 为平均边长。这是为了解决调试代码过程中出现的因数值不稳定导致的网格穿刺或顶点飞散问题。
+
+位置更新后，所有顶点统一减去网格质心，以防止因数值漂移导致的整体平移，保持毕奥-萨伐尔积分的对称性。
+
+\textbf{环量扩散}
+
+为了进一步抑制数值不稳定性，代码在每个子步中施加一个轻微的拉普拉斯扩散：
+
+\begin{equation}
+\Gamma_i \leftarrow \Gamma_i + \nu \cdot \frac{1}{|\mathcal{N}(i)|} \sum_{j \in \mathcal{N}(i)} (\Gamma_j - \Gamma_i)
+\label{eq:circulation_diffusion}
+\end{equation}
+
+其中 $\nu$ 为扩散系数，默认值 \codepath{circulationDiffusion = 0.0005}，非常小，仅用于消除高频数值振荡而不影响宏观动力学行为。DBSTT 论文也指出，这种扩散可以解释为对空气粘度的合理视觉近似。
+
+\subsection{与本项目渲染管线的集成}
+
+物理模拟与渲染管线的衔接位于 \codepath{RenderFrame()} 函数中：
+
+\begin{enumerate}
+  \item 渲染循环开始后，若模拟未被暂停（\codepath{g\_SimPaused == false}），则每隔 \codepath{kSimFrameInterval = 6} 帧调用一次 \codepath{g\_Sim.update(1.0f/60.0f)}，按较低频率推进一次仿真更新。
+  \item 模拟完成后，调用 \codepath{buildVerticesFromSim()} 将 \codepath{SimMesh} 中的顶点位置和法线转换为 GPU 可用的 \codepath{Vertex} 数组。
+  \item 通过 \codepath{Mesh::updateVertices()} 将更新后的顶点数据上传至 OpenGL VBO，后续的折射/虹彩 shader 即可使用变形后的几何体进行渲染。
+\end{enumerate}
+
+主泡泡的模型矩阵保持为单位矩阵，所有变形信息完全包含在经模拟更新的顶点位置中，这使得 shader 中的法线计算能够正确地反映泡泡表面的动态形变。
+
+当前实现没有加入原论文中的完整非流形拓扑变化、泡沫多区域标记和线框约束，只是一个 DBSTT 风格的单泡泡表面动态近似。它的作用是让主泡泡轮廓和表面法线随时间发生微小变化，从而让折射和虹彩不显得完全静止。      
+
+具体动态效果详见项目演示视频。可以明显观察到主泡泡在当前系统中保持持续的小幅表面形变，并在参数调整后呈现不同强度的恢复趋势。
+
+\section{触摸交互与局部光学响应}
+
+除了自动的表面动力学演化之外，本项目还实现了模拟真实触碰泡泡的交互效果。交互设计并不把触摸输入简单地作为全局参数滑杆，而是将其解释为用户在屏幕空间中接触泡泡表面所产生的局部扰动。系统中，触摸事件通过 ArkTS 的 \codepath{onTouch} 回调转发到 Native 层：单指拖动主要用于旋转观察视角，单指点击、短按以及未触发视角旋转阈值的微小移动用于触发主泡泡的局部触摸响应，双指缩放用于调整相机距离；在 shader 层，这些输入仍统一被表述为触摸点、触摸强度和触摸速度。
+
+具体来说，程序将触摸位置归一化为屏幕空间坐标 \codepath{uTouchPoint}，并根据按压状态和局部移动速度构造两个交互参数：触摸强度 \codepath{uTouchStrength} 与触摸速度 \codepath{uTouchVelocity}。在 fragment shader 中，对当前片元屏幕坐标 $\mathbf{x}$ 与触摸点 $\mathbf{x}_{touch}$ 的距离建立一个局部高斯影响区域：
+
+\begin{equation}
+M_{touch} =
+\exp\left(-\frac{\|\mathbf{x}-\mathbf{x}_{touch}\|^2}{r^2}\right)
+\cdot S_{touch},
+\label{eq:touch_mask}
+\end{equation}
+
+其中 $S_{touch}$ 对应触摸强度，$r$ 控制局部作用半径。为了表现手指接触薄膜后产生的环形扰动，shader 还叠加了一个随距离衰减的波纹项：
+
+\begin{equation}
+Q_{ripple} =
+\sin\left(k\|\mathbf{x}-\mathbf{x}_{touch}\|-\omega t\right)
+\exp\left(-\lambda\|\mathbf{x}-\mathbf{x}_{touch}\|\right)
+\cdot S_{touch}.
+\label{eq:touch_ripple}
+\end{equation}
+
+触摸项会同时影响折射和色散两个视觉通道。首先，在屏幕空间折射部分，局部触摸会放大原有的折射偏移，使泡泡背后的背景在触摸点附近发生更明显的扭曲：
+
+\begin{equation}
+\Delta \mathbf{p}_{touch}
+=
+\Delta \mathbf{p}_{base}
+\cdot \left(1 + 2.4M_{touch} + 1.1|Q_{ripple}|\right)
++ \hat{\mathbf{d}}_{touch} Q_{ripple}.
+\label{eq:touch_refraction}
+\end{equation}
+
+其中 $\Delta \mathbf{p}_{base}$ 是基础折射偏移，$\hat{\mathbf{d}}_{touch}$ 是从触摸点向当前片元的屏幕空间方向。这样，触摸不会改变整个泡泡的折射强度，而是在接触区域形成局部的折射增强，更接近真实泡泡受到扰动时的视觉表现。
+
+其次，触摸扰动也会改变薄膜厚度场。由于薄膜干涉颜色对膜厚变化非常敏感，局部膜厚扰动会直接表现为虹彩颜色和色散强度的变化。本项目在原有噪声膜厚场上加入触摸项：
+
+\begin{equation}
+d = d_0 + A_{var}P(\mathbf{n},t) + 190M_{touch} + 95Q_{ripple},
+\label{eq:touch_thickness}
+\end{equation}
+
+其中 $P(\mathbf{n},t)$ 是随法线方向和时间变化的程序化膜厚扰动。触摸点附近的 $M_{touch}$ 使局部膜厚发生偏移，$Q_{ripple}$ 则形成环状传播的薄膜厚度变化，从而让触摸区域出现更强的局部虹彩和色散。
+
+
+触摸交互对泡泡局部折射和色散的影响具体效果详见演示视频。无触摸时，泡泡只显示基础折射与薄膜虹彩；单指点击或按压后，接触点附近的背景扭曲和颜色变化明显增强；在不触发视角旋转的轻微移动情况下，触摸速度会进一步增强波纹项，使局部折射与色散出现更明显的动态响应。系统中的触摸输入不会作为全局参数调节器，而是在触摸点附近产生局部薄膜扰动，从而增强背景折射变形与虹彩色散。
+ 
+
+\section{多泡泡展示与风吹漂移}
+
+为了增强展示效果，项目加入了 16 个展示泡泡。它们不是独立的物理模拟泡泡，而是使用静态球体模型、同一套折射/虹彩 shader，以及独立的模型矩阵动画。每个展示泡泡包含：
+
+\begin{itemize}
+  \item 基础位置 \codepath{basePosition}
+  \item 半径 \codepath{radius}
+  \item 相位 \codepath{phase}
+  \item 风向振幅 \codepath{windAmplitude}
+  \item 上下浮动振幅 \codepath{floatAmplitude}
+  \item 速度 \codepath{speed}
+\end{itemize}
+
+风吹动画由 \codepath{BubbleModelMatrix} 计算，简化表达为：
+
+\[
+\mathbf{x}_i(t) =
+\mathbf{x}_{i,0}
++ \mathbf{w}\sin(s_i t+\phi_i)A_i
++ \mathbf{y}\sin(0.73s_i t+1.7\phi_i)B_i
++ \mathbf{z}\cos(0.51s_i t+0.9\phi_i)C_i.
+\]
+
+其中 $\mathbf{w}$ 是归一化风向，$\mathbf{y}$ 是竖直方向，$\mathbf{z}$ 是深度方向。半径还会乘以轻微 wobble 系数，让泡泡不是完全刚性缩放。
+
+展示泡泡的排布包含前景和背景：部分泡泡的 $z$ 坐标在主泡泡前方，用来增加层次感；另一部分分布在左右和后方，用来形成更丰富的空间构图。它们与主泡泡使用相同 shader，因此当前版本的副泡泡不会再单独走一套容易产生黑色问题的材质逻辑。实现时，程序会先按展示泡泡到相机的距离从远到近排序，再以固定输出透明度进行 Alpha 混合合成，从而减轻透明物体互相覆盖时的排序伪影。
+
+下图展示了两个不同时刻的多泡泡位置变化；更连续的浮动和轻微形变效果可参考项目 demo 视频。
+
+\begin{figure}[H]
+  \centering
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{bd5a9eda34e1392270b9881e39415c1d.jpg}\\[0.4em]
+    \small 时刻一
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{c1be1a69a8781c973780b23fe46f0fd1.jpg}\\[0.4em]
+    \small 时刻二
+  \end{minipage}
+  \caption{16 个展示泡泡在风吹动下轻微漂移，部分位于主泡泡前景，部分位于背景。}
+  \label{fig:multi_bubble_wind}
+\end{figure}

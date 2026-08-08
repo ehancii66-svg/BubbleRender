@@ -1,0 +1,68 @@
+\chapter{引言}
+
+\section{赛题目标与总体结构}
+
+赛题二“基于鸿蒙的透明物体实时色散渲染系统”要求参赛者在给定基线工程上完成透明物体的实时折射、色散与交互展示，并进一步体现多泡泡效果、运动模拟、完整 UI 和稳定运行能力。肥皂泡恰好同时包含透明折射、薄膜干涉、动态表面和交互反馈四类典型问题，因此非常适合作为赛题落地对象。
+
+本技术文档将介绍本队最终初赛提交版本的核心技术路线。系统围绕一个主泡泡展开：主泡泡负责展示折射、虹彩、触摸扰动和表面形变；周围的展示泡泡负责增强多目标层次与现场演示观感。实现上，系统被组织为渲染管线、薄膜材质、几何数据、动态模拟和资源加载几个相对独立的模块，并通过 ArkTS 页面层与 Native 渲染层共同完成最终应用。
+
+\reportfigure{df945d3735ced72e359e184a6d30f648.jpg}{0.44}{0.28\textheight}{最终整体效果：主泡泡、背景折射、天空盒环境、虹彩边缘以及多个漂移展示泡泡。}
+
+\section{系统组成}
+
+最终鸿蒙提交版本的核心源码位于：
+\begin{quote}
+  \path{HarmonyOS_Source_Submission/refraction/}
+\end{quote}
+表 \ref{tab:structure} 列出了和实现相关的各个模块。
+
+\begin{table}[H]
+  \centering
+  \caption{系统模块与职责}
+  \label{tab:structure}
+  \begin{tabular}{p{0.22\linewidth}p{0.30\linewidth}p{0.36\linewidth}}
+    \toprule
+    模块 & 主要内容 & 作用 \\
+    \midrule
+    页面与交互 & ArkTS 页面、XComponent、按钮与参数面板 & 承载渲染画面，处理触控输入、模式切换、状态显示和参数调节。\\
+    Native 接口与管线 & NAPI、EGL、FBO、绘制顺序 & 连接 ArkTS 与 C++ 渲染层，组织多阶段折射渲染和场景合成。\\
+    泡泡材质 & 折射 shader、薄膜虹彩、动态膜厚 & 实现屏幕空间折射、Kim2012/LUT/Belcour Airy 三种虹彩模式和触摸波纹。\\
+    渲染封装 & 相机、模型、网格、shader 工具类 & 管理天空盒、球体、动态网格和 OpenGL ES 绘制细节。\\
+    表面模拟 & DBSTT/vortex sheet 单泡泡动态 & 让主泡泡轮廓和法线随时间产生轻微形变。\\
+    资源文件 & 天空盒、薄膜 LUT、HAP 提交资源 & 提供环境反射、背景折射参照、预计算薄膜反射数据和移动端运行素材。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{运行环境}
+
+本项目初期开发在 Windows 主机上进行，验证设计可行性和效果后使用 DevEco Studio 完成基于 HarmonyOS 架构的实现。推荐环境如下：
+
+\begin{table}[H]
+  \centering
+  \caption{推荐编译与运行环境}
+  \begin{tabular}{p{0.28\linewidth}p{0.58\linewidth}}
+    \toprule
+    项目 & 要求 \\
+    \midrule
+    开发主机操作系统 & Windows 11。\\
+    开发工具 & DevEco Studio 6.0.2。\\
+    SDK 环境 & HarmonyOS SDK 6.0.2（API 22）。\\
+    页面层 & ArkTS + XComponent。\\
+    Native 层 & CMake + C++ + EGL + OpenGL ES 3.0 + NAPI。\\
+    运行环境 & HarmonyOS 真机或本地模拟器。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+命令行构建可使用 Hvigor，例如：
+
+\begin{lstlisting}[language=bash]
+node "E:\huawei\DevEco Studio\tools\hvigor\bin\hvigorw.js" assembleHap --no-daemon
+\end{lstlisting}
+
+签名完成后，构建产物通常位于：
+\begin{quote}
+  \path{entry/build/default/outputs/default/entry-default-signed.hap}
+\end{quote}
+提交的文件中已经整理出 \codepath{HarmonyOS\_Source\_Submission} 下的“可执行程序”目录。

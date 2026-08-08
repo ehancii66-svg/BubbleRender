@@ -1,0 +1,68 @@
+\chapter{交互与演示}
+\section{交互实现}
+
+\subsection{触控交互}
+
+当前系统以 HarmonyOS 触控为主要交互方式，最核心的演示路径由三类手势构成：
+
+\begin{table}[H]
+  \centering
+  \caption{触控交互}
+  \begin{tabular}{p{0.24\linewidth}p{0.64\linewidth}}
+    \toprule
+    操作 & 效果 \\
+    \midrule
+    单指拖动 & 改变相机 yaw/pitch，围绕泡泡观察。\\
+    双指缩放 & 改变相机距离，实现缩放。\\
+    单指点击/短按 & 在主泡泡上产生局部膜厚增强和环形折射波纹。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+在页面层，ArkTS 会先根据 XComponent 的实际区域将输入事件映射到局部坐标，再通过 NAPI 把坐标、事件类型和视口尺寸传给 Native 渲染层。单指点击主泡泡时，程序把触摸位置转换为归一化屏幕坐标 \codepath{g\_TouchPoint}，并记录触摸强度与局部移动速度 \codepath{g\_TouchVelocity}。当单指移动超过较小阈值后，ArkTS 侧会优先把后续移动解释为 \codepath{rotateCamera()} 输入，因此连续大幅拖动并不是局部波纹的主要触发方式。shader 中计算当前 fragment 到触摸点的距离：
+
+\[
+r = \left\|\mathbf{u}_{\mathrm{frag}}-\mathbf{u}_{\mathrm{touch}}\right\|.
+\]
+
+局部触摸强度采用高斯型衰减：
+
+\[
+M_{\mathrm{touch}} =
+\exp\left(-\frac{r^2}{0.0065}\right) S_{\mathrm{touch}},
+\]
+
+环形波纹采用正弦函数叠加指数衰减：
+
+\[
+Q_{\mathrm{ripple}} =
+\sin(78r - 18t)\,\exp(-9r)\,S_{\mathrm{touch}}
+(0.35+0.65V_{\mathrm{touch}}).
+\]
+
+触摸只作用在主泡泡上。绘制展示泡泡时，程序向 shader 传入无效触摸点和零强度，避免副泡泡受到局部触摸扰动。由于这一部分的效果高度依赖连续交互，具体动态表现以比赛提交视频中的演示为准。
+
+\subsection{界面参数}
+
+系统将主要控制项整理为移动端界面按钮和参数面板，使评审能够直接在鸿蒙设备上观察到参数变化。当前界面主要包含模式切换、仿真控制和参数滑条三类入口：
+
+\begin{table}[H]
+  \centering
+  \caption{界面参数控制}
+  \begin{tabular}{p{0.20\linewidth}p{0.26\linewidth}p{0.42\linewidth}}
+    \toprule
+    界面项 & 参数 & 作用 \\
+    \midrule
+    模式按钮 & Kim / Airy & 切换两种主要演示模式；Native 层仍保留 Spectral LUT 便于内部对比。\\
+    状态按钮 & 暂停仿真 / 重置 & 暂停或继续主泡泡表面模拟，并同步冻结或恢复基于时间的视觉变化；重置时恢复默认参数。\\
+    光学参数 & 干涉膜厚、折射强度、环境反射 & 调整彩色条纹尺度、背景扭曲强度和环境反射权重。\\
+    仿真参数 & 厚度扰动、表面张力、边缘畸变 & 调整动态膜厚幅度、主泡泡恢复趋势和轮廓额外折射增强。\\
+    视图参数 & 相机距离 & 调整观察远近，便于展示单泡泡细节或多泡泡整体构图。\\
+    状态显示 & FPS、当前模式、交互提示 & 方便现场展示系统帧率、当前材质模式和操作说明。\\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+除 ArkTS 界面当前开放的滑条外，Native 接口层还保留了 \codepath{uFresnelPower} 与 \codepath{uMaxOffsetRatio} 对应的调节入口，用于内部调参与折射稳定性验证；它们没有直接暴露在比赛演示面板中。
+
+这些参数直接服务于最终鸿蒙版本的展示与调参流程。具体调节过程和实时反馈可参考演示视频。
