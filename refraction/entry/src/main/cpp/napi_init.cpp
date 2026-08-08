@@ -107,6 +107,7 @@ static uint64_t g_NextBubbleId = 1;
 static uint64_t g_InteractionOutcomeSeed = 0;
 static uint64_t g_ContactOutcomeSequence = 0;
 static int g_InteractionDemoIndex = -1;
+static int g_QueuedInteractionDemoIndex = -1;
 static bool g_InteractionDemoActive = false;
 static bool g_ShowMainBubble = false;
 static bool g_LogContactDebug = false;
@@ -127,6 +128,23 @@ static constexpr float kMobileBurstSimTimeStep = 0.002f;
 static bool g_AddPreviewVisible = false;
 static glm::vec3 g_AddPreviewPosition{0.0f};
 static float g_AddPreviewRadius = 0.48f;
+
+enum class UiCommandType {
+    ResetOpeningScene,
+    CycleInteractionDemo,
+    AddBubble,
+    BurstBubble,
+};
+
+struct UiCommand {
+    UiCommandType type;
+    glm::vec3 position{0.0f};
+    float radius = 0.48f;
+    uint64_t bubbleId = 0;
+    int demoIndex = -1;
+};
+
+static std::deque<UiCommand> g_UiCommands;
 
 static constexpr float kSharedFilmTime = 0.22f;
 static constexpr float kNeckFormationTime = 1.15f;
@@ -977,6 +995,42 @@ static bool TriggerBubbleBurst(uint64_t id) {
     return true;
 }
 
+static size_t PendingAddBubbleCount() {
+    size_t pending = 0;
+    for (const UiCommand& command : g_UiCommands) {
+        if (command.type == UiCommandType::AddBubble) ++pending;
+    }
+    return pending;
+}
+
+// UI callbacks stay lightweight; resource creation and scene replacement are
+// consumed one at a time at the frame boundary.
+static void ProcessOneUiCommand() {
+    if (g_UiCommands.empty()) return;
+    UiCommand command = g_UiCommands.front();
+    g_UiCommands.pop_front();
+
+    switch (command.type) {
+    case UiCommandType::ResetOpeningScene:
+        ResetOpeningScene();
+        g_QueuedInteractionDemoIndex = -1;
+        break;
+    case UiCommandType::CycleInteractionDemo:
+        g_InteractionDemoIndex = (command.demoIndex + 2) % 3;
+        CycleInteractionDemo();
+        g_QueuedInteractionDemoIndex = g_InteractionDemoIndex;
+        break;
+    case UiCommandType::AddBubble:
+        if (g_DisplayBubbles.size() < 24) {
+            AddInteractiveBubble(command.position, command.radius);
+        }
+        break;
+    case UiCommandType::BurstBubble:
+        TriggerBubbleBurst(command.bubbleId);
+        break;
+    }
+}
+
 static glm::mat4 AxisXModel(const glm::vec3& center, const glm::vec3& axis) {
     glm::vec3 x = glm::normalize(axis);
     glm::vec3 reference = std::abs(x.y) < 0.90f ? glm::vec3(0.0f, 1.0f, 0.0f)
@@ -1479,6 +1533,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
     g_LastFrameTime = now;
     const double visualDt = g_VisualPaused ? 0.0 : dt;
     g_Time += visualDt;
+    ProcessOneUiCommand();
     if (dt > 1e-6) {
         double instantFps = 1.0 / dt;
         g_CurrentFps = (g_CurrentFps <= 0.0)
@@ -2213,14 +2268,20 @@ static glm::vec3 SpawnPositionFromSurfacePoint(float x, float y, float depth) {
 }
 
 static napi_value ResetOpeningSceneApi(napi_env env, napi_callback_info info) {
-    ResetOpeningScene();
+    g_UiCommands.clear();
+    g_UiCommands.push_back({UiCommandType::ResetOpeningScene});
+    g_QueuedInteractionDemoIndex = -1;
     return nullptr;
 }
 
 static napi_value CycleInteractionDemoApi(napi_env env, napi_callback_info info) {
-    CycleInteractionDemo();
+    g_UiCommands.clear();
+    g_QueuedInteractionDemoIndex = (g_QueuedInteractionDemoIndex + 1) % 3;
+    UiCommand command{UiCommandType::CycleInteractionDemo};
+    command.demoIndex = g_QueuedInteractionDemoIndex;
+    g_UiCommands.push_back(command);
     napi_value result;
-    napi_create_int32(env, g_InteractionDemoIndex, &result);
+    napi_create_int32(env, g_QueuedInteractionDemoIndex, &result);
     return result;
 }
 
@@ -2264,10 +2325,13 @@ static napi_value AddBubbleAtScreenApi(napi_env env, napi_callback_info info) {
     MapLogicalPointToSurface(fx, fy);
     glm::vec3 position = SpawnPositionFromSurfacePoint(
         fx, fy, static_cast<float>(depth));
-    if (g_DisplayBubbles.size() >= 24) {
+    if (g_DisplayBubbles.size() + PendingAddBubbleCount() >= 24) {
         return MakeBool(env, false);
     }
-    AddInteractiveBubble(position, glm::clamp(static_cast<float>(radius), 0.16f, 1.10f));
+    UiCommand command{UiCommandType::AddBubble};
+    command.position = position;
+    command.radius = glm::clamp(static_cast<float>(radius), 0.16f, 1.10f);
+    g_UiCommands.push_back(command);
     return MakeBool(env, true);
 }
 
@@ -2304,7 +2368,17 @@ static napi_value BurstBubbleAtScreenApi(napi_env env, napi_callback_info info) 
     float fx = static_cast<float>(x);
     float fy = static_cast<float>(y);
     MapLogicalPointToSurface(fx, fy);
-    return MakeBool(env, TriggerBubbleBurst(PickBubble(fx, fy)));
+    uint64_t bubbleId = PickBubble(fx, fy);
+    if (bubbleId == 0) return MakeBool(env, false);
+    for (const UiCommand& command : g_UiCommands) {
+        if (command.type == UiCommandType::BurstBubble && command.bubbleId == bubbleId) {
+            return MakeBool(env, false);
+        }
+    }
+    UiCommand command{UiCommandType::BurstBubble};
+    command.bubbleId = bubbleId;
+    g_UiCommands.push_back(command);
+    return MakeBool(env, true);
 }
 
 static napi_value HasBubbleAtScreenApi(napi_env env, napi_callback_info info) {
