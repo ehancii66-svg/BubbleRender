@@ -1,0 +1,78 @@
+\begin{thebibliography}{9}
+\providecommand{\natexlab}[1]{#1}
+\providecommand{\url}[1]{#1}
+\expandafter\ifx\csname urlstyle\endcsname\relax\else
+  \urlstyle{same}\fi
+\expandafter\ifx\csname href\endcsname\relax
+  \DeclareUrlCommand\doi{\urlstyle{rm}}
+  \def\eprint#1#2{#2}
+\else
+  \def\doi#1{\href{https://doi.org/#1}{\nolinkurl{#1}}}
+  \let\eprint\href
+\fi
+
+\bibitem[Wyman(2005)]{wyman2005refraction}
+WYMAN C.
+\newblock An approximate image-space approach for interactive
+  refraction\allowbreak[C]//\allowbreak
+ACM SIGGRAPH 2005 Sketches.
+\newblock ACM, 2005: 1050-1053.
+
+\bibitem[Kim et~al.(2012)Kim and Park]{kim2012soapbubble}
+KIM N, PARK K.
+\newblock Real time rendering iridescent colors appearing on soap
+  bubbles\allowbreak[M/OL]//\allowbreak
+Lecture Notes in Electrical Engineering: volume 181\quad Embedded and
+  Multimedia Computing Technology and Service.
+\newblock Springer, 2012: 377-384.
+\newblock DOI: \doi{10.1007/978-94-007-5075-3_45}.
+
+\bibitem[Belcour et~al.(2017)Belcour and Barla]{belcour2017iridescence}
+BELCOUR L, BARLA P.
+\newblock A practical extension to microfacet theory for the modeling of
+  varying iridescence\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2017, 36\allowbreak (4): 65:1-65:14.
+\newblock DOI: \doi{10.1145/3072959.3073620}.
+
+\bibitem[Ishida et~al.(2020)Ishida, Synak, Narita, Hachisuka, and
+  Wojtan]{ishida2020thickness}
+ISHIDA S, SYNAK P, NARITA F, et~al.
+\newblock A model for soap film dynamics with evolving
+  thickness\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2020, 39\allowbreak (4): 31:1-31:11.
+\newblock DOI: \doi{10.1145/3386569.3392405}.
+
+\bibitem[Da et~al.(2015)Da, Batty, Wojtan, and Grinspun]{da2015doublebubbles}
+DA F, BATTY C, WOJTAN C, et~al.
+\newblock Double bubbles sans toil and trouble: Discrete circulation-preserving
+  vortex sheets for soap films and foams\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2015, 34\allowbreak (4): 149:1-149:9.
+\newblock DOI: \doi{10.1145/2767003}.
+
+\bibitem[Busaryev et~al.(2012)Busaryev, Dey, Wang, and Ren]{busaryev2012bubble}
+BUSARYEV O, DEY T~K, WANG H, et~al.
+\newblock Animating bubble interactions in a liquid foam\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2012, 31\allowbreak (4): 63:1-63:8.
+\newblock DOI: \doi{10.1145/2185520.2185559}.
+
+\bibitem[Deng et~al.(2022)Deng, Wang, Kong, Xiong, Xian, and Zhu]{deng2022melp}
+DENG Y, WANG M, KONG X, et~al.
+\newblock A moving eulerian-lagrangian particle method for thin film and foam
+  simulation\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2022, 41\allowbreak (4): 75:1-75:14.
+\newblock DOI: \doi{10.1145/3528223.3530173}.
+
+\bibitem[Saye et~al.(2016)Saye and Sethian]{saye2016multiscale}
+SAYE R~I, SETHIAN J~A.
+\newblock Multiscale modelling of evolving foams\allowbreak[J/OL].
+\newblock Journal of Computational Physics, 2016, 315: 273-301.
+\newblock DOI: \doi{10.1016/j.jcp.2016.02.064}.
+
+\bibitem[Kim et~al.(2007)Kim, Liu, Llamas, Jiao, and Rossignac]{kim2007volume}
+KIM B, LIU Y, LLAMAS I, et~al.
+\newblock Simulation of bubbles in foam with the volume control
+  method\allowbreak[J/OL].
+\newblock ACM Transactions on Graphics, 2007, 26\allowbreak (3): 98:1-98:10.
+\newblock DOI: \doi{10.1145/1276377.1276503}.
+
+\end{thebibliography}

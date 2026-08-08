@@ -1,13 +1,16 @@
-% !TeX root = ../main.tex
+﻿# -*- coding: utf-8 -*-
+import os
+
+abstract = r'''% !TeX root = ../main.tex
 
 \ustcsetup{
   keywords = {
-    肥皂泡渲染，HarmonyOS，屏幕空间折射，薄膜干涉，虹彩，多泡泡交互，接触图，共享膜，融合，OpenGL ES
+    肥皂泡渲染，HarmonyOS，屏幕空间折射，薄膜干涉，虹彩，多泡泡交互，接触图，共享膜，融合，DBSTT，OpenGL ES
   },
   keywords* = {
     soap bubble rendering, HarmonyOS, screen-space refraction,
     thin-film interference, iridescence, multi-bubble interaction,
-    contact graph, shared film, fusion,  OpenGL ES
+    contact graph, shared film, fusion, DBSTT, OpenGL ES
   },
 }
 
@@ -31,3 +34,8 @@
   models, single-bubble physics, multi-bubble interaction, demonstration
   features, and current limitations.
 \end{abstract*}
+'''
+
+with open(r'D:\USTC\CG\Final\BubbleRender\USTC latex template\chapters\abstract.tex', 'w', encoding='utf-8') as f:
+    f.write(abstract)
+print('abstract.tex written')

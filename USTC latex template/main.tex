@@ -1,10 +1,10 @@
-% !TeX encoding = UTF-8
+﻿% !TeX encoding = UTF-8
 % !TeX program = xelatex
 % !TeX spellcheck = en_US
 
 \documentclass[degree=master]{ustcthesis}
 \usepackage{hyperref}
-\usepackage{float} % 必须加这个，因为你的图片排版用了 [H] 参数
+\usepackage{float} % 蹇呴』鍔犺繖涓紝鍥犱负浣犵殑鍥剧墖鎺掔増鐢ㄤ簡 [H] 鍙傛暟
 
 \newcommand{\projectname}{HarmonyOS Transparent Bubble Rendering - Thin Film + DBSTT}
 \newcommand{\codepath}[1]{\texttt{#1}}
@@ -18,7 +18,7 @@
         \begin{minipage}[c][#3][c]{0.88\linewidth}
           \centering
           \texttt{\detokenize{#1}}\\[0.8em]
-          截图占位：#4
+          鎴浘鍗犱綅锛?4
         \end{minipage}
       }%
     }
@@ -30,7 +30,7 @@
 % language    = chinese | english
 % fontset     = windows | mac | ubuntu | fandol
 
-% 加载宏包、全部的配置
+% 鍔犺浇瀹忓寘銆佸叏閮ㄧ殑閰嶇疆
 \input{ustcsetup.tex}
 \lstset{
   basicstyle=\ttfamily\small,
@@ -55,11 +55,13 @@
 \input{chapters/chapter2.tex}
 \input{chapters/chapter3.tex}
 \input{chapters/chapter4.tex}
+	
 \input{chapters/chapter5.tex}
+\input{chapters/chapter6.tex}
 
 
-\bibliography{bib/soapbubble}  % 参考文献使用 BibTeX 编译
-% \printbibliography       % 参考文献使用 BibLaTeX 编译
+\bibliography{bib/soapbubble}  % 鍙傝€冩枃鐚娇鐢?BibTeX 缂栬瘧
+% \printbibliography       % 鍙傝€冩枃鐚娇鐢?BibLaTeX 缂栬瘧
 
 
 

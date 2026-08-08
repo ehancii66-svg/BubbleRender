@@ -18,8 +18,8 @@
   \item \textbf{背景阶段}：将天空盒和背景参照物渲染到 \codepath{backgroundFBO}。
   \item \textbf{后景阶段}：把主泡泡后方场景写入 \codepath{sceneBehindFBO}，为背面折射提供输入。
   \item \textbf{背面阶段}：开启正面剔除，只绘制主泡泡背面，并输出到 \codepath{backFaceFBO}。
-  \item \textbf{主场景阶段}：绘制包含主泡泡的场景到 \codepath{mainSceneFBO}，供展示泡泡采样。
-  \item \textbf{最终合成阶段}：将主泡泡与多展示泡泡合成到 \codepath{finalSceneFBO}，再输出到屏幕。
+  \item \textbf{主场景阶段}：绘制包含交互泡泡的场景到 \codepath{mainSceneFBO}，供后续合成采样。
+  \item \textbf{最终合成阶段}：将所有泡泡合成到 \codepath{finalSceneFBO}，再输出到屏幕。
 \end{enumerate}
 
 这种方法的优点是完全运行在 GPU rasterization 管线中，不需要逐像素射线求交；缺点是折射对象必须已经出现在屏幕空间纹理中，因此它是视觉上可信的近似，而不是严格物理光线追踪。对于鸿蒙终端场景而言，这种取舍能够在移动端预算下同时满足折射观感、多泡泡层次和交互响应速度。
@@ -41,7 +41,7 @@ vec2 fboPixel = (uRenderToFBO == 1)
     : screenPixel * (uFBOSize / uWinResolution);
 \end{lstlisting}
 
-该修正对多泡泡展示尤其重要。多展示泡泡在不同 pass 中复用同一套折射与虹彩 shader，如果输入坐标不能正确映射到 FBO 空间，就会出现采样越界或局部发黑。修正后，主泡泡和展示泡泡都沿用统一材质逻辑，并通过模型矩阵、局部几何扰动强度、虹彩模式、输出透明度以及是否响应交互等参数来区分。
+该修正对多泡泡渲染尤其重要。各泡泡在不同 pass 中复用同一套折射与虹彩 shader，如果输入坐标不能正确映射到 FBO 空间，就会出现采样越界或局部发黑。修正后，所有交互泡泡都沿用统一材质逻辑，并通过模型矩阵、局部几何扰动强度、虹彩模式、输出透明度以及是否响应交互等参数来区分。
 
 \section{屏幕空间折射实现}
 
@@ -88,7 +88,7 @@ s_{\mathrm{edge}}\,
 s_{\mathrm{touch}},
 \]
 
-其中 $\mathbf{T}_{xy}$ 是视图空间折射方向的屏幕分量，$s_{\mathrm{ref}}$ 是用户可调的 \codepath{uRefractionStrength}，$s_{\mathrm{face}}$ 区分正面和背面，$s_{\mathrm{film}}$ 由薄膜厚度和边缘程度共同决定，$r_{\mathrm{px}}$ 是泡泡屏幕半径，$s_{\mathrm{edge}}$ 是边缘增强，$s_{\mathrm{touch}}$ 是局部触摸扰动增强。
+其中 $\mathbf{T}_{xy}$ 是视图空间折射方向的屏幕分量，$s_{\mathrm{ref}}$ 是用户可调的 \codepath{uRefractionStrength}，$s_{\mathrm{face}}$ 区分正面和背面，$s_{\mathrm{film}}$ 由薄膜厚度和边缘程度共同决定，$r_{\mathrm{px}}$ 是泡泡屏幕半径，$s_{\mathrm{edge}}$ 是边缘增强。
 
 背面 pass 使用更小的折射强度：
 
@@ -222,7 +222,7 @@ d_0
 + 95 Q_{\mathrm{ripple}},
 \]
 
-其中 $d_0$ 是基础膜厚，$A_{\mathrm{var}}$ 是膜厚变化幅度，$P(\mathbf{n},t)$ 是由多层噪声和排液项组合的厚度图案，$M_{\mathrm{touch}}$ 是触摸中心的局部增强，$Q_{\mathrm{ripple}}$ 是触摸拖动产生的环形波纹。
+其中 $d_0$ 是基础膜厚，$A_{\mathrm{var}}$ 是膜厚变化幅度，$P(\mathbf{n},t)$ 是由多层噪声和排液项组合的厚度图案，其中 $d_0$ 是基础膜厚，$A_{\mathrm{var}}$ 是膜厚变化幅度，$P(\mathbf{n},t)$ 是由多层噪声和排液项组合的厚度图案。
 
 一个重要实现细节是：项目使用 \codepath{normalize(vWorldNormal)} 作为噪声输入方向，而不是使用 UV 坐标。这样可以避免球体 UV 接缝处出现明显断裂，让虹彩流动更连续。
 

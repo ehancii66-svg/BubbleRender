@@ -1,12 +1,12 @@
 
 \chapter{物理模拟与动力学}
-\section{基于涡流片的单泡泡物理模拟}
+
 
 肥皂泡的本质是浸没在环境空气中的一个极薄液膜，其动力学行为主要由液膜的表面张力、周围空气的不可压缩性，以及空气的惯性主导。传统的基于体积的多相纳维-斯托克斯（Navier-Stokes）求解器虽然能够精确模拟这些现象，但需要大量的计算资源来解析泡泡内部的空气动力学以及薄至微米级的薄膜几何形状。
 
 本项目的方法参考Da 等人提出的 \textit{Double Bubbles Sans Toil and Trouble: Discrete Circulation-Preserving Vortex Sheets for Soap Films and Foams} \cite{da2015doublebubbles}的思路，仅将建模工作集中在泡泡表面。该论文首次提出了一种基于非流形涡流片（vortex sheet）方程来模拟肥皂膜、泡泡和泡沫动力学的数值方法。本项目在其理论基础上实现了一个简化版本，专门用于单个闭合泡泡的动态表面演化。
 
-\subsection{涡流片模型的理论基础}
+\section{涡流片模型的理论基础}
 
 涡流片是一个浸没在三维空间中的表面，它界定了速度场切向分量的不连续性——穿过薄片时，速度的切向分量发生跳跃，而法向分量保持连续。这一数学结构恰好契合肥皂膜的物理本质：薄膜两侧分别是内部空气和外部空气，两侧的速度场可以不同，但空气不能穿透薄膜。
 
@@ -48,7 +48,7 @@ $\mathbf{u}$ 自动满足 $\nabla \cdot \mathbf{u} = 0$ 。这意味着基于涡
 
 其中 $\rho$ 为空气密度。对于闭合的单个泡泡，两侧的几何重合但朝向相反，因此 $H_1 = -H_2$，从而 $H_1 - H_2 = 2H$。这意味着\textbf{环量的时间变化率与表面的有符号标量平均曲率成正比}——表面曲率大的区域环量变化快，曲率小的区域变化慢。表面张力正是通过这一机制驱动泡泡表面趋向平衡态（对闭合泡泡而言是球面，其上各点曲率相等）。
 
-\subsection{离散化与数值实现}
+\section{离散化与数值实现}
 
 将上述连续理论转化为数值算法，需要在空间和时间维度上进行离散化。以下详细介绍本项目在 \codepath{VortexSheetSimulation} 类中的实现。
 
@@ -187,7 +187,7 @@ H_i = -\mathbf{K}_i \cdot \mathbf{n}_i
 
 其中 $\nu$ 为扩散系数，默认值 \codepath{circulationDiffusion = 0.0005}，非常小，仅用于消除高频数值振荡而不影响宏观动力学行为。DBSTT 论文也指出，这种扩散可以解释为对空气粘度的合理视觉近似。
 
-\subsection{与本项目渲染管线的集成}
+\section{与本项目渲染管线的集成}
 
 物理模拟与渲染管线的衔接位于 \codepath{RenderFrame()} 函数中：
 
@@ -203,97 +203,3 @@ H_i = -\mathbf{K}_i \cdot \mathbf{n}_i
 
 具体动态效果详见项目演示视频。可以明显观察到主泡泡在当前系统中保持持续的小幅表面形变，并在参数调整后呈现不同强度的恢复趋势。
 
-\section{触摸交互与局部光学响应}
-
-除了自动的表面动力学演化之外，本项目还实现了模拟真实触碰泡泡的交互效果。交互设计并不把触摸输入简单地作为全局参数滑杆，而是将其解释为用户在屏幕空间中接触泡泡表面所产生的局部扰动。系统中，触摸事件通过 ArkTS 的 \codepath{onTouch} 回调转发到 Native 层：单指拖动主要用于旋转观察视角，单指点击、短按以及未触发视角旋转阈值的微小移动用于触发主泡泡的局部触摸响应，双指缩放用于调整相机距离；在 shader 层，这些输入仍统一被表述为触摸点、触摸强度和触摸速度。
-
-具体来说，程序将触摸位置归一化为屏幕空间坐标 \codepath{uTouchPoint}，并根据按压状态和局部移动速度构造两个交互参数：触摸强度 \codepath{uTouchStrength} 与触摸速度 \codepath{uTouchVelocity}。在 fragment shader 中，对当前片元屏幕坐标 $\mathbf{x}$ 与触摸点 $\mathbf{x}_{touch}$ 的距离建立一个局部高斯影响区域：
-
-\begin{equation}
-M_{touch} =
-\exp\left(-\frac{\|\mathbf{x}-\mathbf{x}_{touch}\|^2}{r^2}\right)
-\cdot S_{touch},
-\label{eq:touch_mask}
-\end{equation}
-
-其中 $S_{touch}$ 对应触摸强度，$r$ 控制局部作用半径。为了表现手指接触薄膜后产生的环形扰动，shader 还叠加了一个随距离衰减的波纹项：
-
-\begin{equation}
-Q_{ripple} =
-\sin\left(k\|\mathbf{x}-\mathbf{x}_{touch}\|-\omega t\right)
-\exp\left(-\lambda\|\mathbf{x}-\mathbf{x}_{touch}\|\right)
-\cdot S_{touch}.
-\label{eq:touch_ripple}
-\end{equation}
-
-触摸项会同时影响折射和色散两个视觉通道。首先，在屏幕空间折射部分，局部触摸会放大原有的折射偏移，使泡泡背后的背景在触摸点附近发生更明显的扭曲：
-
-\begin{equation}
-\Delta \mathbf{p}_{touch}
-=
-\Delta \mathbf{p}_{base}
-\cdot \left(1 + 2.4M_{touch} + 1.1|Q_{ripple}|\right)
-+ \hat{\mathbf{d}}_{touch} Q_{ripple}.
-\label{eq:touch_refraction}
-\end{equation}
-
-其中 $\Delta \mathbf{p}_{base}$ 是基础折射偏移，$\hat{\mathbf{d}}_{touch}$ 是从触摸点向当前片元的屏幕空间方向。这样，触摸不会改变整个泡泡的折射强度，而是在接触区域形成局部的折射增强，更接近真实泡泡受到扰动时的视觉表现。
-
-其次，触摸扰动也会改变薄膜厚度场。由于薄膜干涉颜色对膜厚变化非常敏感，局部膜厚扰动会直接表现为虹彩颜色和色散强度的变化。本项目在原有噪声膜厚场上加入触摸项：
-
-\begin{equation}
-d = d_0 + A_{var}P(\mathbf{n},t) + 190M_{touch} + 95Q_{ripple},
-\label{eq:touch_thickness}
-\end{equation}
-
-其中 $P(\mathbf{n},t)$ 是随法线方向和时间变化的程序化膜厚扰动。触摸点附近的 $M_{touch}$ 使局部膜厚发生偏移，$Q_{ripple}$ 则形成环状传播的薄膜厚度变化，从而让触摸区域出现更强的局部虹彩和色散。
-
-
-触摸交互对泡泡局部折射和色散的影响具体效果详见演示视频。无触摸时，泡泡只显示基础折射与薄膜虹彩；单指点击或按压后，接触点附近的背景扭曲和颜色变化明显增强；在不触发视角旋转的轻微移动情况下，触摸速度会进一步增强波纹项，使局部折射与色散出现更明显的动态响应。系统中的触摸输入不会作为全局参数调节器，而是在触摸点附近产生局部薄膜扰动，从而增强背景折射变形与虹彩色散。
- 
-
-\section{多泡泡展示与风吹漂移}
-
-为了增强展示效果，项目加入了 16 个展示泡泡。它们不是独立的物理模拟泡泡，而是使用静态球体模型、同一套折射/虹彩 shader，以及独立的模型矩阵动画。每个展示泡泡包含：
-
-\begin{itemize}
-  \item 基础位置 \codepath{basePosition}
-  \item 半径 \codepath{radius}
-  \item 相位 \codepath{phase}
-  \item 风向振幅 \codepath{windAmplitude}
-  \item 上下浮动振幅 \codepath{floatAmplitude}
-  \item 速度 \codepath{speed}
-\end{itemize}
-
-风吹动画由 \codepath{BubbleModelMatrix} 计算，简化表达为：
-
-\[
-\mathbf{x}_i(t) =
-\mathbf{x}_{i,0}
-+ \mathbf{w}\sin(s_i t+\phi_i)A_i
-+ \mathbf{y}\sin(0.73s_i t+1.7\phi_i)B_i
-+ \mathbf{z}\cos(0.51s_i t+0.9\phi_i)C_i.
-\]
-
-其中 $\mathbf{w}$ 是归一化风向，$\mathbf{y}$ 是竖直方向，$\mathbf{z}$ 是深度方向。半径还会乘以轻微 wobble 系数，让泡泡不是完全刚性缩放。
-
-展示泡泡的排布包含前景和背景：部分泡泡的 $z$ 坐标在主泡泡前方，用来增加层次感；另一部分分布在左右和后方，用来形成更丰富的空间构图。它们与主泡泡使用相同 shader，因此当前版本的副泡泡不会再单独走一套容易产生黑色问题的材质逻辑。实现时，程序会先按展示泡泡到相机的距离从远到近排序，再以固定输出透明度进行 Alpha 混合合成，从而减轻透明物体互相覆盖时的排序伪影。
-
-下图展示了两个不同时刻的多泡泡位置变化；更连续的浮动和轻微形变效果可参考项目 demo 视频。
-
-\begin{figure}[H]
-  \centering
-  \begin{minipage}[t]{0.48\linewidth}
-    \centering
-    \includegraphics[width=\linewidth]{bd5a9eda34e1392270b9881e39415c1d.jpg}\\[0.4em]
-    \small 时刻一
-  \end{minipage}
-  \hfill
-  \begin{minipage}[t]{0.48\linewidth}
-    \centering
-    \includegraphics[width=\linewidth]{c1be1a69a8781c973780b23fe46f0fd1.jpg}\\[0.4em]
-    \small 时刻二
-  \end{minipage}
-  \caption{16 个展示泡泡在风吹动下轻微漂移，部分位于主泡泡前景，部分位于背景。}
-  \label{fig:multi_bubble_wind}
-\end{figure}

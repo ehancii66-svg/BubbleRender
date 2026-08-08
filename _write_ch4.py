@@ -1,4 +1,7 @@
-% !TeX root = ../main.tex
+﻿# -*- coding: utf-8 -*-
+import os
+
+content = r'''% !TeX root = ../main.tex
 
 \chapter{多泡泡交互系统}
 
@@ -57,7 +60,7 @@
 
 \subsection{表面控制点：SurfaceControl}
 
-每个泡泡维护26个低分辨率表面控制点。控制方向来自$\{-1,0,1\}^3$中除原点外的26个方向，均匀覆盖球面。每个控制点存储：
+每个泡泡维护26个低分辨率表面控制点。控制方向来自$\{-1,0,1\}^3，均匀覆盖球面。每个控制点存储：
 
 \begin{itemize}
   \item \codepath{localDir}：控制点在单位球面上的参考方向。
@@ -71,11 +74,11 @@
 w_{ik} = \max(\mathbf{d}_i \cdot \mathbf{c}_k,\, 0)^{8},
 \]
 
-其中$\mathbf{d}_i$为渲染顶点在单位球面上的方向，$\mathbf{c}_k$为第$k$个控制点的方向。所有控制点按权重归一化插值得到最终的持久位移。
+其中$\mathbf{d}_i，$\mathbf{c}_k。所有控制点按权重归一化插值得到最终的持久位移。
 
 \section{空间哈希与Broad Phase}
 
-为避免泡泡数量增加后对所有泡泡对执行$O(N^2)$距离检查，系统采用三维均匀空间哈希网格进行broad phase加速。网格尺寸约为最大泡泡直径的1.2倍。每帧仅检查当前泡泡所在网格及其26个相邻网格中的其他泡泡，从而快速生成候选接触对。
+为避免泡泡数量增加后对所有泡泡对执行(N^2)，系统采用三维均匀空间哈希网格进行broad phase加速。网格尺寸约为最大泡泡直径的1.2倍。每帧仅检查当前泡泡所在网格及其26个相邻网格中的其他泡泡，从而快速生成候选接触对。
 
 该步骤称为broad phase，只负责生成候选pair，不涉及具体的接触几何计算。
 
@@ -87,13 +90,13 @@ w_{ik} = \max(\mathbf{d}_i \cdot \mathbf{c}_k,\, 0)^{8},
 g = \|\mathbf{p}_A - \mathbf{p}_B\| - (r_A + r_B).
 \]
 
-当间距$g$进入近场范围\codepath{nearRange}（约$0.08 \cdot \min(r_A, r_B)$）时，接触激活强度开始连续增长：
+当间距\codepath{nearRange}（约.08 \cdot \min(r_A, r_B)$）时，接触激活强度开始连续增长：
 
 \[
 a = \mathrm{Smooth01}\!\left(\frac{\mathrm{nearRange} - g}{\mathrm{nearRange}}\right),
 \]
 
-其中$\mathrm{Smooth01}(x) = x^2(3-2x)$，输入被限制在$[0,1]$内。该激活强度从接近阶段连续增长，并统一驱动以下所有效果：
+其中$\mathrm{Smooth01}(x) = x^2(3-2x)$，输入被限制在$[0,1]。该激活强度从接近阶段连续增长，并统一驱动以下所有效果：
 
 \begin{itemize}
   \item 精细吸引力（毛细节 attraction）；
@@ -106,7 +109,7 @@ a = \mathrm{Smooth01}\!\left(\frac{\mathrm{nearRange} - g}{\mathrm{nearRange}}\r
   \item 表面控制点的局部压缩。
 \end{itemize}
 
-这种设计确保从candidate到bonded的过渡不会在单帧内突然切换一整套视觉逻辑。当$a$超过阈值且间距足够小时，系统建立bonded contact，此时候选帧的进度和入射速度被继承。
+这种设计确保从candidate到bonded的过渡不会在单帧内突然切换一整套视觉逻辑。当，系统建立bonded contact，此时候选帧的进度和入射速度被继承。
 
 \section{接触圆动力学与位置约束}
 
@@ -118,7 +121,7 @@ a = \mathrm{Smooth01}\!\left(\frac{\mathrm{nearRange} - g}{\mathrm{nearRange}}\r
 \ddot{r}_c = k_r(r_c^{\mathrm{target}} - r_c) - d_r \dot{r}_c,
 \]
 
-其中目标值$r_c^{\mathrm{target}}$由当前泡泡中心距离和两泡泡半径的几何关系反推。参数选取接近临界阻尼，使接触圆快速增大但避免过冲回弹。
+其中目标值^{\mathrm{target}}。参数选取接近临界阻尼，使接触圆快速增大但避免过冲回弹。
 
 接触圆增大后，两泡泡的目标中心距离由几何关系反推：
 
@@ -126,11 +129,11 @@ a = \mathrm{Smooth01}\!\left(\frac{\mathrm{nearRange} - g}{\mathrm{nearRange}}\r
 d_{\mathrm{target}} = \sqrt{r_A^2 - r_c^2} + \sqrt{r_B^2 - r_c^2}.
 \]
 
-当$r_c=0$时目标距离即为$r_A+r_B$；接触圆越大，两中心允许靠得越近，但相向球冠会被裁剪掉。
+当=0+r_B$；接触圆越大，两中心允许靠得越近，但相向球冠会被裁剪掉。
 
 \subsection{多接触位置约束迭代}
 
-系统每帧执行6次接触图位置约束迭代。每条接触边根据当前距离与目标距离的偏差修正两个泡泡的中心位置。多次迭代的作用是让多条约束共同收敛。多接触变形还按活跃接触数量进行分摊。
+系统每帧执行6次接触图位置约束迭代。每条接触边根据当前距离与目标距离的偏差修正两个泡泡的中心位置。多次迭代的作用是让AB、AC、BC等多条约束共同收敛。多接触变形还按活跃接触数量进行分摊。
 
 \section{持久表面控制点系统}
 
@@ -152,7 +155,7 @@ d_{\mathrm{target}} = \sqrt{r_A^2 - r_c^2} + \sqrt{r_B^2 - r_c^2}.
 + \mathbf{r}_{\mathrm{radial}} \cdot c_{\mathrm{bulge}} \cdot M_{\mathrm{rim}},
 \]
 
-其中$\mathbf{n}_{\mathrm{contact}}$为接触轴方向，$\mathbf{r}_{\mathrm{radial}}$为远离接触轴的径向方向。含义为：
+其中$\mathbf{n}_{\mathrm{contact}}，$\mathbf{r}_{\mathrm{radial}}（远离接触轴）方向。含义为：
 \begin{itemize}
   \item 接触帽内部沿接触轴向内压缩；
   \item 接触圆边缘向侧面鼓起；
@@ -201,7 +204,7 @@ z(\rho) = \mathrm{sign}(\kappa) \cdot
 \left(\sqrt{R^2 - \rho^2} - \sqrt{R^2 - r_c^2}\right),
 \]
 
-其中$R = 1/|\kappa|$，$\rho$为到接触圆中心的径向距离。当$\rho = r_c$时$z=0$，弯曲膜边界始终位于原接触平面，不因增加曲率产生位置缝隙。
+其中 = 1/|\kappa|$，$\rho。当$\rho = r_c=0$，弯曲膜边界始终位于原接触平面，不因增加曲率产生位置缝隙。
 
 \reportfigure{placeholder_curved_film.png}{0.48}{0.26\textheight}{不同尺寸泡泡间的弯曲共享膜：膜向大泡一侧凸出}
 
@@ -231,7 +234,7 @@ z(\rho) = \mathrm{sign}(\kappa) \cdot
   \item 两泡泡恢复独立运动。
 \end{enumerate}
 
-接触面积较小或冲击较强时，分离概率会提高。普通交互的分离概率限制在$2\%$到$8\%$之间。
+接触面积较小或冲击较强时，分离概率会提高。普通交互的分离概率限制在\%\%。
 
 \subsection{稳定8字双泡}
 
@@ -273,11 +276,11 @@ r_{\mathrm{merged}}^3 = r_A^3 + r_B^3.
 
 \section{风场系统}
 
-全局风场默认关闭（界面Wind按钮切换）。核心特征：
+全局风场默认关闭（F键切换）。核心特征：
 
 \begin{itemize}
-  \item 风力强度范围$0.0$到$0.45$，默认$0.16$，单次调整步长$0.025$；
-  \item 风向通过界面滑块或按钮上下左右调整；
+  \item 风力强度范围.0.45$，默认.16$，单次调整步长.025$；
+  \item 风向通过I/J/K/L键上下左右调整；
   \item 小泡泡具有更高的风力响应系数，大泡泡运动相对稳定；
   \item 关闭风后，已有速度通过阻尼平滑衰减，泡泡逐渐回到有界摆动范围；
   \item 融合后的泡泡也可整体随风移动。
@@ -287,44 +290,7 @@ r_{\mathrm{merged}}^3 = r_A^3 + r_B^3.
 
 \section{每泡DBSTT涡流片仿真}
 
-每个展示泡泡在创建时即分配一个独立的\codepath{VortexSheetSimulation}实例，存储于全局映射 \codepath{g\_BubbleSims} 中。仿真以单位半径、细分等级 $2$ 的正二十面体网格创建（模型矩阵负责视觉缩放），初始表面张力系数为 $15.0$，子步数为 $3$，时间步长 $0.001$ 秒。
-
-在正常运行（非破裂）状态下，该仿真实例处于休眠——\codepath{UpdateBubbleSims()} 仅对 \codepath{Burst} 状态的泡泡调用 \codepath{sim->update()}。泡泡的常规表面形变仍由 $26$ 个持久控制点的弹簧-阻尼系统（\codepath{BuildPersistentBubbleVertices}）驱动，接触、融合和演示场景不受影响。这一设计避免了为每个泡泡每帧都执行 $O(N^2)$ 的 Biot-Savart 积分，只在破裂这一短暂事件中激活物理求解器。
-
-当泡泡进入破裂状态时，仿真实例被重新初始化为泡泡的实际半径，并执行开洞操作（见下文），随后提升表面张力参数驱动膜的物理回缩。这使得破裂时膜的变形和回缩由DBSTT涡流片模型\cite{da2015doublebubbles}实时计算，而非预设的关键帧动画。
-
-
-\section{泡泡破裂机制}\label{sec:burst}
-
-系统支持运行时通过触控点击触发泡泡破裂，模拟真实肥皂泡被戳破后的膜回缩行为。破裂机制由 \codepath{TriggerBubbleBurst()} 函数实现，核心流程如下：
-
-\begin{enumerate}
-  \item \textbf{触发方式}：在HarmonyOS端通过界面Pop模式触发：点击目标泡泡即启动破裂动画。该模式保持激活直至用户切换到其他模式。
-  \item \textbf{状态切换}：目标泡泡状态变为 \codepath{Burst}，破裂持续时间设为 $0.35$ 秒，破裂缩放系数初始化为 $1.0$。
-  \item \textbf{DBSTT物理回缩}：以泡泡实际半径重新初始化涡流片仿真网格，然后沿相机方向执行开洞操作（\codepath{punchHole}），在膜上制造一个约 $26^\circ$ 张角的自由边缘供表面张力回缩。随后将表面张力系数从默认的 $15.0$ 提升至 $120.0$，子步数从 $3$ 增至 $12$，时间步长调整为 $0.002$ 秒，环量扩散系数降至 $0.0001$ 以减少能量耗散。开洞后的仿真三角网格通过 \codepath{Mesh::updateGeometry()} 直接替换渲染网格（顶点数从 $2057$ 降至约 $150$），此后每帧由 \codepath{UpdateMeshFromSim()} 将仿真顶点位置和法线上传至 GPU，使回缩过程完全由DBSTT物理模型驱动。
-  \item \textbf{开洞算法}：\codepath{punchHole(direction, threshold)} 遍历所有三角形，计算每个三角形质心方向与开洞方向的点积，删除点积超过 $\cos(\text{threshold})$ 的三角形。随后对保留的三角形进行顶点重映射，裁掉不再被任何三角形引用的孤立顶点，重建法线、Voronoi 面积、平均边长和 Biot-Savart 正则化参数。孔洞边界边在后续的平均曲率计算中因入射面数不等于 $2$ 而被自然跳过，使孔洞边缘顶点不受表面张力直接驱动，回缩从孔洞附近的内部顶点开始向外传播。
-  \item \textbf{接触解耦}：立即停用该泡泡参与的所有接触对，将 \codepath{bonded}、\codepath{candidate}、\codepath{active}、\codepath{fusionActive}、\codepath{fusionComplete}、\codepath{persistentRenderPair} 全部置为 \codepath{false}，并将 \codepath{contactRadius}、\codepath{contactRadiusVelocity}、\codepath{geometryBlend}、\codepath{interactionCompression}、\codepath{contactActivation}、\codepath{bridgeStrength} 归零。这确保共享膜、融合表面和接触几何立即停止渲染，破裂泡泡不再受任何接触约束。
-  \item \textbf{冲击波传播}：对破裂泡泡周围 $4$ 倍半径范围内的其他泡泡施加向外的冲击波脉冲（衰减系数随距离线性下降），模拟真实泡泡破裂时释放的压力波。若邻近泡泡曾与破裂泡泡处于接触状态，还会获得额外的膨胀补偿（半径增加约 $0.04 \times 1.15 \times \mathrm{falloff}$），因为原本约束它们的共享膜已消失。
-  \item \textbf{回缩动画与回退}：在 $0.35$ 秒内，涡流片仿真驱动膜从孔洞边缘向内回缩，透明度通过 smoothstep 曲线 $1.0 - \mathrm{Smooth01}(t)$ 淡出（非线性，前半段保持较高可见度）。若泡泡没有可用的DBSTT仿真实例（例如某些代码路径未调用 \codepath{InitBubbleSim}），则回退为手动缩放：\codepath{burstScale} 按 smoothstep 从 $1.0$ 降至 $0$，模型矩阵应用该缩放系数，透明度同样以 smoothstep 淡出。
-\end{enumerate}
-
-破裂过程的视觉效果由DBSTT涡流片求解器\cite{da2015doublebubbles}实时计算，膜的变形和回缩速度由表面张力、涡流片强度（Biot-Savart速度场）和扩散系数共同决定，而非预设的关键帧动画。这一设计使得每次破裂的表现受泡泡当前几何状态（半径、法线、接触历史）影响而略有差异，增强了视觉真实感。
-
-\subsection{渲染管线的多重防护}
-
-当两个贴在一起的泡泡（共享膜或 $8$ 字双泡状态）中一个被点击破裂时，如果接触关系和共享膜没有被彻底清除，幸存泡泡的 shell 仍会被接触平面裁切，导致视觉上出现"两个泡泡隔着空气墙"的错误。为避免此类问题，系统在渲染管线的多个环节添加了针对 \codepath{Burst} 和 \codepath{Dead} 状态的防护：
-
-\begin{itemize}
-  \item \textbf{接触平面裁切}：\codepath{SetBubbleContactUniforms()} 对 \codepath{Burst} 状态的泡泡直接返回 \codepath{uVisualContactCount = 0}，不向 shader 传递任何接触平面，避免破裂的 sim 网格被旧接触平面错误裁切。同时对幸存泡泡，跳过对端为 \codepath{Burst/Dead} 的接触对。
-  \item \textbf{共享膜绘制}：\codepath{DrawContactBridges} 和 \codepath{DrawFusionSurfaces} 在遍历接触对时，若任一端处于 \codepath{Burst} 或 \codepath{Dead} 状态则跳过，确保共享膜和融合表面不会在破裂后继续渲染。
-  \item \textbf{Shell 透明度}：渲染循环对 \codepath{Burst} 状态的泡泡跳过 \codepath{alpha *= 1.0 - fusionSurfaceVisibility} 这一步，保证破裂的 shell 始终可见，不被残留的融合表面可见度吃掉。
-  \item \textbf{Broad phase 隔离}：\codepath{UpdateDisplayBubbleInteractions} 的空间哈希 broad phase 跳过 \codepath{Burst/Dead} 状态的泡泡，不会在破裂泡泡被移除前重新为其创建候选接触对。
-  \item \textbf{模型矩阵}：\codepath{PersistentBubbleModelMatrix} 对有 sim 实例的 \codepath{Burst} 泡泡返回纯平移矩阵（sim 网格已在世界半径），对无 sim 的回退情况应用 \codepath{burstScale} 缩放。
-\end{itemize}
-
-\subsection{鸿蒙端异步破裂仿真}
-
-在 Windows 端，破裂物理在主线程同步执行。鸿蒙端由于 CPU 资源有限且 UI 线程不能阻塞，将 DBSTT 破裂仿真放在独立的工作线程（\codepath{BurstSimWorkerThread}）中异步执行。主线程在每帧 \codepath{eglSwapBuffers} 之后调用 \codepath{RequestBubbleSimUpdates()}，将所有 \codepath{Burst} 状态泡泡的 ID 提交给工作线程。工作线程通过条件变量唤醒，对每个泡泡执行 \codepath{sim->update()} 并将结果顶点位置和法线存入 \codepath{BurstSimSnapshot} 快照。主线程在渲染时通过 \codepath{ApplyLatestBurstSnapshot()} 以 \codepath{try\_lock} 方式尝试读取最新快照并上传至 GPU，若锁竞争失败则沿用上一帧的网格。这一设计使破裂物理不阻塞渲染帧率，同时通过版本号（\codepath{version}）避免重复应用同一快照。
+每个展示泡泡可以拥有独立的\codepath{VortexSheetSimulation}实例。仿真以单位半径创建（模型矩阵处理视觉缩放），在泡泡破裂时激活：提高表面张力驱动膜收缩，体现真实的物理回弹。正常（非破裂）渲染和接触/融合仍使用控制点表面。该设计使得泡泡破裂时膜的回缩由DBSTT涡流片模型\cite{da2015doublebubbles}驱动而非预设动画。
 
 \section{渲染连续性与体积守恒}
 
@@ -340,19 +306,19 @@ r_{\mathrm{merged}}^3 = r_A^3 + r_B^3.
 
 \subsection{体积守恒}
 
-每个泡泡保存\codepath{targetVolume}（由初始半径计算），半径会缓慢向目标体积对应的半径恢复。局部表面压缩后，系统根据控制点平均径向位移进行小范围整体缩放补偿。这是实时近似，并非严格的封闭三角网格体积积分。后续可考虑使用$V = \frac{1}{6}\sum \mathbf{x}_i \cdot (\mathbf{x}_j \times \mathbf{x}_k)$进行精确体积投影。
+每个泡泡保存\codepath{targetVolume}（由初始半径计算），半径会缓慢向目标体积对应的半径恢复。局部表面压缩后，系统根据控制点平均径向位移进行小范围整体缩放补偿。这是实时近似，并非严格的封闭三角网格体积积分。后续可考虑使用 = \frac{1}{6}\sum \mathbf{x}_i \cdot (\mathbf{x}_j \times \mathbf{x}_k)。
 
 \section{动态泡泡管理}
 
 系统支持运行时动态创建与删除泡泡：
 
 \begin{itemize}
-  \item \textbf{创建}：通过界面"Add"模式生成新泡泡，带朝向中心的初速度和少量切向速度，随后自动进入broad phase和contact graph。
-  \item \textbf{删除}：通过界面操作删除最近一个动态新增的泡泡，同时清理该泡泡相关的contact pair和对应渲染model。
+  \item \textbf{创建}：按B键在泡泡团外围生成新泡泡，带朝向中心的初速度和少量切向速度，随后自动进入broad phase和contact graph。
+  \item \textbf{删除}：按V键删除最近一个动态新增的泡泡，同时清理该泡泡相关的contact pair和对应渲染model。
   \item \textbf{身份稳定}：泡泡身份使用稳定的\codepath{BubbleId}（而非vector下标），contact pair通过\codepath{ResolveContactPairIndices()}映射到当前数组下标，确保删除或重排后模型不错位。
 \end{itemize}
 
-此外，系统提供两套预置演示场景：通过界面Demo按钮循环切换双泡专项演示（等尺寸稳定双泡$	o$小泡融合$	o$短暂接触后分离），通过Scene按钮重置综合开场场景（中央三个真实模拟泡泡形成接触网络，外围包含预设融合泡泡对和独立中型泡泡，以及若干仅参与渲染的装饰小泡泡）。
+此外，系统提供两套预置演示场景：按G键循环切换双泡专项演示（等尺寸稳定双泡$\to$\to），按X键重置综合开场场景（中央三个真实模拟泡泡形成接触网络，外围包含预设融合泡泡对和独立中型泡泡，以及若干仅参与渲染的装饰小泡泡）。
 
 \section{当前局限}
 
@@ -364,3 +330,9 @@ r_{\mathrm{merged}}^3 = r_A^3 + r_B^3.
   \item 球壳shader最多接收四个接触平面。真正多泡沫中一个泡泡可能有更多邻居。
   \item 融合概率模型是面向实时视觉的经验模型，不是完整流体或膜排液求解器。
 \end{itemize}
+'''
+
+path = r'D:\USTC\CG\Final\BubbleRender\USTC latex template\chapters\chapter4.tex'
+with open(path, 'w', encoding='utf-8') as f:
+    f.write(content)
+print('chapter4.tex written OK')

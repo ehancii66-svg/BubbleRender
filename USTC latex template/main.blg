@@ -1,0 +1,55 @@
+This is BibTeX, Version 0.99d (TeX Live 2024)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: main.aux
+The style file: ustcthesis-numerical.bst
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 150 items from 100.
+Reallocated wiz_functions (elt_size=4) to 6000 items from 3000.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Reallocated singl_function (elt_size=4) to 100 items from 50.
+Database file #1: bib/soapbubble.bib
+You've used 9 entries,
+            5308 wiz_defined-function locations,
+            1096 strings with 9374 characters,
+and the built_in function-call counts, 78385 in all, are:
+= -- 1875
+> -- 8701
+< -- 10923
++ -- 3051
+- -- 532
+* -- 697
+:= -- 10956
+add.period$ -- 35
+call.type$ -- 9
+change.case$ -- 74
+chr.to.int$ -- 2674
+cite$ -- 9
+duplicate$ -- 242
+empty$ -- 1067
+format.name$ -- 279
+if$ -- 20320
+int.to.chr$ -- 1
+int.to.str$ -- 10
+missing$ -- 0
+newline$ -- 69
+num.names$ -- 27
+pop$ -- 3892
+preamble$ -- 1
+purify$ -- 9
+quote$ -- 0
+skip$ -- 8154
+stack$ -- 0
+substring$ -- 4072
+swap$ -- 10
+text.length$ -- 205
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 99
+warning$ -- 0
+while$ -- 231
+width$ -- 0
+write$ -- 161
