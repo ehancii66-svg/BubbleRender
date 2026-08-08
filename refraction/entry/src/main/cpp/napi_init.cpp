@@ -1862,19 +1862,19 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 if (fusionModel) fusionModel->Draw(*refractionShader);
             }
 
+            // The shared contact film belongs to the pre-fusion topology. Once
+            // the unified fusion surface is active, drawing both surfaces
+            // produces a refractive ring at the former neck.
             float filmVisibility = pair.contactActivation * pair.contactActivation;
-            float ruptureFade = pair.fusionActive ? 1.0f - pair.ruptureProgress : 1.0f;
-            float filmAlpha = 0.16f * filmVisibility * ruptureFade;
-            if (filmAlpha > 0.002f && pair.contactRadius > 0.002f) {
+            float filmAlpha = 0.16f * filmVisibility;
+            if (!pair.fusionActive && filmAlpha > 0.002f && pair.contactRadius > 0.002f) {
                 float pulse = 1.0f + std::sin(static_cast<float>(g_Time) * 0.70f +
                     static_cast<float>(pair.a * 0.37f + pair.b * 0.19f)) * 0.008f;
                 float filmRadius = std::max(0.002f, pair.contactRadius * pulse);
                 float normalizedCurvature =
                     windows_parity::ContactFilmWorldCurvature(a, b, pair) * filmRadius;
-                float holeRadius = pair.fusionActive
-                    ? windows_parity::Smooth01(pair.ruptureProgress) * 0.98f : 0.0f;
                 std::vector<Vertex> contactVertices =
-                    BuildCurvedContactFilmVertices(normalizedCurvature, holeRadius);
+                    BuildCurvedContactFilmVertices(normalizedCurvature, 0.0f);
                 for (Vertex& vertex : contactVertices) {
                     glm::vec3 materialDirection(
                         vertex.Position.x, vertex.Position.y, 0.35f + vertex.Position.z);
@@ -1901,6 +1901,7 @@ static napi_value RenderFrame(napi_env env, napi_callback_info info) {
                 if (filmModel) filmModel->Draw(*refractionShader);
             }
         }
+        refractionShader->SetInt("uForceSharedFilm", 0);
         fusionMeshesUpdated = true;
         contactMeshesUpdated = true;
 
