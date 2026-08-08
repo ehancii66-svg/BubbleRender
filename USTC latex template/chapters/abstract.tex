@@ -1,0 +1,30 @@
+% !TeX root = ../main.tex
+
+\ustcsetup{
+  keywords = {
+    肥皂泡渲染，HarmonyOS，屏幕空间折射，薄膜干涉，虹彩，泡泡形变仿真，OpenGL ES
+  },
+  keywords* = {
+    soap bubble rendering, HarmonyOS, screen-space refraction,
+    thin-film interference, iridescence, Bubble Simulation, OpenGL ES
+  },
+}
+
+\begin{abstract}
+  本项目面向【CCF CAD/CG 2026】高质量实时渲染技术挑战赛赛题二“基于鸿蒙的透明物体实时色散渲染系统”，实现了一个运行于 HarmonyOS 设备上的透明泡泡实时渲染与交互系统。系统采用 HarmonyOS ArkTS + XComponent + NAPI + C++ OpenGL ES 3.0 的整体架构，以屏幕空间折射为核心，通过多阶段 FBO 合成近似肥皂泡的双界面折射；在材质上实现了 Kim2012 的实时薄膜干涉计算模式以及 Belcour Airy 风格的多波长薄膜反射模式；在动态与交互上实现了基于噪声和排液趋势的膜厚变化、触摸驱动的局部扰动与波纹、主泡泡的 DBSTT/vortex sheet 表面形变，以及多展示泡泡的漂移组织与参数面板控制。本文按照渲染管线、光学模型、交互实现与动态模拟的顺序介绍最终初赛提交版本的系统设计、关键实现与局限。 
+\end{abstract}
+
+\begin{abstract*}
+  This project targets Track 2, “Real-Time Dispersion Rendering of Transparent
+  Objects on HarmonyOS,” and implements a real-time transparent bubble
+  rendering and interaction system on HarmonyOS devices. The final system is
+  built with HarmonyOS ArkTS, XComponent, NAPI, and C++ OpenGL ES 3.0.
+  Multi-stage framebuffer composition is used to approximate two-interface
+  refraction, the renderer supports three iridescence modes named Kim2012 and Belcour Airy, and the interactive demo includes
+  procedural film-thickness variation, touch-driven local disturbance,
+  DBSTT/vortex-sheet-inspired deformation for the main bubble, and multiple
+  drifting display bubbles with a real-time parameter panel. This report
+  directly presents the final HarmonyOS submission, including its rendering
+  pipeline, optical models, interaction design, simulation method, and current
+  limitations.
+\end{abstract*}

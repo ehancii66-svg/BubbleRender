@@ -1,0 +1,66 @@
+% !TeX encoding = UTF-8
+% !TeX program = xelatex
+% !TeX spellcheck = en_US
+
+\documentclass[degree=master]{ustcthesis}
+\usepackage{hyperref}
+\usepackage{float} % 必须加这个，因为你的图片排版用了 [H] 参数
+
+\newcommand{\projectname}{HarmonyOS Transparent Bubble Rendering - Thin Film + DBSTT}
+\newcommand{\codepath}[1]{\texttt{#1}}
+\newcommand{\reportfigure}[4]{%
+  \begin{figure}[H]
+    \centering
+    \IfFileExists{figures/#1}{%
+      \includegraphics[width=#2\linewidth]{figures/#1}%
+    }{%
+      \fbox{%
+        \begin{minipage}[c][#3][c]{0.88\linewidth}
+          \centering
+          \texttt{\detokenize{#1}}\\[0.8em]
+          截图占位：#4
+        \end{minipage}
+      }%
+    }
+    \caption{#4}
+  \end{figure}
+}
+% degree      = doctor | master | bachelor
+% degree-type = academic | professional
+% language    = chinese | english
+% fontset     = windows | mac | ubuntu | fandol
+
+% 加载宏包、全部的配置
+\input{ustcsetup.tex}
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true
+}
+
+
+\begin{document}
+
+\maketitle
+
+
+\input{chapters/abstract.tex}
+
+\tableofcontents
+
+
+\mainmatter
+\input{chapters/chapter1.tex}
+\input{chapters/chapter2.tex}
+\input{chapters/chapter3.tex}
+\input{chapters/chapter4.tex}
+\input{chapters/chapter5.tex}
+
+
+\bibliography{bib/soapbubble}  % 参考文献使用 BibTeX 编译
+% \printbibliography       % 参考文献使用 BibLaTeX 编译
+
+
+
+\end{document}
