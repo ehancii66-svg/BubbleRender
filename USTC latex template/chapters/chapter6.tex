@@ -42,15 +42,34 @@
   \item 可执行HAP程序已整理入提交目录。
 \end{itemize}
 
+\subsection{移动端交互界面}
+
+\begin{center}
+  \centering
+  \begin{minipage}[t]{0.46\linewidth}
+    \centering
+    \includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{figures/UI界面.jpg}\\[0.3em]
+    \small 场景控制菜单
+  \end{minipage}
+  \hfill
+  \begin{minipage}[t]{0.46\linewidth}
+    \centering
+    \includegraphics[width=\linewidth,height=0.28\textheight,keepaspectratio]{figures/参数调节.jpg}\\[0.3em]
+    \small 参数调节面板
+  \end{minipage}
+  \captionof{figure}{HarmonyOS端的场景控制与参数调节界面}
+  \label{fig:mobile_ui}
+\end{center}
+
 \section{效果展示}
 
 \subsection{多泡泡接触场景}
 
-\reportfigure{placeholder_multi_bubble_contact.png}{0.72}{0.3\textheight}{多泡泡接触场景：三个真实模拟泡泡形成接触网络，右侧为融合结果，左侧为独立泡泡}
-
-\subsection{共享膜与接触圆}
-
-\reportfigure{placeholder_contact_circle.png}{0.55}{0.26\textheight}{接触圆与共享膜：泡泡间形成圆形共享膜，球壳在接触平面处被裁剪}
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.72\linewidth,height=0.23\textheight,keepaspectratio]{figures/6.1.jpg}
+  \caption{多泡泡接触场景：三个真实模拟泡泡形成接触网络，右侧为融合结果，左侧为独立泡泡}
+\end{figure}
 
 \subsection{三种接触结果对比}
 
@@ -58,37 +77,24 @@
   \centering
   \begin{minipage}[t]{0.30\linewidth}
     \centering
-    \fbox{\begin{minipage}[c][0.22\textheight][c]{0.9\linewidth}
-      \centering
-      \small 分离
-    \end{minipage}}\\[0.3em]
+    \includegraphics[width=\linewidth,height=0.22\textheight,keepaspectratio]{figures/6.3a.jpg}\\[0.3em]
     \small (a) 分离
   \end{minipage}
   \hfill
   \begin{minipage}[t]{0.30\linewidth}
     \centering
-    \fbox{\begin{minipage}[c][0.22\textheight][c]{0.9\linewidth}
-      \centering
-      \small 稳定双泡
-    \end{minipage}}\\[0.3em]
+    \includegraphics[width=\linewidth,height=0.22\textheight,keepaspectratio]{figures/6.3b.jpg}\\[0.3em]
     \small (b) 稳定双泡
   \end{minipage}
   \hfill
   \begin{minipage}[t]{0.30\linewidth}
     \centering
-    \fbox{\begin{minipage}[c][0.22\textheight][c]{0.9\linewidth}
-      \centering
-      \small 融合
-    \end{minipage}}\\[0.3em]
+    \includegraphics[width=\linewidth,height=0.22\textheight,keepaspectratio]{figures/6.3c.jpg}\\[0.3em]
     \small (c) 融合
   \end{minipage}
-  \caption{三种接触结果对比示意图（请替换为实际截图）}
+  \caption{三种接触结果对比}
   \label{fig:three_outcomes}
 \end{figure}
-
-\subsection{弯曲共享膜}
-
-\reportfigure{placeholder_curved_film_comparison.png}{0.65}{0.24\textheight}{不同尺寸比下的弯曲共享膜：左为等尺寸（平面膜），中为大泡-小泡（膜向大泡凸出），右为极端尺寸比}
 
 \section{性能分析}
 

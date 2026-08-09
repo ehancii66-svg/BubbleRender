@@ -12,6 +12,10 @@ report.zip
 demo/
 demo.raw/
 
+# Local delivery package
+/delivery/
+/delivery.zip
+
 # HarmonyOS / DevEco generated files
 refraction/.hvigor/
 refraction/.idea/

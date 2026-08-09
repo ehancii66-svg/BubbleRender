@@ -171,14 +171,6 @@ d_{\mathrm{target}} = \sqrt{r_A^2 - r_c^2} + \sqrt{r_B^2 - r_c^2}.
 
 然后求质量加权的共享速度，让两侧接触帽局部趋向该速度。这并非将两个泡泡整体锁定，而是让共享膜附近的局部表面一起运动。每条pair独立计算自己的帽区权重。
 
-\section{共享膜渲染}
-
-每条candidate或bonded contact绘制一张共享膜圆盘。共享膜与球壳使用相同的\codepath{contactRadius}、\codepath{filteredPlaneCenter}和\codepath{filteredNormal}，因此球壳裁剪边界和共享膜边界由同一套接触状态驱动。
-
-共享膜采用较低的alpha、折射强度和环境反射强度，以减少多个透明mesh叠加产生的黑带效应。
-
-\reportfigure{placeholder_shared_film.png}{0.48}{0.26\textheight}{接触泡泡之间的共享膜渲染}
-
 \section{弯曲共享膜与Young-Laplace压力}
 
 等尺寸泡泡之间的共享膜近似为平面，但不同尺寸泡泡之间存在内部压力差。根据Young-Laplace关系，膜曲率与两侧压力差成正比：
@@ -203,7 +195,7 @@ z(\rho) = \mathrm{sign}(\kappa) \cdot
 
 其中$R = 1/|\kappa|$，$\rho$为到接触圆中心的径向距离。当$\rho = r_c$时$z=0$，弯曲膜边界始终位于原接触平面，不因增加曲率产生位置缝隙。
 
-\reportfigure{placeholder_curved_film.png}{0.48}{0.26\textheight}{不同尺寸泡泡间的弯曲共享膜：膜向大泡一侧凸出}
+\reportfigure{4.2.jpg}{0.48}{0.26\textheight}{不同尺寸泡泡间的弯曲共享膜：膜向大泡一侧凸出}
 
 \section{接触结果选择}
 
@@ -244,7 +236,7 @@ z(\rho) = \mathrm{sign}(\kappa) \cdot
   \item 接触圆有轻微周期波动，使双泡不显完全静止。
 \end{itemize}
 
-\reportfigure{placeholder_double_bubble.png}{0.48}{0.26\textheight}{稳定8字双泡：等尺寸泡泡间的平面共享膜}
+\reportfigure{4.3.jpg}{0.48}{0.26\textheight}{稳定8字双泡：等尺寸泡泡间的平面共享膜}
 
 \subsection{融合}
 
@@ -269,7 +261,7 @@ r_{\mathrm{merged}}^3 = r_A^3 + r_B^3.
 
 因此尺寸差较大时，最终中心更靠近大泡泡，小泡泡视觉上向大泡泡一侧被吸收。融合完成后移除被吸收泡泡的接触关系，幸存泡泡继承体积加权后的合速度。
 
-\reportfigure{placeholder_fusion_sequence.png}{0.72}{0.28\textheight}{融合过程：小泡泡逐渐被大泡泡吸收}
+\reportfigure{4.4.jpg}{0.72}{0.28\textheight}{融合过程：小泡泡逐渐被大泡泡吸收}
 
 \section{风场系统}
 
